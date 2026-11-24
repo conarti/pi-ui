@@ -10,8 +10,9 @@ export type BuiltInDefinition = ToolDefinition<any, any, any>;
 
 export const DISPLAY_MODES = ["normal", "silent"] as const;
 export type DisplayMode = (typeof DISPLAY_MODES)[number];
-/** How tool rows are drawn: compactly, the way Claude Code or Codex draws them, or by Pi itself. */
-export const DISPLAY_STYLES = ["compact", "claude", "codex", "off"] as const;
+export const TOOL_DENSITIES = ["detailed", "diff-focus", "compact"] as const;
+export type ToolDensity = (typeof TOOL_DENSITIES)[number];
+export const DISPLAY_STYLES = ["grok", "detailed", "diff-focus", "compact", "claude", "codex", "off"] as const;
 export type DisplayStyle = (typeof DISPLAY_STYLES)[number];
 
 export interface CustomToolsConfig {
@@ -24,6 +25,7 @@ export interface CustomToolsConfig {
 export interface CompactToolsConfig {
 	mode: DisplayMode;
 	style: DisplayStyle;
+	density: ToolDensity;
 	tools: CompactToolName[];
 	/** Built-ins always have an entry; custom tools may, and otherwise use custom_tools.auto_compact. */
 	auto_compact: Record<CompactToolName, boolean> & { [tool: string]: boolean | undefined };
@@ -66,6 +68,13 @@ export interface RowState {
 		changes?: { added: number; removed: number };
 		/** Whether the row draws opened at a width: Codex opens only a call whose preview leaves something out. */
 		opens?: (width: number) => boolean;
+	};
+	grok?: {
+		exitCode?: number;
+		changes?: { added: number; removed: number };
+		lineSummary?: string;
+		nestedSummary?: string;
+		failureReason?: string;
 	};
 }
 

@@ -4,11 +4,14 @@ import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
 	DISPLAY_MODES,
 	DISPLAY_STYLES,
+	SUPPORTED_TOOLS,
 	SUPPORTED_TOOL_SET,
+	TOOL_DENSITIES,
 	type CompactToolName,
 	type CompactToolsConfig,
 	type DisplayMode,
 	type DisplayStyle,
+	type ToolDensity,
 } from "./types.ts";
 
 const CONFIG_FILE = "compact-tools.json";
@@ -16,17 +19,15 @@ type JsonObject = Record<string, unknown>;
 
 export const DEFAULT_CONFIG: CompactToolsConfig = {
 	mode: "normal",
-	style: "compact",
-	thinking: false,
-	working: false,
-	tools: ["read", "write", "edit", "bash"],
-	previewLines: 10,
+	style: "grok",
+	density: "detailed",
+	tools: [...SUPPORTED_TOOLS],
 	auto_compact: {
 		read: true,
-		write: true,
+		write: false,
 		edit: false,
-		bash: true,
-		powershell: true,
+		bash: false,
+		powershell: false,
 		grep: true,
 		find: true,
 		ls: true,
@@ -36,6 +37,9 @@ export const DEFAULT_CONFIG: CompactToolsConfig = {
 		auto_compact: true,
 		exclude: [],
 	},
+	previewLines: 10,
+	thinking: false,
+	working: false,
 };
 
 function isObject(value: unknown): value is JsonObject {
@@ -134,7 +138,24 @@ export function mergeConfig(base: CompactToolsConfig, value: unknown, path: stri
 		return base;
 	}
 	const mode = value.mode === undefined ? base.mode : (parseChoice<DisplayMode>(value.mode, DISPLAY_MODES, "mode", path) ?? base.mode);
-	const style = value.style === undefined ? base.style : (parseChoice<DisplayStyle>(value.style, DISPLAY_STYLES, "style", path) ?? base.style);
+	const rawStyle = value.style === undefined ? undefined : parseChoice<DisplayStyle>(value.style, DISPLAY_STYLES, "style", path);
+	const rawDensity = value.density === undefined ? undefined : parseChoice<ToolDensity>(value.density, TOOL_DENSITIES, "density", path);
+	let style: DisplayStyle = base.style;
+	let density: ToolDensity = base.density;
+	if (rawStyle !== undefined) {
+		if (rawStyle === "detailed" || rawStyle === "diff-focus" || rawStyle === "compact") {
+			style = "grok";
+			density = rawStyle;
+		} else {
+			style = rawStyle;
+		}
+	}
+	if (rawDensity !== undefined) {
+		density = rawDensity;
+		if (rawStyle === undefined && style !== "claude" && style !== "codex") {
+			style = "grok";
+		}
+	}
 	const tools = value.tools === undefined ? base.tools : (parseTools(value.tools, path) ?? base.tools);
 	const auto_compact = parseAutoCompact(base.auto_compact, value.auto_compact, path);
 	const custom_tools = parseCustomTools(base.custom_tools, value.custom_tools, path);
@@ -145,7 +166,7 @@ export function mergeConfig(base: CompactToolsConfig, value: unknown, path: stri
 	}
 	const thinking = parseBoolean(value.thinking, base.thinking, "thinking", path);
 	const working = parseBoolean(value.working, base.working, "working", path);
-	return { mode, style, tools, auto_compact, custom_tools, previewLines, thinking, working };
+	return { mode, style, density, tools, auto_compact, custom_tools, previewLines, thinking, working };
 }
 
 function readJson(path: string): unknown {

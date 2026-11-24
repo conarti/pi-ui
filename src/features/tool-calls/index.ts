@@ -10,10 +10,14 @@ import type {
 import type { Component } from "@earendil-works/pi-tui";
 import { acquireHostRuntime, getActiveHostRuntime, type HostRuntimeHandle } from "../../shared/host-runtime.ts";
 import { classifyCallStatus, formatDurationMs, normalizeLineEndings, type RowStatus } from "./core.ts";
-import { loadConfig } from "./config.ts";
 import { paletteOf } from "./color.ts";
 import { hasAuthorRenderers, loadNativeTimerRenderers, syncNativeToolTimer } from "./rendering.ts";
-import { registerCompactToolsCommand } from "./command.ts";
+import {
+	loadEffectiveConfig,
+	registerCompactToolsCommand,
+	registerDensityCommand,
+	setSessionStyleOverride,
+} from "./command.ts";
 import { clearRowResolver, installToolRowPatch, setRowResolver, type RowRenderers, type ToolRow } from "./custom.ts";
 import {
 	formatResultLineSummary,
@@ -52,6 +56,7 @@ import { CLAUDE_DIFF_CONTEXT_LINES, CLAUDE_INDENT, CLAUDE_OUTPUT_ROWS, CLAUDE_RE
 import { CODEX_BULLET, CODEX_INDENT } from "./codex.ts";
 import { NestedCallSummaries } from "./nested.ts";
 import { renderCodexCall, renderCodexResult } from "./codex-rows.ts";
+import { renderGrokCall, renderGrokResult } from "./grok.ts";
 import { ToolGroupController } from "./grouping.ts";
 import { chromePainter, completionPainter, paintIndicator } from "./palette.ts";
 import { ProgressController } from "./progress.ts";
@@ -64,6 +69,7 @@ import {
 	SUPPORTED_TOOL_SET,
 	toolExpandKey,
 	type CompactToolName,
+	type CompactToolsConfig,
 	type RenderContext,
 	type RowState,
 	type ToolArgs,
@@ -99,6 +105,10 @@ type AuthorResultRenderer = (expanded: boolean) => Component | undefined;
 
 function rowKind(name: string): RowKind {
 	return name === "bash" || name === "powershell" ? "shell" : SUPPORTED_TOOL_SET.has(name) ? "file" : "custom";
+}
+
+function isGrok(): boolean {
+	return runtime.config.style === "grok";
 }
 
 function isClaude(): boolean {
@@ -222,6 +232,18 @@ function renderRowCall(name: string, args: ToolArgs, theme: Theme, ctx: RenderCo
 function renderRowCallContent(name: string, args: ToolArgs, theme: Theme, ctx: RenderContext): Component {
 	const state = runtime.syncRow(ctx);
 	runtime.syncExpansion(state, ctx.expanded, name);
+	if (isGrok()) {
+		return renderGrokCall({
+			name,
+			args,
+			theme,
+			state,
+			getStatus: () => callStatus(ctx, state),
+			syncRunning: (running) => {
+				runtime.syncIndicator(ctx.toolCallId, running, () => ctx.invalidate());
+			},
+		});
+	}
 	const kind = rowKind(name);
 	const indicator = liveIndicator(theme, ctx, state, isCodex() ? CODEX_BULLET : undefined);
 	// Painted once now as well, so a row that starts running starts the animation clock.
@@ -439,7 +461,25 @@ function renderRowResult(
 		state.resultLineSummaryComputed = true;
 	}
 	let component: Component;
-	if (isCodex()) {
+	if (isGrok()) {
+		component = renderGrokResult({
+			name,
+			args: ctx.args,
+			result,
+			output,
+			theme,
+			state,
+			isError: ctx.isError,
+			isPartial: options.isPartial,
+			getDensity: () => runtime.config.density,
+			canRun: () => runtime.canRun(ctx.toolCallId),
+			syncRunning: (running) => {
+				runtime.syncIndicator(ctx.toolCallId, running, () => ctx.invalidate());
+			},
+			author,
+			nestedSummary,
+		});
+	} else if (isCodex()) {
 		component = renderCodexResult({
 			name, kind: author ? "custom" : kind, args: ctx.args, result, output, theme, state, isError: ctx.isError,
 			isPartial: options.isPartial, expanded: state.expanded === true, toolCallId: ctx.toolCallId, author, expandKey: toolExpandKey(ctx),
@@ -495,6 +535,12 @@ function renderRowResult(
  * author's result renderer still draws the expanded body; the row chrome, status,
  * and collapse behavior match the built-ins.
  */
+function asToolArgs(value: unknown): ToolArgs {
+	return typeof value === "object" && value !== null && !Array.isArray(value)
+		? (value as ToolArgs)
+		: {};
+}
+
 let authorStates = new WeakMap<object, { state: RowState; component?: Component }>();
 function createCustomRenderers(name: string, author: ToolDefinition<any, any, any> | undefined): RowRenderers {
 	// Pi hands both renderers the row's own state object, which belongs to the tool's
@@ -504,9 +550,9 @@ function createCustomRenderers(name: string, author: ToolDefinition<any, any, an
 		if (!value) authorStates.set(ctx.state, value = { state: {} });
 		return value;
 	};
-	const own = (ctx: RenderContext<any>): RenderContext => ({ ...ctx, args: ctx.args ?? {}, state: slot(ctx).state });
+	const own = (ctx: RenderContext<any>): RenderContext => ({ ...ctx, args: asToolArgs(ctx.args), state: slot(ctx).state });
 	return {
-		renderCall: (args, theme, ctx) => renderRowCall(name, (args ?? {}) as ToolArgs, theme, own(ctx)),
+		renderCall: (args, theme, ctx) => renderRowCall(name, asToolArgs(args), theme, own(ctx)),
 		renderResult: (result, options, theme, ctx) => {
 			const authorRenderer = author?.renderResult;
 			const renderAuthorResult = authorRenderer
@@ -538,7 +584,7 @@ const compactRendererDefinitions = new WeakSet<object>();
 function builtinContext(ctx: RenderContext): RenderContext {
 	let state = builtinStates.get(ctx.state);
 	if (!state) builtinStates.set(ctx.state, state = {});
-	return { ...ctx, state };
+	return { ...ctx, args: asToolArgs(ctx.args), state };
 }
 
 /** UI-only routing: never register, activate, or replace model-facing tools. */
@@ -548,7 +594,7 @@ function resolveCustomRow(row: ToolRow): RowRenderers | undefined {
 	if (SUPPORTED_TOOL_SET.has(row.toolName) && (!row.toolDefinition || compactRendererDefinitions.has(row.toolDefinition) || (row.toolDefinition.renderResult && compactRendererDefinitions.has(row.toolDefinition.renderResult)) || !hasAuthorRenderers(row.toolName, row.toolDefinition))) {
 		if (!runtime.config.tools.includes(row.toolName as CompactToolName)) return undefined;
 		const renderers: RowRenderers = {
-			renderCall: (args, theme, ctx) => renderRowCall(row.toolName, (args ?? {}) as ToolArgs, theme, builtinContext(ctx as RenderContext)),
+			renderCall: (args, theme, ctx) => renderRowCall(row.toolName, asToolArgs(args), theme, builtinContext(ctx as RenderContext)),
 			renderResult: (result, options, theme, ctx) => renderRowResult(row.toolName, result, options, theme, builtinContext(ctx as RenderContext)),
 		};
 		compactRendererDefinitions.add(renderers);
@@ -613,7 +659,7 @@ function invalidateRowDecisions(failures: UIFailure[]): void {
 
 function configure(_pi: ExtensionAPI, cwd?: string, projectTrusted = false, failures: UIFailure[] = []): void {
 	const resolvedCwd = cwd ?? process.cwd();
-	const config = loadConfig(resolvedCwd, projectTrusted);
+	const config = loadEffectiveConfig(resolvedCwd, projectTrusted);
 	const signature = JSON.stringify([resolvedCwd, config]);
 	if (signature === registeredConfiguration) return;
 	runtime.configure(config);
@@ -628,10 +674,39 @@ function configure(_pi: ExtensionAPI, cwd?: string, projectTrusted = false, fail
  * included. Thinking and working overrides can also change live; other configuration
  * changes require a reload.
  */
+function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
+	return a.length === b.length && a.every((item, idx) => item === b[idx]);
+}
+
+function sameAutoCompact(
+	a: CompactToolsConfig["auto_compact"],
+	b: CompactToolsConfig["auto_compact"],
+): boolean {
+	const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+	for (const key of keys) {
+		if (a[key] !== b[key]) return false;
+	}
+	return true;
+}
+
+function canSwitchLive(next: CompactToolsConfig, current: CompactToolsConfig): boolean {
+	return (
+		next.mode === current.mode &&
+		next.previewLines === current.previewLines &&
+		sameStringArray(next.tools, current.tools) &&
+		sameAutoCompact(next.auto_compact, current.auto_compact) &&
+		next.custom_tools.enabled === current.custom_tools.enabled &&
+		next.custom_tools.auto_compact === current.custom_tools.auto_compact &&
+		sameStringArray(next.custom_tools.exclude, current.custom_tools.exclude)
+	);
+}
+
 function applyStyle(cwd: string, trusted: boolean, failures: UIFailure[]): boolean {
-	const config = loadConfig(cwd, trusted);
+	const config = loadEffectiveConfig(cwd, trusted);
 	const current = runtime.config;
-	if (JSON.stringify({ ...config, style: current.style, thinking: current.thinking, working: current.working }) !== JSON.stringify(current)) return false;
+	if (!canSwitchLive(config, current)) {
+		return false;
+	}
 	runtime.configure(config);
 	registeredConfiguration = JSON.stringify([cwd, config]);
 	invalidateRowDecisions(failures);
@@ -719,7 +794,7 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 		attemptUI(failures, "animation cleanup", () => runtime.reset(options.clearTimings === true));
 		attemptUI(failures, "renderer cleanup", () => transcript.detach());
 	};
-	registerCompactToolsCommand(pi, () => runtime.config, (cwd, trusted, ctx) => {
+	const handleLiveSwitch = (cwd: string, trusted: boolean, ctx: ExtensionContext): boolean => {
 		const failures: UIFailure[] = [];
 		const wasOff = runtime.config.style === "off";
 		const wasThinking = runtime.config.thinking;
@@ -744,7 +819,9 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 		}
 		reportFailures(uiContext, failures);
 		return true;
-	});
+	};
+	registerDensityCommand(pi, () => runtime.config, handleLiveSwitch);
+	registerCompactToolsCommand(pi, () => runtime.config, handleLiveSwitch);
 	// Configure UI routing before Pi rebuilds transcript rows. Tool declarations
 	// and the active loadout must remain exactly as the host selected them.
 	const cwd = process.cwd();
@@ -756,6 +833,7 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 		detachUI({ restoreNative: true }, failures);
 		sessionContext = ctx;
 		if (event.reason !== "reload") {
+			setSessionStyleOverride(undefined);
 			runtime.clearTimings();
 			nestedSummaries.clear();
 		}
@@ -820,7 +898,10 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 		detachUI({ clearTimings: event.reason !== "reload" }, failures);
 		reportFailures(sessionContext, failures);
 		sessionContext = undefined;
-		if (event.reason !== "reload") nestedSummaries.clear();
+		if (event.reason !== "reload") {
+			setSessionStyleOverride(undefined);
+			nestedSummaries.clear();
+		}
 		// A reload that keeps the extension sets it again before Pi rebuilds the transcript.
 		if (legacyResolver) clearRowResolver(legacyResolver);
 		refreshTranscriptRows = undefined;

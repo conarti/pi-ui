@@ -1,3 +1,4 @@
+import { BREATHING_TICK_MS } from "../../shared/animation-scheduler.ts";
 import { DEFAULT_CONFIG } from "./config.ts";
 import { onTick } from "./clock.ts";
 import { isSilent } from "./silent.ts";
@@ -10,7 +11,7 @@ import {
 } from "./types.ts";
 
 const MAX_TRACKED_ROWS = 2_000;
-const INDICATOR_INTERVAL_MS = 45;
+const INDICATOR_INTERVAL_MS = BREATHING_TICK_MS;
 /**
  * How long a running row may go undrawn before it stops asking for frames. Pi draws
  * every row it shows on every frame, so only a row that left the transcript, or
