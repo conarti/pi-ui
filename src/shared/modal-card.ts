@@ -24,7 +24,6 @@ export { getThemeSurfacePalette, type PillVariant, type RgbTuple, type ThemeSurf
 
 type OverlayInspectableTui = TUI & {
 	getTopmostVisibleOverlay?: () => unknown;
-	readonly hasOverlayEntries?: boolean;
 };
 
 const BLOCKING_DIALOG_COUNT_SYMBOL = Symbol.for("conarti.pi-ui.blocking-dialog-count.v1");
@@ -62,7 +61,7 @@ export function hasBlockingModalOverlay(tui: TUI): boolean {
 	if (typeof inspectable.getTopmostVisibleOverlay === "function") {
 		return Boolean(inspectable.getTopmostVisibleOverlay());
 	}
-	return Boolean(inspectable.hasOverlayEntries);
+	return false;
 }
 
 const NOOP_COMPONENT: Component = {
@@ -185,7 +184,7 @@ export function createSingleLineInput(initialValue = ""): SingleLineInput {
 				}
 				shown = `…${tail}`;
 			}
-			const styledText = fgRgb(palette.inputText[0], palette.inputText[1], palette.inputText[2], shown);
+			const styledText = fgRgb(palette.inputText, shown);
 			return `${styledText}${marker}${cursor}`;
 		},
 	};
@@ -251,12 +250,12 @@ export function createModalCard(): ModalCardController {
 			const safeWidth = Math.max(20, width);
 			const innerWidth = Math.max(1, safeWidth - 4);
 			const borderRgb = resolveBorderRgb(palette, spec);
-			const bColor = (s: string) => fgRgb(borderRgb[0], borderRgb[1], borderRgb[2], s);
+			const bColor = (s: string) => fgRgb(borderRgb, s);
 			const dimBorder = (s: string) => theme.fg("borderMuted", s);
 
 			const closable = spec.closable !== false && typeof spec.onClose === "function";
 			const closeGlyph = hoveredId === "top-close"
-				? fgRgb(palette.danger[0], palette.danger[1], palette.danger[2], "✕")
+				? fgRgb(palette.danger, "✕")
 				: theme.fg("muted", "✕");
 
 			// Build top border while guaranteeing the top-right close glyph stays visible and right-aligned

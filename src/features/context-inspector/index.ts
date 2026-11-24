@@ -128,17 +128,17 @@ export async function showContextInspector(pi: ExtensionAPI, ctx: ExtensionConte
 					const usedCells = Math.min(barWidth, sysCells + chatCells + toolCells);
 					const freeCells = Math.max(0, barWidth - usedCells - reserveCells);
 
-					const segSys = fgRgb(palette.accent[0], palette.accent[1], palette.accent[2], "█".repeat(Math.min(barWidth, sysCells)));
+					const segSys = fgRgb(palette.accent, "█".repeat(Math.min(barWidth, sysCells)));
 					const remAfterSys = Math.max(0, barWidth - sysCells);
-					const segChat = fgRgb(palette.info[0], palette.info[1], palette.info[2], "█".repeat(Math.min(remAfterSys, chatCells)));
+					const segChat = fgRgb(palette.info, "█".repeat(Math.min(remAfterSys, chatCells)));
 					const remAfterChat = Math.max(0, remAfterSys - chatCells);
-					const segTool = fgRgb(palette.accentBright[0], palette.accentBright[1], palette.accentBright[2], "█".repeat(Math.min(remAfterChat, toolCells)));
-					const segFree = fgRgb(palette.freeBar[0], palette.freeBar[1], palette.freeBar[2], "░".repeat(freeCells));
-					const segReserve = fgRgb(palette.warning[0], palette.warning[1], palette.warning[2], "▒".repeat(reserveCells));
+					const segTool = fgRgb(palette.accentBright, "█".repeat(Math.min(remAfterChat, toolCells)));
+					const segFree = fgRgb(palette.freeBar, "░".repeat(freeCells));
+					const segReserve = fgRgb(palette.warning, "▒".repeat(reserveCells));
 
 					const pctColor =
 						data.percent >= 85 ? palette.danger : data.percent >= 65 ? palette.warning : palette.accent;
-					const pctBadge = fgRgb(pctColor[0], pctColor[1], pctColor[2], theme.bold(`${data.percent.toFixed(1)}%`));
+					const pctBadge = fgRgb(pctColor, theme.bold(`${data.percent.toFixed(1)}%`));
 					const cacheRatio =
 						data.inputTotal + data.cacheReadTotal > 0
 							? Math.round((data.cacheReadTotal / (data.inputTotal + data.cacheReadTotal)) * 100)
@@ -149,16 +149,16 @@ export async function showContextInspector(pi: ExtensionAPI, ctx: ExtensionConte
 						"",
 						` ${segSys}${segChat}${segTool}${segFree}${segReserve}`,
 						"",
-						` ${fgRgb(palette.accent[0], palette.accent[1], palette.accent[2], "●")} System & Skills   ${theme.bold(formatCompactTokens(data.systemTokensEst).padStart(6))}   ${theme.fg("dim", "системный промпт, правила и скиллы")}`,
-						` ${fgRgb(palette.info[0], palette.info[1], palette.info[2], "●")} Диалог            ${theme.bold(formatCompactTokens(data.chatTokensEst).padStart(6))}   ${theme.fg("dim", `сообщения и рассуждения (${data.turnCount} реплик)`)}`,
-						` ${fgRgb(palette.accentBright[0], palette.accentBright[1], palette.accentBright[2], "●")} Инструменты       ${theme.bold(formatCompactTokens(data.toolTokensEst).padStart(6))}   ${theme.fg("dim", "вызовы и результаты тулзов")}`,
-						` ${fgRgb(palette.warning[0], palette.warning[1], palette.warning[2], "▒")} Буфер компакта    ${theme.bold(formatCompactTokens(data.reserveTokens).padStart(6))}   ${theme.fg("dim", "резерв до авто-сжатия")}`,
+						` ${fgRgb(palette.accent, "●")} System & Skills   ${theme.bold(formatCompactTokens(data.systemTokensEst).padStart(6))}   ${theme.fg("dim", "системный промпт, правила и скиллы")}`,
+						` ${fgRgb(palette.info, "●")} Диалог            ${theme.bold(formatCompactTokens(data.chatTokensEst).padStart(6))}   ${theme.fg("dim", `сообщения и рассуждения (${data.turnCount} реплик)`)}`,
+						` ${fgRgb(palette.accentBright, "●")} Инструменты       ${theme.bold(formatCompactTokens(data.toolTokensEst).padStart(6))}   ${theme.fg("dim", "вызовы и результаты тулзов")}`,
+						` ${fgRgb(palette.warning, "▒")} Буфер компакта    ${theme.bold(formatCompactTokens(data.reserveTokens).padStart(6))}   ${theme.fg("dim", "резерв до авто-сжатия")}`,
 						"",
 						` ${theme.fg("muted", "Сессия:")} in ${formatCompactTokens(data.inputTotal)} · cache ${formatCompactTokens(data.cacheReadTotal)} (${cacheRatio}%) · out ${formatCompactTokens(data.outputTotal)}${data.costTotal > 0 ? ` · $${data.costTotal.toFixed(3)}` : ""}`,
 					];
 
 					return card.render(width, theme, {
-						title: fgRgb(palette.accentBright[0], palette.accentBright[1], palette.accentBright[2], theme.bold("◐ Context Inspector")),
+						title: fgRgb(palette.accentBright, theme.bold("◐ Context Inspector")),
 						onClose: () => done("close"),
 						bodyLines: body,
 						borderVariant: "primary",

@@ -698,19 +698,6 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 			catch (error) { console.warn(message, "UI notification also failed:", error); }
 		}
 	};
-	const bridgeGroupsContext = (ctx: ExtensionContext, host: HostRuntimeHandle | undefined): ExtensionContext => {
-		if (!host) return ctx;
-		const bridgedUi = Object.create(ctx.ui, {
-			setWidget: {
-				value: (_key: string, factory: unknown) => {
-					if (typeof factory === "function") {
-						factory(host.tui, ctx.ui.theme);
-					}
-				},
-			},
-		});
-		return Object.create(ctx, { ui: { value: bridgedUi } });
-	};
 	const enableUI = (ctx: ExtensionContext, reload: boolean, resume: boolean, failures: UIFailure[], host?: HostRuntimeHandle) => {
 		const resolvedHost = host ?? getActiveHostRuntime();
 		// Observe relayout keys before the thinking controller consumes them.
@@ -718,7 +705,7 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 		if (runtime.config.working) attemptUI(failures, "progress bind", () => progress.bind(ctx, resume));
 		if (runtime.config.thinking) attemptUI(failures, "thinking bind", () => thinkingCycle.bind(ctx));
 		attemptUI(failures, "silent bind", () => silent.bind(ctx, runtime.config.mode, reload, resume, resolvedHost));
-		attemptUI(failures, "groups bind", () => groups.bind(bridgeGroupsContext(ctx, resolvedHost)));
+		attemptUI(failures, "groups bind", () => groups.bind(ctx, resolvedHost));
 		transcript.bind(ctx, failures, resolvedHost);
 	};
 	// One ownership/cleanup inventory for live off, session replacement and shutdown.

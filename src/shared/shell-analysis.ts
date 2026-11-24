@@ -799,63 +799,115 @@ function normalizeExecutableName(raw: string, dialect: ShellDialect): { name: st
 	return { name: raw, untrustedPath: false };
 }
 
+export interface UnwrapCommandOptions {
+	/** Also strip `sudo` when deriving human-readable summaries (security classification keeps `sudo` intact). */
+	unwrapSudo?: boolean;
+}
+
+export type UnwrappedCommandResult =
+	| { kind: "empty" }
+	| { kind: "builtin-query" }
+	| { kind: "unsupported-wrapper-flag"; wrapper: string; flag: string }
+	| { kind: "command"; words: string[] };
+
+/**
+ * Strips leading environment variable assignments (`FOO=1`) and wrapper commands
+ * (`env`, `command`, `time`, and optionally `sudo`) to expose the underlying command words.
+ */
+export function unwrapCommandWords(
+	words: readonly string[],
+	options?: UnwrapCommandOptions,
+): UnwrappedCommandResult {
+	let current: readonly string[] = words;
+	while (true) {
+		let start = 0;
+		while (start < current.length && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(current[start]!)) {
+			start++;
+		}
+		if (start >= current.length) return { kind: "empty" };
+
+		const slice = current.slice(start);
+		const first = options?.unwrapSudo ? slice[0]!.toLowerCase() : slice[0]!;
+
+		if (first === "env") {
+			let idx = 1;
+			while (idx < slice.length) {
+				const arg = slice[idx]!;
+				if (arg === "-u" || arg === "--unset") {
+					idx += 2;
+					continue;
+				}
+				if (arg === "-i" || arg === "--ignore-environment" || arg === "-0" || arg === "--null"
+					|| arg.startsWith("--unset=") || /^[A-Za-z_][A-Za-z0-9_]*=/u.test(arg)) {
+					idx++;
+					continue;
+				}
+				if (arg === "--") {
+					idx++;
+					break;
+				}
+				break;
+			}
+			if (idx >= slice.length) return { kind: "empty" };
+			current = slice.slice(idx);
+			continue;
+		}
+
+		if (first === "command") {
+			let idx = 1;
+			while (idx < slice.length && slice[idx]!.startsWith("-")) {
+				const arg = slice[idx]!;
+				if (arg === "-v" || arg === "-V") return { kind: "builtin-query" };
+				if (arg === "--") {
+					idx++;
+					break;
+				}
+				if (arg !== "-p") return { kind: "unsupported-wrapper-flag", wrapper: "command", flag: arg };
+				idx++;
+			}
+			if (idx >= slice.length) return { kind: "empty" };
+			current = slice.slice(idx);
+			continue;
+		}
+
+		if (first === "time") {
+			let idx = 1;
+			while (idx < slice.length && (slice[idx] === "-p" || slice[idx] === "--")) idx++;
+			if (idx >= slice.length) return { kind: "empty" };
+			current = slice.slice(idx);
+			continue;
+		}
+
+		if (options?.unwrapSudo && first === "sudo") {
+			let idx = 1;
+			while (idx < slice.length && slice[idx]!.startsWith("-")) {
+				const arg = slice[idx]!;
+				if (arg === "--") {
+					idx++;
+					break;
+				}
+				idx++;
+			}
+			if (idx >= slice.length) return { kind: "empty" };
+			current = slice.slice(idx);
+			continue;
+		}
+
+		return { kind: "command", words: [...slice] };
+	}
+}
+
 function classifySingleCommand(words: readonly string[], dialect: ShellDialect): ShellEffect {
-	// Strip leading environment variable assignments (e.g. `FOO=1 rg pattern`)
-	let start = 0;
-	while (start < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(words[start]!)) {
-		start++;
+	const unwrapped = unwrapCommandWords(words);
+	if (unwrapped.kind === "empty" || unwrapped.kind === "builtin-query") {
+		return { kind: "read-only" };
 	}
-	if (start >= words.length) return { kind: "read-only" };
+	if (unwrapped.kind === "unsupported-wrapper-flag") {
+		return { kind: "mutating", reason: `unsupported ${unwrapped.wrapper} flag: ${unwrapped.flag}` };
+	}
 
-	const slice = words.slice(start);
+	const slice = unwrapped.words;
 	const first = slice[0]!;
-
-	// Unwrap safe wrapper commands (`env`, `command`, `time`)
-	if (first === "env") {
-		let idx = 1;
-		while (idx < slice.length) {
-			const arg = slice[idx]!;
-			if (arg === "-u" || arg === "--unset") {
-				idx += 2;
-				continue;
-			}
-			if (arg === "-i" || arg === "--ignore-environment" || arg === "-0" || arg === "--null"
-				|| arg.startsWith("--unset=") || /^[A-Za-z_][A-Za-z0-9_]*=/u.test(arg)) {
-				idx++;
-				continue;
-			}
-			if (arg === "--") {
-				idx++;
-				break;
-			}
-			break;
-		}
-		if (idx >= slice.length) return { kind: "read-only" };
-		return classifySingleCommand(slice.slice(idx), dialect);
-	}
-
-	if (first === "command") {
-		let idx = 1;
-		while (idx < slice.length && slice[idx]!.startsWith("-")) {
-			const arg = slice[idx]!;
-			if (arg === "-v" || arg === "-V") return { kind: "read-only" };
-			if (arg === "--") {
-				idx++;
-				break;
-			}
-			if (arg !== "-p") return { kind: "mutating", reason: `unsupported command flag: ${arg}` };
-			idx++;
-		}
-		if (idx >= slice.length) return { kind: "read-only" };
-		return classifySingleCommand(slice.slice(idx), dialect);
-	}
-
-	if (first === "time") {
-		let idx = 1;
-		while (idx < slice.length && (slice[idx] === "-p" || slice[idx] === "--")) idx++;
-		if (idx >= slice.length) return { kind: "read-only" };
-		return classifySingleCommand(slice.slice(idx), dialect);
-	}
 
 	const { name, untrustedPath } = normalizeExecutableName(first, dialect);
 	if (untrustedPath) {

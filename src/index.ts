@@ -96,7 +96,7 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 	pi.on("session_tree", resetViewport);
 	pi.on("session_compact", resetViewport);
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		unsubscribeStickyKey?.();
 		unsubscribeStickyKey = undefined;
 		disposeShell?.();
@@ -107,7 +107,12 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 		const entries = ctx.sessionManager.getEntries?.() ?? [];
 		const { restored } = wf.restore(entries, pi.getFlag("plan") === true);
 
-		applyModeTools(pi, wf.mode, { inferMissingOnPlanRestore: restored });
+		applyModeTools(pi, wf.mode, {
+			inferMissingOnPlanRestore: restored || event.reason === "reload",
+		});
+		if (!restored && wf.mode === "plan" && (wf.withheldWriteTools?.length ?? 0) > 0) {
+			wf.persist(pi);
+		}
 		mountSessionHeader(pi, ctx);
 		mountComposer(pi, ctx);
 		updatePlanWidget(pi, ctx);

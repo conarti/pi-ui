@@ -1,6 +1,6 @@
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
-import { analyzeShell, type ShellDialect } from "../../shared/shell-analysis.ts";
+import { analyzeShell, unwrapCommandWords, type ShellDialect } from "../../shared/shell-analysis.ts";
 import { normalizeLineEndings } from "./core.ts";
 import type { ToolArgs } from "./types.ts";
 
@@ -223,15 +223,8 @@ export function summarizeShellCommand(name: string, command: string): string {
 		return name === "powershell" ? "Prepare PowerShell command" : "Prepare shell command";
 	}
 
-	const words = [...primary.words];
-	while (words.length > 0) {
-		if (/^[A-Za-z_][A-Za-z\d_]*=.*/u.test(words[0] ?? "")
-			|| ["command", "env", "sudo", "time"].includes((words[0] ?? "").toLowerCase())) {
-			words.shift();
-			continue;
-		}
-		break;
-	}
+	const unwrapped = unwrapCommandWords(primary.words, { unwrapSudo: true });
+	const words = unwrapped.kind === "command" ? unwrapped.words : [];
 	const executable = (words[0] ?? "").replace(/^.*[\\/]/u, "").replace(/\.(?:cmd|exe|ps1)$/iu, "").toLowerCase();
 	const action = (words[1] ?? "").toLowerCase();
 	const subject = words[2] ?? "";

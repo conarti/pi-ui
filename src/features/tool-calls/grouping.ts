@@ -24,8 +24,9 @@ import {
 	type ExploreAction,
 	type Segment,
 } from "./codex.ts";
+import { getActiveHostRuntime, type HostRuntimeHandle } from "../../shared/host-runtime.ts";
+import { hookMethod } from "../../shared/runtime-hooks.ts";
 import { formatDurationMs, type RowStatus } from "./core.ts";
-import { hookMethod } from "./hook.ts";
 import { getTextResult } from "./invocation.ts";
 import { outputPadLines } from "./layout.ts";
 import { chromePainter, paintIndicator } from "./palette.ts";
@@ -33,8 +34,6 @@ import type { ToolRuntime } from "./runtime.ts";
 import { findChat, isKind, isSilent } from "./silent.ts";
 import { captureViewport } from "./viewport.ts";
 import type { ToolArgs } from "./types.ts";
-
-const WIDGET_KEY = "compact-tools-groups";
 
 /** Claude Code's words for each way of looking around, in the order it lists them. */
 const PHRASES: ReadonlyArray<{ kind: LookKind; running: string; done: string; singular: string; plural: string }> = [
@@ -300,36 +299,31 @@ export class ToolGroupController {
 
 	constructor(private readonly runtime: ToolRuntime) {}
 
-	bind(ctx: ExtensionContext): void {
+	bind(ctx: ExtensionContext, host?: HostRuntimeHandle): void {
 		this.dispose();
 		this.context = ctx;
-		// An invisible widget is the extension API's way to reach Pi's TUI and its chat.
-		ctx.ui.setWidget(WIDGET_KEY, (tui) => {
-			const chat = findChat(tui);
-			if (chat) {
-				hookMethod(chat, "render", "claude.groups", (self, args, original) => {
-					const style = this.runtime.config.style;
-					if (!this.context || isSilent() || (style !== "claude" && style !== "codex")) return original.apply(self, args);
-					const children = self.children as unknown[];
-					this.paint = this.resolvePaint();
-					openExplorations.clear();
-					self.children = groupChildren(children, (rows, members) => this.makeGroup(rows, members, tui), style);
-					try {
-						return original.apply(self, args);
-					} finally {
-						self.children = children;
-						this.paint = undefined;
-					}
-				});
-			}
-			return { render: () => [], invalidate() {} };
-		}, { placement: "belowEditor" });
+		const resolvedHost = host ?? getActiveHostRuntime();
+		const chat = resolvedHost?.chatContainer ?? (resolvedHost ? findChat(resolvedHost.tui) : undefined);
+		if (chat && resolvedHost) {
+			hookMethod(chat, "render", "claude.groups", (self, args, original) => {
+				const style = this.runtime.config.style;
+				if (!this.context || isSilent() || (style !== "claude" && style !== "codex")) return original.apply(self, args);
+				const children = self.children as unknown[];
+				this.paint = this.resolvePaint();
+				openExplorations.clear();
+				self.children = groupChildren(children, (rows, members) => this.makeGroup(rows, members, resolvedHost.tui), style);
+				try {
+					return original.apply(self, args);
+				} finally {
+					self.children = children;
+					this.paint = undefined;
+				}
+			});
+		}
 	}
 
 	dispose(): void {
-		const context = this.context;
 		this.context = undefined;
-		context?.ui.setWidget(WIDGET_KEY, undefined, { placement: "belowEditor" });
 	}
 
 	private makeGroup(rows: ToolRowLike[], members: unknown[], tui: { requestRender(): void }): Component {

@@ -238,4 +238,38 @@ describe("Host Runtime seam", () => {
 		expect(harness.workingMessages.at(-1)).toBeUndefined();
 		expect(vi.getTimerCount()).toBe(0);
 	});
+
+	it("binds ToolGroupController via HostRuntimeHandle with zero belowEditor widgets in claude/codex styles", async () => {
+		const projectDir = createProjectDir({ style: "claude" });
+		harness = createExtensionHarness({ theme: "dark", cwd: projectDir, projectTrusted: true });
+		const setWidgetSpy = vi.spyOn(harness.ctx.ui, "setWidget");
+
+		harness.mount(conartiPiUi);
+		await harness.startSession();
+
+		// Add two exploration read rows to the chat container
+		const makeReadRow = (id: string, path: string) =>
+			Object.assign(Object.create(ToolExecutionComponent.prototype), {
+				toolName: "read",
+				toolCallId: id,
+				args: { path },
+				result: { content: [{ type: "text", text: "line 1" }] },
+				isPartial: false,
+				expanded: false,
+				render: () => [`read ${path}`],
+				invalidate() {},
+			});
+		harness.tui.chatContainer.addChild(makeReadRow("tc-r1", "src/a.ts"));
+		harness.tui.chatContainer.addChild(makeReadRow("tc-r2", "src/b.ts"));
+
+		const rendered = harness.tui.chatContainer.render(100).map((line) => stripTerminalSequences(line)).join("\n");
+		expect(rendered).toContain("Read 2 files");
+
+		// No belowEditor probe widget (including compact-tools-groups) was mounted or disposed
+		const belowEditorCalls = setWidgetSpy.mock.calls.filter(([key, , opts]) => {
+			const placement = (opts as { placement?: string } | undefined)?.placement;
+			return placement === "belowEditor" || key === "compact-tools-groups";
+		});
+		expect(belowEditorCalls).toEqual([]);
+	});
 });
