@@ -15,7 +15,8 @@ import {
 	getThemeSurfacePalette,
 	openModalCard,
 } from "../../shared/modal-card.ts";
-import { getStore, MODE_META } from "../../shared/session-store.ts";
+import { getSessionWorkflow, MODE_META } from "../../shared/session-workflow.ts";
+import { requestRender, runAppAction } from "../../shared/ui-action-bridge.ts";
 import { showContextInspector } from "../context-inspector/index.ts";
 import { getOutlineSettings } from "../outline-rail/index.ts";
 import { setSessionMode } from "../plan-studio/index.ts";
@@ -46,12 +47,12 @@ function fuzzyMatch(query: string, target: string): boolean {
 
 export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
 	if (ctx.mode !== "tui") return;
-	const st = getStore();
+	const st = getSessionWorkflow();
 	const stickyCfg = getStickyConfig();
 	const outlineCfg = getOutlineSettings();
 
 	const runAction = (actionId: string) => {
-		st.runAppAction?.(actionId);
+		runAppAction(actionId);
 	};
 
 	const items: PaletteItem[] = [
@@ -122,7 +123,7 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 			keywords: "sticky header prompt закрепленный промпт",
 			run: () => {
 				stickyCfg.enabled = !stickyCfg.enabled;
-				st.requestRender?.();
+				requestRender();
 				ctx.ui.notify(`Sticky prompt: ${stickyCfg.enabled ? "включён" : "выключен"}`, "info");
 			},
 		},
@@ -135,7 +136,7 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 			keywords: "outline rail timeline навигация справа",
 			run: () => {
 				outlineCfg.enabled = !outlineCfg.enabled;
-				st.requestRender?.();
+				requestRender();
 				ctx.ui.notify(`Навигация справа: ${outlineCfg.enabled ? "показана" : "скрыта"}`, "info");
 			},
 		},

@@ -4,15 +4,17 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { truncateToWidth, visibleWidth, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { fgRgb, renderPill, type HitBox } from "../../shared/ansi.ts";
 import {
-	getStore,
+	extractPlanSteps,
+	getSessionWorkflow,
 	MODE_META,
-	persistSessionStore,
+	WRITE_TOOLS,
 	type PlanStep,
 	type SessionMode,
-} from "../../shared/session-store.ts";
+} from "../../shared/session-workflow.ts";
+import { requestRender } from "../../shared/ui-action-bridge.ts";
 import { confirmSafeToolCall, showPlanStudio } from "./studio-overlay.ts";
 
-const WRITE_TOOLS = new Set(["edit", "write"]);
+export { extractPlanSteps };
 
 const DESTRUCTIVE_BASH_RE =
 	/(?:^|[;&|]\s*)(?:rm|mv|cp|mkdir|touch|chmod|chown|ln|dd|mkfs|kill|pkill|killall|sudo|brew|apt|yum|pacman|npm\s+(?:i|install|un|uninstall|publish|ci)|pnpm\s+(?:add|i|install|remove)|yarn\s+(?:add|remove)|git\s+(?:add|commit|push|pull|merge|rebase|reset|checkout|switch|restore|clean|stash|cherry-pick|tag)|sed\s+-i|perl\s+-i|tee\b)/i;
@@ -27,44 +29,6 @@ function isReadOnlyBash(command: string): boolean {
 	if (REDIRECT_WRITE_RE.test(strippedRedirects)) return false;
 	return true;
 }
-
-export function extractPlanSteps(markdown: string): PlanStep[] {
-	const steps: PlanStep[] = [];
-	const seen = new Set<number>();
-	for (const line of markdown.split("\n")) {
-		const m = line.match(/^\s*(\d+)[.)]\s+(.+)$/);
-		if (!m) continue;
-		const num = Number.parseInt(m[1]!, 10);
-		const clean = m[2]!.replace(/\*\*/g, "").replace(/`/g, "").trim();
-		if (!clean || seen.has(num)) continue;
-		seen.add(num);
-		steps.push({ step: num, text: clean, completed: false });
-	}
-	return steps;
-}
-
-function markDoneTokens(text: string, steps: PlanStep[]): number {
-	let changed = 0;
-	for (const match of text.matchAll(/\[DONE:(\d+)\]/gi)) {
-		const num = Number.parseInt(match[1]!, 10);
-		const item = steps.find((s) => s.step === num);
-		if (item && !item.completed) {
-			item.completed = true;
-			changed++;
-		}
-	}
-	return changed;
-}
-
-const ZERO_FLUFF_PLAN_PROMPT = `[PLAN MODE — СТРОГИЙ РЕЖИМ ПЛАНИРОВАНИЯ]
-Файлы менять запрещено (инструменты записи отключены, bash только для чтения).
-Сначала изучи нужные файлы проекта инструментами чтения, затем выдай **чёткий инженерный план без воды**:
-- Никаких вступлений, вежливых штампов и пересказа задачи.
-- Короткая цель (1–2 предложения).
-- Пронумерованные шаги (\`1.\`, \`2.\`, ...) с точными путями к файлам, именами функций/компонентов и сутью изменений.
-- Подводные камни / крайние случаи — только реальные, по существу (1–3 пункта максимум).
-- Проверка — конкретные команды/сценарии верификации.
-Пиши компактно и структурно: пользователь сможет оставлять построчные комментарии прямо под строками твоего плана.`;
 
 function isAssistantMessage(m: AgentMessage): m is AssistantMessage {
 	return m.role === "assistant" && Array.isArray(m.content);
@@ -88,28 +52,32 @@ function extractAllText(message: AssistantMessage): string {
 		.join("\n");
 }
 
-export function applyModeTools(pi: ExtensionAPI, mode: SessionMode): void {
-	const st = getStore();
-	if (mode === "plan") {
-		const active = pi.getActiveTools();
-		if (active.some((t) => WRITE_TOOLS.has(t))) {
-			st.toolsBeforePlan = active;
-		}
-		pi.setActiveTools(active.filter((t) => !WRITE_TOOLS.has(t)));
-	} else if (st.toolsBeforePlan && st.toolsBeforePlan.length > 0) {
-		pi.setActiveTools(st.toolsBeforePlan);
-		st.toolsBeforePlan = undefined;
-	}
+const ZERO_FLUFF_PLAN_PROMPT = `[PLAN MODE — СТРОГИЙ РЕЖИМ ПЛАНИРОВАНИЯ]
+Файлы менять запрещено (инструменты записи отключены, bash только для чтения).
+Сначала изучи нужные файлы проекта инструментами чтения, затем выдай **чёткий инженерный план без воды**:
+- Никаких вступлений, вежливых штампов и пересказа задачи.
+- Короткая цель (1–2 предложения).
+- Пронумерованные шаги (\`1.\`, \`2.\`, ...) с точными путями к файлам, именами функций/компонентов и сутью изменений.
+- Подводные камни / крайние случаи — только реальные, по существу (1–3 пункта максимум).
+- Проверка — конкретные команды/сценарии верификации.
+Пиши компактно и структурно: пользователь сможет оставлять построчные комментарии прямо под строками твоего плана.`;
+
+export function applyModeTools(
+	pi: ExtensionAPI,
+	mode: SessionMode,
+	options?: { inferMissingOnPlanRestore?: boolean },
+): void {
+	const wf = getSessionWorkflow();
+	wf.mode = mode;
+	wf.syncActiveTools(pi, options);
 }
 
 export function setSessionMode(pi: ExtensionAPI, ctx: ExtensionContext, nextMode: SessionMode, silent = false): void {
-	const st = getStore();
-	st.mode = nextMode;
-	if (nextMode === "plan") st.executingPlan = false;
-	applyModeTools(pi, nextMode);
+	const wf = getSessionWorkflow();
+	wf.setMode(nextMode, pi);
 	updatePlanWidget(pi, ctx);
-	persistSessionStore(pi);
-	st.requestRender?.();
+	wf.persist(pi);
+	requestRender();
 
 	if (!silent && ctx.hasUI) {
 		const meta = MODE_META[nextMode];
@@ -118,17 +86,28 @@ export function setSessionMode(pi: ExtensionAPI, ctx: ExtensionContext, nextMode
 }
 
 export function cycleSessionMode(pi: ExtensionAPI, ctx: ExtensionContext): void {
-	const st = getStore();
+	const wf = getSessionWorkflow();
 	const order: SessionMode[] = ["code", "plan", "safe"];
-	const next = order[(order.indexOf(st.mode) + 1) % order.length]!;
+	const next = order[(order.indexOf(wf.mode) + 1) % order.length]!;
 	setSessionMode(pi, ctx, next);
+}
+
+export function clearPlanState(pi: ExtensionAPI, ctx: ExtensionContext, notify = false): void {
+	const wf = getSessionWorkflow();
+	wf.clearPlan();
+	updatePlanWidget(pi, ctx);
+	wf.persist(pi);
+	requestRender();
+	if (notify && ctx.hasUI) {
+		ctx.ui.notify("Сохранённый план очищен", "info");
+	}
 }
 
 export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	if (!ctx.hasUI || ctx.mode !== "tui") return;
-	const st = getStore();
-	const hasPlan = st.planLines.length > 0;
-	const commentCount = Object.keys(st.planComments).length;
+	const st = getSessionWorkflow();
+	const hasPlan = st.hasPlan();
+	const commentCount = st.getCommentCount();
 
 	if (st.mode !== "plan" && !st.executingPlan && !hasPlan) {
 		ctx.ui.setWidget("conarti-plan", undefined);
@@ -181,15 +160,7 @@ export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void 
 						xStart: xClear,
 						xEnd: xClear + visibleWidth(btnClear),
 						y: 0,
-						onClick: () => {
-							st.executingPlan = false;
-							st.planRaw = "";
-							st.planLines = [];
-							st.planSteps = [];
-							st.planComments = {};
-							updatePlanWidget(pi, ctx);
-							persistSessionStore(pi);
-						},
+						onClick: () => clearPlanState(pi, ctx),
 					});
 					return [truncateToWidth(`${prefix}${clippedPreview}${gap}${btnClear}`, width, "…")];
 				}
@@ -228,14 +199,7 @@ export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void 
 						xStart: xDismiss,
 						xEnd: xDismiss + visibleWidth(btnDismiss),
 						y: 0,
-						onClick: () => {
-							st.planRaw = "";
-							st.planLines = [];
-							st.planSteps = [];
-							st.planComments = {};
-							updatePlanWidget(pi, ctx);
-							persistSessionStore(pi);
-						},
+						onClick: () => clearPlanState(pi, ctx),
 					});
 					return [truncateToWidth(`${leftPart}${showHint}${gap}${btnDismiss}`, width, "…")];
 				}
@@ -279,22 +243,9 @@ export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void 
 	});
 }
 
-function formatLineCommentsBlock(): string {
-	const st = getStore();
-	const entries = Object.entries(st.planComments)
-		.map(([k, v]) => [Number.parseInt(k, 10), v.trim()] as const)
-		.filter(([, v]) => v.length > 0)
-		.sort((a, b) => a[0] - b[0]);
-
-	if (entries.length === 0) return "";
-	return entries
-		.map(([lineIdx, note]) => `- Строка ${lineIdx + 1} (\`${(st.planLines[lineIdx] ?? "").trim()}\`): ${note}`)
-		.join("\n");
-}
-
 export function approveAndExecutePlan(pi: ExtensionAPI, ctx: ExtensionContext): void {
-	const st = getStore();
-	if (!st.planRaw.trim()) {
+	const wf = getSessionWorkflow();
+	if (!wf.planRaw.trim()) {
 		ctx.ui.notify("Сначала сгенерируй план в режиме Plan", "warning");
 		return;
 	}
@@ -303,30 +254,22 @@ export function approveAndExecutePlan(pi: ExtensionAPI, ctx: ExtensionContext): 
 		return;
 	}
 
-	st.executingPlan = st.planSteps.length > 0;
-	setSessionMode(pi, ctx, "code", true);
+	const result = wf.approvePlan(pi);
+	if (!result.ok) {
+		ctx.ui.notify("Сначала сгенерируй план в режиме Plan", "warning");
+		return;
+	}
 
-	const commentsText = formatLineCommentsBlock();
-	st.planComments = {};
-	persistSessionStore(pi);
+	wf.persist(pi);
 	updatePlanWidget(pi, ctx);
+	requestRender();
 
-	const stepInstruction =
-		st.planSteps.length > 0
-			? `\nПосле завершения каждого пронумерованного шага плана добавляй маркер \`[DONE:n]\` (например \`[DONE:1]\`), чтобы обновлялся прогресс.`
-			: "";
-
-	const prompt = commentsText
-		? `Реализуй утверждённый план с учётом моих построчных комментариев:\n\n### Комментарии к строкам плана\n${commentsText}${stepInstruction}`
-		: `План утверждён. Приступай к реализации по шагам.${stepInstruction}`;
-
-	pi.sendUserMessage(prompt);
+	pi.sendUserMessage(result.prompt);
 }
 
 export function revisePlanWithComments(pi: ExtensionAPI, ctx: ExtensionContext): void {
-	const st = getStore();
-	const commentsText = formatLineCommentsBlock();
-	if (!commentsText) {
+	const wf = getSessionWorkflow();
+	if (!wf.formatLineComments()) {
 		ctx.ui.notify("Добавь хотя бы один комментарий к строке плана (клик мышкой или Enter)", "warning");
 		return;
 	}
@@ -335,23 +278,26 @@ export function revisePlanWithComments(pi: ExtensionAPI, ctx: ExtensionContext):
 		return;
 	}
 
-	if (st.mode !== "plan") setSessionMode(pi, ctx, "plan", true);
-	st.planComments = {};
-	persistSessionStore(pi);
-	updatePlanWidget(pi, ctx);
+	const result = wf.revisePlan(pi);
+	if (!result.ok) {
+		ctx.ui.notify("Добавь хотя бы один комментарий к строке плана (клик мышкой или Enter)", "warning");
+		return;
+	}
 
-	pi.sendUserMessage(`Обнови план без воды, точечно учитывая мои комментарии к строкам:\n\n${commentsText}`);
+	wf.persist(pi);
+	updatePlanWidget(pi, ctx);
+	requestRender();
+
+	pi.sendUserMessage(result.prompt);
 }
 
 export function registerPlanStudioFeature(pi: ExtensionAPI): void {
 	pi.on("agent_start", async () => {
-		const st = getStore();
-		st.isStreaming = true;
-		st.safeAllowTurn = false;
+		getSessionWorkflow().beginAgentTurn();
 	});
 
 	pi.on("before_agent_start", async () => {
-		const st = getStore();
+		const st = getSessionWorkflow();
 		if (st.mode === "plan") {
 			return {
 				message: {
@@ -378,7 +324,7 @@ export function registerPlanStudioFeature(pi: ExtensionAPI): void {
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
-		const st = getStore();
+		const st = getSessionWorkflow();
 		if (st.mode === "plan") {
 			if (WRITE_TOOLS.has(event.toolName)) {
 				return {
@@ -416,7 +362,7 @@ export function registerPlanStudioFeature(pi: ExtensionAPI): void {
 	});
 
 	pi.on("context", async (event) => {
-		const st = getStore();
+		const st = getSessionWorkflow();
 		if (st.mode === "plan") return undefined;
 		return {
 			messages: event.messages.filter((m: any) => m.customType !== "conarti-plan-context"),
@@ -424,43 +370,40 @@ export function registerPlanStudioFeature(pi: ExtensionAPI): void {
 	});
 
 	pi.on("turn_end", async (event, ctx) => {
-		const st = getStore();
-		if (!st.executingPlan || st.planSteps.length === 0) return;
+		const wf = getSessionWorkflow();
+		if (!wf.executingPlan || wf.planSteps.length === 0) return;
 		if (!isAssistantMessage(event.message)) return;
-		if (markDoneTokens(extractAllText(event.message), st.planSteps) > 0) {
+		const { changed } = wf.markCompletedSteps(extractAllText(event.message));
+		if (changed > 0) {
 			updatePlanWidget(pi, ctx);
-			persistSessionStore(pi);
+			wf.persist(pi);
 		}
 	});
 
 	pi.on("agent_end", async (event, ctx) => {
-		const st = getStore();
-		st.isStreaming = false;
-		st.safeAllowTurn = false;
+		const wf = getSessionWorkflow();
+		wf.endAgentTurn();
 
 		const lastAssistant = [...event.messages].reverse().find(isAssistantMessage);
 		if (!lastAssistant) return;
 
-		if (st.mode === "plan") {
+		if (wf.mode === "plan") {
 			const visible = extractVisibleText(lastAssistant);
-			if (visible.length > 0) {
-				st.planRaw = visible;
-				st.planLines = visible.split("\n");
-				st.planSteps = extractPlanSteps(visible);
-				persistSessionStore(pi);
+			if (wf.capturePlan(visible)) {
+				wf.persist(pi);
 				updatePlanWidget(pi, ctx);
 
 				if (ctx.mode === "tui" && ctx.hasUI && lastAssistant.stopReason === "stop") {
 					void showPlanStudio(pi, ctx);
 				}
 			}
-		} else if (st.executingPlan && st.planSteps.length > 0) {
-			markDoneTokens(extractAllText(lastAssistant), st.planSteps);
-			if (st.planSteps.every((s) => s.completed)) {
+		} else if (wf.executingPlan && wf.planSteps.length > 0) {
+			const { allCompleted } = wf.markCompletedSteps(extractAllText(lastAssistant));
+			if (allCompleted) {
 				ctx.ui.notify("✓ Все шаги плана выполнены", "info");
 			}
 			updatePlanWidget(pi, ctx);
-			persistSessionStore(pi);
+			wf.persist(pi);
 		}
 	});
 
@@ -468,27 +411,20 @@ export function registerPlanStudioFeature(pi: ExtensionAPI): void {
 		description: "Режим планирования без воды и ревью плана с построчными комментариями",
 		handler: async (args, ctx) => {
 			const sub = args.trim().toLowerCase();
-			const st = getStore();
+			const wf = getSessionWorkflow();
 
 			if (sub === "off" || sub === "code") return setSessionMode(pi, ctx, "code");
 			if (sub === "on") return setSessionMode(pi, ctx, "plan");
 			if (sub === "run" || sub === "approve") return approveAndExecutePlan(pi, ctx);
 			if (sub === "clear") {
-				st.planRaw = "";
-				st.planLines = [];
-				st.planSteps = [];
-				st.planComments = {};
-				st.executingPlan = false;
-				updatePlanWidget(pi, ctx);
-				persistSessionStore(pi);
-				ctx.ui.notify("Сохранённый план очищен", "info");
+				clearPlanState(pi, ctx, true);
 				return;
 			}
-			if (sub === "review" || st.planLines.length > 0) {
+			if (sub === "review" || wf.hasPlan()) {
 				await showPlanStudio(pi, ctx);
 				return;
 			}
-			setSessionMode(pi, ctx, st.mode === "plan" ? "code" : "plan");
+			setSessionMode(pi, ctx, wf.mode === "plan" ? "code" : "plan");
 		},
 	});
 

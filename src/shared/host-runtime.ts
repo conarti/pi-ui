@@ -9,7 +9,7 @@ import {
 	type TUI,
 } from "@earendil-works/pi-tui";
 import { beginHoverMovePass, finishHoverMovePass, hookMethod } from "./runtime-hooks.ts";
-import { getStore } from "./session-store.ts";
+import { setRequestRender } from "./ui-action-bridge.ts";
 
 export interface FullscreenShellContext {
 	tui: TUI;
@@ -91,7 +91,7 @@ export function disposeActiveHostRuntime(): void {
 	if (active) {
 		active.dispose();
 	}
-	getStore().requestRender = undefined;
+	setRequestRender(undefined);
 }
 
 export function findPrimaryScroll(component: Component | undefined): ScrollView | undefined {
@@ -371,11 +371,11 @@ export async function acquireHostRuntime(
 			if (slot.active === handle) {
 				slot.active = undefined;
 			}
-			getStore().requestRender = undefined;
+			setRequestRender(undefined);
 		},
 	};
 
 	slot.active = handle;
-	getStore().requestRender = () => handle.requestRender();
+	setRequestRender(() => handle.requestRender());
 	return handle;
 }

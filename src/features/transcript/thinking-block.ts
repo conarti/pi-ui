@@ -13,7 +13,8 @@ import {
 } from "@earendil-works/pi-tui";
 import { fgRgb, getActiveGlobalTheme, isLightTheme } from "../../shared/ansi.ts";
 import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
-import { getStore } from "../../shared/session-store.ts";
+import { getSessionWorkflow } from "../../shared/session-workflow.ts";
+import { requestRender } from "../../shared/ui-action-bridge.ts";
 
 const MAX_THOUGHTS_WIDTH = 120;
 const STREAMING_THOUGHT_TAIL_LINES = 4;
@@ -47,13 +48,12 @@ export function startThinkingWave(): void {
 	const clock = getWaveClock();
 	if (clock.timer) return;
 	clock.timer = setInterval(() => {
-		const st = getStore();
-		if (!st.isStreaming) {
+		if (!getSessionWorkflow().isStreaming) {
 			stopThinkingWave();
 			return;
 		}
 		clock.phase = (clock.phase + 1) % 64;
-		st.requestRender?.();
+		requestRender();
 	}, 65);
 	clock.timer.unref?.();
 }
@@ -183,7 +183,6 @@ export class ThinkingBlock implements Component {
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-		const requestRender = () => getStore().requestRender?.();
 		if (event.type === "move") {
 			claimHover(this, () => {
 				if (this.hovered) {

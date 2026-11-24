@@ -8,7 +8,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { bgRgb, fgRgb, getActiveGlobalTheme, isLightTheme, paintSurfaceRow } from "../../shared/ansi.ts";
 import { claimHover, copyToClipboard, hookMethod } from "../../shared/runtime-hooks.ts";
-import { getStore } from "../../shared/session-store.ts";
+import { requestRender } from "../../shared/ui-action-bridge.ts";
 
 interface CodeZone {
 	id: string;
@@ -226,7 +226,6 @@ export function installMarkdownCardsAndHeadings(): void {
 			if (self.defaultTextStyle?.bgColor) return undefined;
 
 			const zones: CodeZone[] = self.__conartiCodeZones ?? [];
-			const requestRender = () => getStore().requestRender?.();
 
 			if (event.type === "move") {
 				let nextZone: string | null = null;

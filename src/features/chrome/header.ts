@@ -4,7 +4,7 @@ import { VERSION, type ExtensionAPI, type ExtensionContext } from "@earendil-wor
 import { truncateToWidth, visibleWidth, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { fgRgb, type HitBox } from "../../shared/ansi.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
-import { getStore } from "../../shared/session-store.ts";
+import { requestRender } from "../../shared/ui-action-bridge.ts";
 import { showCommandPalette } from "../command-palette/index.ts";
 
 function detectGitBranch(cwd: string): string | null {
@@ -68,7 +68,7 @@ export function mountSessionHeader(pi: ExtensionAPI, ctx: ExtensionContext): voi
 						claimHover(owner, () => {
 							if (hovered) {
 								hovered = false;
-								getStore().requestRender?.();
+								requestRender();
 							}
 						});
 					}
