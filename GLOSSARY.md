@@ -44,6 +44,10 @@ _Avoid_: Timeline gutter, minimap, custom scrollbar
 An atomic inline pill representing an attached image, pasted text block, or quoted passage inside the composer draft and the submitted user prompt card.
 _Avoid_: Attachment path, paste marker, quote widget
 
+**Prompt Suggestion**:
+A dimmed predicted follow-up reply shown inside an empty composer draft after an assistant response completes, ready to accept into the draft or dismiss.
+_Avoid_: Next prompt, ghost text, inline autocomplete
+
 **Tool Density**:
 The transcript verbosity preset (`Detailed`, `Diff Focus`, or `Compact`) governing whether completed file diffs and command output previews stay visible inline or fold into summary rows alongside grouped read/search explorations.
 _Avoid_: Tool theme, compact mode, vendor style
