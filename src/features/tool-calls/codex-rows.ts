@@ -1,5 +1,6 @@
 import type { AgentToolResult, Theme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
+import { analyzeShell, type ShellDialect, type ShellTokenKind } from "../../shared/shell-analysis.ts";
 import {
 	CODEX_BULLET,
 	CODEX_COMMAND_INDENT,
@@ -58,81 +59,39 @@ function commandOf(args: ToolArgs): string {
 	return typeof args.command === "string" ? normalizeLineEndings(stripTerminalSequences(args.command)).trim() : "";
 }
 
-const SHELL_OPERATORS = ["&&", "||", ">>", ">&", "&>", "|", ";", "&", ">", "<", "(", ")"];
-/** Operators that send a command's output somewhere rather than start another command. */
-const REDIRECTIONS = new Set([">", ">>", ">&", "&>", "<", ")"]);
+const TOKEN_COLOR: Record<ShellTokenKind, ThemeColor | undefined> = {
+	command: "syntaxFunction",
+	flag: "syntaxKeyword",
+	number: "syntaxNumber",
+	string: "syntaxString",
+	variable: "syntaxVariable",
+	operator: "syntaxOperator",
+	comment: "syntaxComment",
+	whitespace: undefined,
+	plain: undefined,
+};
 
 /**
  * A command's lines with the shell's colors, as Codex highlights what it ran: the
  * program each command runs, its flags, strings, variables, and the operators
- * between them, in the theme's syntax colors. It is tokenized here rather than by
- * the host's highlighter, whose grammar changes between Pi versions.
+ * between them, in the theme's syntax colors, powered by the shared Shell Analysis module.
  */
-export function highlightCommand(command: string, theme: Theme): string[] {
-	return commandSegments(command).map((line) => paintSegments(line, theme));
+export function highlightCommand(command: string, theme: Theme, dialect: ShellDialect = "bash"): string[] {
+	return commandSegments(command, dialect).map((line) => paintSegments(line, theme));
 }
 
 /** The pieces of a command, line by line, each with the syntax color it is painted in. */
-function commandSegments(command: string): Segment[][] {
+function commandSegments(command: string, dialect: ShellDialect = "bash"): Segment[][] {
 	const lines: Segment[][] = [[]];
-	const add = (color: ThemeColor | undefined, token: string) => {
-		token.split("\n").forEach((part, index) => {
+	const { tokens } = analyzeShell(command, dialect);
+	for (const token of tokens) {
+		const color = TOKEN_COLOR[token.kind];
+		const parts = token.text.split("\n");
+		for (let index = 0; index < parts.length; index++) {
 			if (index > 0) lines.push([]);
+			const part = parts[index]!;
 			if (part) lines[lines.length - 1]!.push({ text: part, color });
-		});
-	};
-	let commandStart = true;
-	let index = 0;
-	while (index < command.length) {
-		const rest = command.slice(index);
-		const space = rest.match(/^[ \t]+/u)?.[0];
-		if (space) {
-			add(undefined, space);
-			index += space.length;
-			continue;
 		}
-		if (rest[0] === "\n") {
-			add(undefined, "\n");
-			commandStart = true;
-			index++;
-			continue;
-		}
-		if (rest[0] === "#") {
-			const comment = rest.match(/^#[^\n]*/u)![0];
-			add("syntaxComment", comment);
-			index += comment.length;
-			continue;
-		}
-		const operator = SHELL_OPERATORS.find((candidate) => rest.startsWith(candidate));
-		if (operator) {
-			add("syntaxOperator", operator);
-			if (!REDIRECTIONS.has(operator)) commandStart = true;
-			index += operator.length;
-			continue;
-		}
-		if (rest[0] === "'" || rest[0] === "\"") {
-			const quote = rest[0];
-			let end = 1;
-			while (end < rest.length && rest[end] !== quote) end += quote === "\"" && rest[end] === "\\" ? 2 : 1;
-			const string = rest.slice(0, Math.min(end + 1, rest.length));
-			add("syntaxString", string);
-			commandStart = false;
-			index += string.length;
-			continue;
-		}
-		if (rest[0] === "$") {
-			const variable = rest.match(/^\$(?:\{[^}]*\}?|[A-Za-z_][A-Za-z0-9_]*|[0-9#?@*$!-])?/u)![0];
-			add("syntaxVariable", variable);
-			commandStart = false;
-			index += variable.length;
-			continue;
-		}
-		const word = rest.match(/^[^\s'"$#&|;<>()]+/u)?.[0] ?? rest[0]!;
-		const assignment = commandStart && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(word);
-		add(commandStart && !assignment ? "syntaxFunction" : word.startsWith("-") ? "syntaxKeyword"
-			: /^\d+$/u.test(word) ? "syntaxNumber" : undefined, word);
-		if (!assignment) commandStart = false;
-		index += word.length;
 	}
 	return lines;
 }
@@ -210,7 +169,7 @@ export function renderCodexCall(
 ): Component {
 	const expanded = state.expanded === true;
 	const command = kind === "shell" ? commandOf(args) : "";
-	const segments = kind === "shell" ? commandSegments(command) : [];
+	const segments = kind === "shell" ? commandSegments(command, name === "powershell" ? "powershell" : "bash") : [];
 	let current: RowStatus = "pending";
 	let dot = "";
 	// Opened, a command reads as its transcript; one with nothing left out keeps its preview, as in Codex.

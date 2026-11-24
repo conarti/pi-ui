@@ -8,6 +8,7 @@ import type {
 	ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
+import { acquireHostRuntime, getActiveHostRuntime, type HostRuntimeHandle } from "../../shared/host-runtime.ts";
 import { classifyCallStatus, formatDurationMs, normalizeLineEndings, type RowStatus } from "./core.ts";
 import { loadConfig } from "./config.ts";
 import { paletteOf } from "./color.ts";
@@ -697,14 +698,28 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 			catch (error) { console.warn(message, "UI notification also failed:", error); }
 		}
 	};
-	const enableUI = (ctx: ExtensionContext, reload: boolean, resume: boolean, failures: UIFailure[]) => {
+	const bridgeGroupsContext = (ctx: ExtensionContext, host: HostRuntimeHandle | undefined): ExtensionContext => {
+		if (!host) return ctx;
+		const bridgedUi = Object.create(ctx.ui, {
+			setWidget: {
+				value: (_key: string, factory: unknown) => {
+					if (typeof factory === "function") {
+						factory(host.tui, ctx.ui.theme);
+					}
+				},
+			},
+		});
+		return Object.create(ctx, { ui: { value: bridgedUi } });
+	};
+	const enableUI = (ctx: ExtensionContext, reload: boolean, resume: boolean, failures: UIFailure[], host?: HostRuntimeHandle) => {
+		const resolvedHost = host ?? getActiveHostRuntime();
 		// Observe relayout keys before the thinking controller consumes them.
-		attemptUI(failures, "viewport bind", () => viewport.bind(ctx));
+		attemptUI(failures, "viewport bind", () => viewport.bind(ctx, resolvedHost));
 		if (runtime.config.working) attemptUI(failures, "progress bind", () => progress.bind(ctx, resume));
 		if (runtime.config.thinking) attemptUI(failures, "thinking bind", () => thinkingCycle.bind(ctx));
-		attemptUI(failures, "silent bind", () => silent.bind(ctx, runtime.config.mode, reload, resume));
-		attemptUI(failures, "groups bind", () => groups.bind(ctx));
-		transcript.bind(ctx, failures);
+		attemptUI(failures, "silent bind", () => silent.bind(ctx, runtime.config.mode, reload, resume, resolvedHost));
+		attemptUI(failures, "groups bind", () => groups.bind(bridgeGroupsContext(ctx, resolvedHost)));
+		transcript.bind(ctx, failures, resolvedHost);
 	};
 	// One ownership/cleanup inventory for live off, session replacement and shutdown.
 	// Each action is independent: a host failure must not skip later cleanup steps.
@@ -749,7 +764,7 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 	const lastTrust = (globalThis as TrustSlot)[TRUST_KEY];
 	configure(pi, cwd, lastTrust?.cwd === realDirectory(cwd) && lastTrust.trusted);
 	pi.on("session_start", () => loadNativeTimerRenderers());
-	pi.on("session_start", (event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		const failures: UIFailure[] = [];
 		detachUI({ restoreNative: true }, failures);
 		sessionContext = ctx;
@@ -765,8 +780,9 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 		(globalThis as TrustSlot)[TRUST_KEY] = { cwd: realDirectory(ctx.cwd), trusted };
 		configure(pi, ctx.cwd, trusted, failures);
 		sessionReady = true;
+		const host = ctx.mode === "tui" ? (getActiveHostRuntime() ?? (await acquireHostRuntime(ctx))) : undefined;
 		if (ctx.mode === "tui" && runtime.config.style !== "off") {
-			enableUI(ctx, event.reason === "reload", false, failures);
+			enableUI(ctx, event.reason === "reload", false, failures, host);
 			if ((runtime.config.custom_tools.enabled || runtime.config.tools.length > 0) && !customRowsAvailable && !customRowsWarned) {
 				customRowsWarned = true;
 				ctx.ui.notify("Compact tool rendering is unavailable in this version of Pi", "warning");
@@ -774,7 +790,7 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 		} else if (ctx.mode === "tui") {
 			// Startup-off also reconciles rows built using provisional/trusted config,
 			// but never attaches animation or the compact controllers.
-			transcript.reconcileOnce(ctx, failures);
+			transcript.reconcileOnce(ctx, failures, host);
 		}
 		reportFailures(ctx, failures);
 	});

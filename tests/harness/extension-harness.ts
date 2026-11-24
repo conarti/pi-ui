@@ -66,6 +66,10 @@ export interface ExtensionHarness {
 	readonly appendedEntries: Array<{ customType: string; data: unknown }>;
 	readonly sentUserMessages: Array<{ content: unknown; options?: unknown }>;
 	readonly terminalInputListeners: Set<(data: string) => unknown>;
+	readonly markdownTransformers: Array<(markdown: string, context: any) => string>;
+	readonly workingMessages: Array<string | undefined>;
+	readonly hiddenThinkingLabels: Array<string | undefined>;
+	readonly statuses: Map<string, string>;
 
 	header: Component | undefined;
 	editor: Component | undefined;
@@ -135,7 +139,10 @@ export function createExtensionHarness(options: ExtensionHarnessOptions = {}): E
 	const appendedEntries: Array<{ customType: string; data: unknown }> = [];
 	const sentUserMessages: Array<{ content: unknown; options?: unknown }> = [];
 	const terminalInputListeners = new Set<(data: string) => unknown>();
-	const markdownTransformers: unknown[] = [];
+	const markdownTransformers: Array<(markdown: string, context: any) => string> = [];
+	const workingMessages: Array<string | undefined> = [];
+	const hiddenThinkingLabels: Array<string | undefined> = [];
+	const statuses = new Map<string, string>();
 
 	const setGlobalTheme = (theme: Theme) => {
 		(globalThis as Record<PropertyKey, unknown>)[
@@ -196,7 +203,19 @@ export function createExtensionHarness(options: ExtensionHarnessOptions = {}): E
 		},
 		setWorkingIndicator: () => {},
 		setWorkingVisible: () => {},
-		setHiddenThinkingLabel: () => {},
+		setWorkingMessage: (message?: string) => {
+			workingMessages.push(message);
+			tui.requestRender();
+		},
+		setHiddenThinkingLabel: (label?: string) => {
+			hiddenThinkingLabels.push(label);
+			tui.requestRender();
+		},
+		setStatus: (key: string, value?: string) => {
+			if (value === undefined) statuses.delete(key);
+			else statuses.set(key, value);
+			tui.requestRender();
+		},
 		onTerminalInput: (listener: (data: string) => unknown) => {
 			terminalInputListeners.add(listener);
 			return () => {
@@ -340,7 +359,7 @@ export function createExtensionHarness(options: ExtensionHarnessOptions = {}): E
 		},
 		getSettings: () => ({}),
 		compact: () => {},
-		registerMarkdownTransformer: (transformer: unknown) => {
+		registerMarkdownTransformer: (transformer: (markdown: string, context: any) => string) => {
 			markdownTransformers.push(transformer);
 		},
 	} as unknown as ExtensionAPI;
@@ -360,6 +379,10 @@ export function createExtensionHarness(options: ExtensionHarnessOptions = {}): E
 		appendedEntries,
 		sentUserMessages,
 		terminalInputListeners,
+		markdownTransformers,
+		workingMessages,
+		hiddenThinkingLabels,
+		statuses,
 
 		get header() {
 			return headerComponent;

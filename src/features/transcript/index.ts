@@ -21,6 +21,10 @@ export function registerTranscriptFeature(pi: ExtensionAPI): void {
 		stopThinkingWave();
 	});
 
+	pi.on("agent_settled", async () => {
+		stopThinkingWave();
+	});
+
 	pi.on("session_shutdown", async () => {
 		stopThinkingWave();
 		clearHoverExcept(undefined);

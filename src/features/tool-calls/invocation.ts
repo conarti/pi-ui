@@ -1,5 +1,6 @@
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
+import { analyzeShell, type ShellDialect } from "../../shared/shell-analysis.ts";
 import { normalizeLineEndings } from "./core.ts";
 import type { ToolArgs } from "./types.ts";
 
@@ -78,94 +79,10 @@ export function getArgumentDetails(name: string, args: ToolArgs): ToolArgs {
 	return collectArgumentDetails(name, args);
 }
 
-export function shellSegments(command: string): string[] {
-	const segments: string[] = [];
-	let current = "";
-	let quote: "'" | '"' | "`" | undefined;
-	let escaped = false;
-	for (let index = 0; index < command.length; index++) {
-		const character = command[index]!;
-		if (escaped) {
-			current += character;
-			escaped = false;
-			continue;
-		}
-		if (character === "\\" && quote !== "'") {
-			current += character;
-			escaped = true;
-			continue;
-		}
-		if (quote) {
-			current += character;
-			if (character === quote) quote = undefined;
-			continue;
-		}
-		if (character === "'" || character === '"' || character === "`") {
-			quote = character;
-			current += character;
-			continue;
-		}
-		const pair = command.slice(index, index + 2);
-		if (character === "\n" || character === ";" || pair === "&&" || pair === "||") {
-			if (current.trim()) segments.push(current.trim());
-			current = "";
-			if (pair === "&&" || pair === "||") index++;
-			continue;
-		}
-		current += character;
-	}
-	if (current.trim()) segments.push(current.trim());
-	return segments;
-}
-
-function shellWords(command: string, powershell = false): string[] {
-	const words: string[] = [];
-	let current = "";
-	let quote: "'" | '"' | undefined;
-	const input = command.trim();
-	for (let index = 0; index < input.length; index++) {
-		const character = input[index]!;
-		if (powershell && character === "`" && quote !== "'") {
-			const next = input[index + 1];
-			if (next !== undefined) {
-				current += next;
-				index++;
-			}
-			continue;
-		}
-		if (!powershell && character === "\\" && quote !== "'") {
-			const next = input[index + 1];
-			if (next === undefined) {
-				current += "\\";
-				continue;
-			}
-			// In double quotes, Bash preserves backslashes before ordinary characters.
-			if (quote === '"' && !['$', '`', '"', "\\", "\n"].includes(next)) {
-				current += "\\";
-				continue;
-			}
-			current += next;
-			index++;
-			continue;
-		}
-		if (quote) {
-			if (character === quote) quote = undefined;
-			else current += character;
-			continue;
-		}
-		if (character === "'" || character === '"') {
-			quote = character;
-			continue;
-		}
-		if (/\s/u.test(character)) {
-			if (current) words.push(current);
-			current = "";
-			continue;
-		}
-		current += character;
-	}
-	if (current) words.push(current);
-	return words;
+export function shellSegments(command: string, dialect: ShellDialect = "bash"): string[] {
+	return analyzeShell(command, dialect).commands
+		.map((entry) => entry.raw)
+		.filter(Boolean);
 }
 
 const SEARCH_OPTIONS_WITH_VALUES = new Set([
@@ -296,43 +213,17 @@ function summarizeFileOperation(executable: string, words: string[]): string | u
 	return undefined;
 }
 
-/** One step split at its unquoted pipes: `cat a | tee b` is two commands, the second writing a file. */
-function pipelineStages(segment: string): string[] {
-	const stages: string[] = [];
-	let current = "";
-	let quote: string | undefined;
-	for (let index = 0; index < segment.length; index++) {
-		const character = segment[index]!;
-		if (quote) {
-			if (character === "\\" && quote === '"' && index + 1 < segment.length) {
-				current += character + segment[++index];
-				continue;
-			}
-			if (character === quote) quote = undefined;
-		} else if (character === "'" || character === '"' || character === "`") {
-			quote = character;
-		} else if (character === "\\" && index + 1 < segment.length) {
-			current += character + segment[++index];
-			continue;
-		} else if (character === "|") {
-			if (current.trim()) stages.push(current.trim());
-			current = "";
-			continue;
-		}
-		current += character;
-	}
-	if (current.trim()) stages.push(current.trim());
-	return stages;
-}
-
 /** A calm collapsed label that describes intent while retaining primary command targets. */
 export function summarizeShellCommand(name: string, command: string): string {
-	const allSegments = shellSegments(normalizeLineEndings(command)).flatMap(pipelineStages);
-	const segments = allSegments.filter((segment) => !/^\s*(?:cd|pushd|popd)\b/iu.test(segment));
-	const primary = segments[0] ?? allSegments[0] ?? "";
-	if (!primary) return name === "powershell" ? "Prepare PowerShell command" : "Prepare shell command";
+	const dialect: ShellDialect = name === "powershell" ? "powershell" : "bash";
+	const allCommands = analyzeShell(command, dialect).commands;
+	const commands = allCommands.filter((entry) => !/^(?:cd|pushd|popd|set-location|push-location|pop-location)$/iu.test(entry.words[0] ?? ""));
+	const primary = commands[0] ?? allCommands[0];
+	if (!primary || primary.words.length === 0) {
+		return name === "powershell" ? "Prepare PowerShell command" : "Prepare shell command";
+	}
 
-	const words = shellWords(primary, name === "powershell");
+	const words = [...primary.words];
 	while (words.length > 0) {
 		if (/^[A-Za-z_][A-Za-z\d_]*=.*/u.test(words[0] ?? "")
 			|| ["command", "env", "sudo", "time"].includes((words[0] ?? "").toLowerCase())) {
@@ -377,7 +268,7 @@ export function summarizeShellCommand(name: string, command: string): string {
 		summary = name === "powershell" ? "Run PowerShell command" : "Run shell command";
 	}
 
-	const remainingSteps = Math.max(0, segments.length - 1);
+	const remainingSteps = Math.max(0, commands.length - 1);
 	return remainingSteps > 0 ? `${summary} + ${remainingSteps} more ${remainingSteps === 1 ? "step" : "steps"}` : summary;
 }
 
