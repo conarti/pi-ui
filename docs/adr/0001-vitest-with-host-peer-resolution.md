@@ -1,0 +1,3 @@
+# Vitest and TypeScript with host-resolved Pi peers
+
+`@conarti/pi-ui` is loaded directly from its working directory by live Pi sessions and must keep `@earendil-works/*` and `typebox` strictly in `peerDependencies` (`"*"`) without physical copies in `node_modules`, which would bypass Pi's runtime module mapping and break `instanceof` checks across TUI classes. We install `vitest` and `typescript` in `devDependencies` with peer auto-installation disabled via `.npmrc` (`legacy-peer-deps=true`, `auto-install-peers=false`), and alias `@earendil-works/*` and `typebox` in `vitest.config.ts` (and `tsconfig.json`) to the active host `pi` installation on the machine.
