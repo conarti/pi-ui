@@ -1,18 +1,12 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	matchesKey,
-	visibleWidth,
 	type Component,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
-import {
-	fgRgb,
-	formatCompactTokens,
-	renderCardFrame,
-	renderPill,
-	type HitBox,
-} from "../../shared/ansi.ts";
+import { fgRgb, formatCompactTokens } from "../../shared/ansi.ts";
+import { createModalCard, getThemeSurfacePalette, openModalCard } from "../../shared/modal-card.ts";
 
 interface ContextBreakdown {
 	totalTokens: number;
@@ -111,16 +105,15 @@ export async function showContextInspector(pi: ExtensionAPI, ctx: ExtensionConte
 	if (ctx.mode !== "tui") return;
 	const data = computeBreakdown(pi, ctx);
 
-	const action = await ctx.ui.custom<"close" | "compact">(
+	const action = await openModalCard<"close" | "compact">(
+		ctx,
 		(_tui, theme, _kb, done) => {
-			let hoveredId: string | null = null;
-			let hitboxes: HitBox[] = [];
-			let closeHit: { xStart: number; xEnd: number } | null = null;
+			const card = createModalCard();
 
 			const comp: Component = {
 				invalidate() {},
 				render(width: number): string[] {
-					hitboxes = [];
+					const palette = getThemeSurfacePalette(theme);
 					const inner = Math.max(24, width - 4);
 					const barWidth = Math.max(16, inner - 2);
 					const win = Math.max(1, data.contextWindow);
@@ -135,17 +128,17 @@ export async function showContextInspector(pi: ExtensionAPI, ctx: ExtensionConte
 					const usedCells = Math.min(barWidth, sysCells + chatCells + toolCells);
 					const freeCells = Math.max(0, barWidth - usedCells - reserveCells);
 
-					const segSys = fgRgb(97, 175, 239, "█".repeat(Math.min(barWidth, sysCells)));
+					const segSys = fgRgb(palette.accent[0], palette.accent[1], palette.accent[2], "█".repeat(Math.min(barWidth, sysCells)));
 					const remAfterSys = Math.max(0, barWidth - sysCells);
-					const segChat = fgRgb(86, 182, 194, "█".repeat(Math.min(remAfterSys, chatCells)));
+					const segChat = fgRgb(palette.info[0], palette.info[1], palette.info[2], "█".repeat(Math.min(remAfterSys, chatCells)));
 					const remAfterChat = Math.max(0, remAfterSys - chatCells);
-					const segTool = fgRgb(122, 162, 247, "█".repeat(Math.min(remAfterChat, toolCells)));
-					const segFree = fgRgb(52, 62, 80, "░".repeat(freeCells));
-					const segReserve = fgRgb(229, 192, 123, "▒".repeat(reserveCells));
+					const segTool = fgRgb(palette.accentBright[0], palette.accentBright[1], palette.accentBright[2], "█".repeat(Math.min(remAfterChat, toolCells)));
+					const segFree = fgRgb(palette.freeBar[0], palette.freeBar[1], palette.freeBar[2], "░".repeat(freeCells));
+					const segReserve = fgRgb(palette.warning[0], palette.warning[1], palette.warning[2], "▒".repeat(reserveCells));
 
 					const pctColor =
-						data.percent >= 85 ? [224, 108, 117] : data.percent >= 65 ? [229, 192, 123] : [97, 175, 239];
-					const pctBadge = fgRgb(pctColor[0]!, pctColor[1]!, pctColor[2]!, theme.bold(`${data.percent.toFixed(1)}%`));
+						data.percent >= 85 ? palette.danger : data.percent >= 65 ? palette.warning : palette.accent;
+					const pctBadge = fgRgb(pctColor[0], pctColor[1], pctColor[2], theme.bold(`${data.percent.toFixed(1)}%`));
 					const cacheRatio =
 						data.inputTotal + data.cacheReadTotal > 0
 							? Math.round((data.cacheReadTotal / (data.inputTotal + data.cacheReadTotal)) * 100)
@@ -156,58 +149,35 @@ export async function showContextInspector(pi: ExtensionAPI, ctx: ExtensionConte
 						"",
 						` ${segSys}${segChat}${segTool}${segFree}${segReserve}`,
 						"",
-						` ${fgRgb(97, 175, 239, "●")} System & Skills   ${theme.bold(formatCompactTokens(data.systemTokensEst).padStart(6))}   ${theme.fg("dim", "системный промпт, правила и скиллы")}`,
-						` ${fgRgb(86, 182, 194, "●")} Диалог            ${theme.bold(formatCompactTokens(data.chatTokensEst).padStart(6))}   ${theme.fg("dim", `сообщения и рассуждения (${data.turnCount} реплик)`)}`,
-						` ${fgRgb(122, 162, 247, "●")} Инструменты       ${theme.bold(formatCompactTokens(data.toolTokensEst).padStart(6))}   ${theme.fg("dim", "вызовы и результаты тулзов")}`,
-						` ${fgRgb(229, 192, 123, "▒")} Буфер компакта    ${theme.bold(formatCompactTokens(data.reserveTokens).padStart(6))}   ${theme.fg("dim", "резерв до авто-сжатия")}`,
+						` ${fgRgb(palette.accent[0], palette.accent[1], palette.accent[2], "●")} System & Skills   ${theme.bold(formatCompactTokens(data.systemTokensEst).padStart(6))}   ${theme.fg("dim", "системный промпт, правила и скиллы")}`,
+						` ${fgRgb(palette.info[0], palette.info[1], palette.info[2], "●")} Диалог            ${theme.bold(formatCompactTokens(data.chatTokensEst).padStart(6))}   ${theme.fg("dim", `сообщения и рассуждения (${data.turnCount} реплик)`)}`,
+						` ${fgRgb(palette.accentBright[0], palette.accentBright[1], palette.accentBright[2], "●")} Инструменты       ${theme.bold(formatCompactTokens(data.toolTokensEst).padStart(6))}   ${theme.fg("dim", "вызовы и результаты тулзов")}`,
+						` ${fgRgb(palette.warning[0], palette.warning[1], palette.warning[2], "▒")} Буфер компакта    ${theme.bold(formatCompactTokens(data.reserveTokens).padStart(6))}   ${theme.fg("dim", "резерв до авто-сжатия")}`,
 						"",
 						` ${theme.fg("muted", "Сессия:")} in ${formatCompactTokens(data.inputTotal)} · cache ${formatCompactTokens(data.cacheReadTotal)} (${cacheRatio}%) · out ${formatCompactTokens(data.outputTotal)}${data.costTotal > 0 ? ` · $${data.costTotal.toFixed(3)}` : ""}`,
 					];
 
-					const btnCompact = renderPill("⚡ Сжать контекст (c)", {
-						hovered: hoveredId === "compact",
-						active: true,
-						rgb: [97, 175, 239],
-						theme,
+					return card.render(width, theme, {
+						title: fgRgb(palette.accentBright[0], palette.accentBright[1], palette.accentBright[2], theme.bold("◐ Context Inspector")),
+						onClose: () => done("close"),
+						bodyLines: body,
+						borderVariant: "primary",
+						footerPills: [
+							{
+								id: "compact",
+								label: "⚡ Сжать контекст (c)",
+								variant: "primary",
+								active: true,
+								onClick: () => done("compact"),
+							},
+							{
+								id: "close",
+								label: "✕ Закрыть (Esc)",
+								variant: "neutral",
+								onClick: () => done("close"),
+							},
+						],
 					});
-					const btnClose = renderPill("✕ Закрыть (Esc)", {
-						hovered: hoveredId === "close",
-						theme,
-					});
-					const footerLine = `${btnCompact}  ${btnClose}`;
-					const footerRow = body.length + 2;
-
-					let cursorX = 2;
-					const wCompact = visibleWidth(btnCompact);
-					hitboxes.push({
-						id: "compact",
-						xStart: cursorX,
-						xEnd: cursorX + wCompact,
-						y: footerRow,
-						onClick: () => done("compact"),
-					});
-					cursorX += wCompact + 2;
-					const wClose = visibleWidth(btnClose);
-					hitboxes.push({
-						id: "close",
-						xStart: cursorX,
-						xEnd: cursorX + wClose,
-						y: footerRow,
-						onClick: () => done("close"),
-					});
-
-					const rightHint = hoveredId === "top-close" ? fgRgb(224, 108, 117, "✕") : theme.fg("muted", "✕");
-					closeHit = { xStart: Math.max(0, width - 5), xEnd: width - 1 };
-
-					return renderCardFrame(
-						fgRgb(125, 207, 255, theme.bold("◐ Context Inspector")),
-						rightHint,
-						body,
-						footerLine,
-						width,
-						theme,
-						[97, 175, 239],
-					);
 				},
 				handleInput(input: string): void {
 					if (matchesKey(input, "escape") || matchesKey(input, "q") || matchesKey(input, "enter")) {
@@ -219,40 +189,13 @@ export async function showContextInspector(pi: ExtensionAPI, ctx: ExtensionConte
 					}
 				},
 				handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-					if (event.type === "move") {
-						let nextHover: string | null = null;
-						if (event.y === 0 && closeHit && event.x >= closeHit.xStart && event.x <= closeHit.xEnd) {
-							nextHover = "top-close";
-						} else {
-							const hit = hitboxes.find((h) => h.y === event.y && event.x >= h.xStart && event.x < h.xEnd);
-							if (hit) nextHover = hit.id;
-						}
-						if (nextHover !== hoveredId) {
-							hoveredId = nextHover;
-							return { handled: true, render: true };
-						}
-						return { handled: true, render: false };
-					}
-					if (event.type === "click" && event.button === "left") {
-						if (event.y === 0 && closeHit && event.x >= closeHit.xStart && event.x <= closeHit.xEnd) {
-							done("close");
-							return { handled: true };
-						}
-						const hit = hitboxes.find((h) => h.y === event.y && event.x >= h.xStart && event.x < h.xEnd);
-						if (hit) {
-							hit.onClick();
-							return { handled: true };
-						}
-					}
-					return { handled: true, render: false };
+					const outcome = card.handleMouse(event);
+					return { handled: true, render: outcome.render };
 				},
 			};
 			return comp;
 		},
-		{
-			overlay: true,
-			overlayOptions: { width: 76, minWidth: 44, anchor: "center", margin: 2 },
-		},
+		{ width: 76, minWidth: 44, anchor: "center", margin: 2 },
 	);
 
 	if (action === "compact") {
