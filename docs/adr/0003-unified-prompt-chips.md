@@ -1,0 +1,3 @@
+# Unified inline Prompt Chips inside pi-ui
+
+Relying on host raw temp paths for clipboard images, high-threshold plain-text paste markers, and the external `pi-quote-blocks` widget splits attachments across three incompatible UI metaphors. `@conarti/pi-ui` owns a single `Prompt Chip` model covering attached images (`[Image #N]`), multi-line/long pastes (`[Pasted #N]`), and transcript quotes (`[Quote #N]`): chips live inline as atomic styled pills in the composer and submitted user prompt cards with `Hover Popup` previews, and expand to real file paths, pasted text, and Markdown blockquotes only at prompt submission boundaries (superseding `pi-quote-blocks`).

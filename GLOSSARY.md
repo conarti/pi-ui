@@ -29,12 +29,20 @@ A single user prompt in the active session branch together with the response exc
 _Avoid_: Step, entry, message row
 
 **Sticky Prompt**:
-The top viewport bar that pins the active `Turn`'s user prompt once its transcript card scrolls past the top edge.
-_Avoid_: Pinned header, prompt banner
+The active `Turn`'s user prompt card pinned at the top edge of the transcript viewport while its exchange is in view, displaced upward when the next `Turn`'s prompt reaches it.
+_Avoid_: Pinned header, prompt banner, sticky toolbar
 
 **Outline Rail**:
-The narrow right-hand navigation strip beside the native transcript scrollbar displaying `Turn` ticks, scroll-jump arrows, and a `Hover Popup` preview.
+The narrow navigation strip immediately to the left of the rightmost transcript scrollbar displaying `Turn` ticks, scroll-jump arrows, and a `Hover Popup` preview.
 _Avoid_: Timeline gutter, minimap, custom scrollbar
+
+**Prompt Chip**:
+An atomic inline pill representing an attached image, pasted text block, or quoted passage inside the composer draft and the submitted user prompt card.
+_Avoid_: Attachment path, paste marker, quote widget
+
+**Tool Density**:
+The transcript verbosity preset (`Detailed`, `Diff Focus`, or `Compact`) governing whether completed file diffs and command output previews stay visible inline or fold into summary rows alongside grouped read/search explorations.
+_Avoid_: Tool theme, compact mode, vendor style
 
 ### Overlays
 
@@ -43,5 +51,5 @@ A framed, focus-capturing dialog centered over the viewport (Command Palette, `P
 _Avoid_: Popup, toast, inline widget
 
 **Hover Popup**:
-A transient, non-capturing overlay anchored near a hovered element (such as the `Outline Rail` preview) that never steals input focus or blocks a `Modal Card`.
+A transient, non-capturing overlay anchored near a hovered element or text selection (such as the `Outline Rail` preview, `Prompt Chip` preview, or selection quote action) that never steals input focus or blocks a `Modal Card`.
 _Avoid_: Modal, dialog
