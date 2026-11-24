@@ -275,4 +275,74 @@ describe("Quotes pure domain & geometry seams", () => {
 		});
 		expect(atBottomEdge).toEqual({ col: 1, row: 20 });
 	});
+
+	it("handles unsynced draft token numbers, no-op quote edits, and tab-indented quote reconstruction after card tab expansion", () => {
+		const registry = new PromptChipRegistry();
+		const q1 = registry.registerQuote("first quote");
+		const q2 = registry.registerQuote("second line A\nsecond line B");
+
+		/* Если токен #1 удалён из строки до syncDraft, операции над цитатой #1 должны работать по синхронизированному тексту */
+		const unsyncedAfterDeletingFirst = `Prefix ${q2.token} suffix`;
+		const listed = listActiveDraftQuotes(registry, unsyncedAfterDeletingFirst);
+		expect(listed.map((q) => ({ number: q.number, token: q.token }))).toEqual([
+			{ number: 1, token: "[❝ Quote #1 · 2 lines]" },
+		]);
+
+		const editedUnsynced = editDraftQuote(
+			registry,
+			unsyncedAfterDeletingFirst,
+			1,
+			"replaced line 1\nreplaced line 2",
+		);
+		expect(editedUnsynced).toMatchObject({
+			found: true,
+			removed: false,
+			draftText: "Prefix [❝ Quote #1 · 2 lines] suffix",
+		});
+		expect(registry.resolveChip("quote", 1)).toMatchObject({
+			text: "replaced line 1\nreplaced line 2",
+		});
+
+		/* Сохранение без изменений не пересоздаёт чип в реестре */
+		const idBeforeNoop = registry.resolveChip("quote", 1)?.id;
+		const noopEdit = editDraftQuote(
+			registry,
+			editedUnsynced.draftText,
+			1,
+			"replaced line 1\nreplaced line 2",
+		);
+		expect(noopEdit.unchanged).toBe(true);
+		expect(registry.resolveChip("quote", 1)?.id).toBe(idBeforeNoop);
+
+		/* Удаление из несинхронизированного черновика действительно убирает токен */
+		const q3 = registry.registerQuote("third quote");
+		const unsyncedForRemove = `Keep ${q3.token}`;
+		const removed = removeDraftQuote(registry, unsyncedForRemove, 1);
+		expect(removed).toEqual({ removed: true, draftText: "Keep" });
+
+		const q4 = registry.registerQuote("fourth quote");
+		const cleared = clearAllDraftQuotes(registry, `Start ${q4.token} end`);
+		expect(cleared).toEqual({ removedCount: 1, draftText: "Start end" });
+
+		/* Реконструкция отправленной карточки, когда renderUserPromptCardLines заменил табы на два пробела */
+		const tabQuote = registry.registerQuote("\tif err != nil {\n\t\treturn err\n\t}", "selection");
+		const submitDraft = `Inspect:\n${tabQuote.token}`;
+		const expanded = registry.expandDraftForSubmit(submitDraft);
+		expect(expanded.transformed).toBe(true);
+		expect(expanded.text).toContain("> \tif err != nil {");
+
+		const cardSanitizedText = expanded.text.replace(/\t/g, "  ");
+		registry.bindSubmittedMessageTimestamp(cardSanitizedText, 1715900999000);
+		const reconstructed = registry.reconstructSubmittedPrompt(
+			cardSanitizedText,
+			1715900999000,
+		);
+		expect(reconstructed.displayText).toBe(submitDraft);
+		expect(reconstructed.chips).toHaveLength(1);
+		expect(reconstructed.chips[0]).toMatchObject({
+			kind: "quote",
+			number: 1,
+			token: "[❝ Quote #1 · 3 lines]",
+		});
+	});
 });

@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
+import { stripTerminalSequences } from "@earendil-works/pi-tui";
 
 export type PromptChipKind = "image" | "paste" | "quote";
 export const PROMPT_CHIPS_CUSTOM_ENTRY_TYPE = "conarti-prompt-chips";
@@ -250,9 +251,18 @@ interface StagedDraftSnapshot {
 
 const LEGACY_IMAGE_MARKER_RE = /\[Image #(\d+):\s*([^\]]+)\]/g;
 const TRAILING_IMAGE_PLACEHOLDER_RE = /(?:\n\n\[изображение\])+\s*$/u;
+const CONTROL_CHARS_RE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
 
 function stripTrailingImagePlaceholders(text: string): string {
 	return text.replace(/\r\n?/g, "\n").replace(TRAILING_IMAGE_PLACEHOLDER_RE, "").trim();
+}
+
+/* Канонизирует текст карточки промпта с учётом замены табов на два пробела в renderUserPromptCardLines */
+function canonicalizePromptLookupText(text: string): string {
+	const sanitized = stripTerminalSequences(text.replace(/\r\n?/g, "\n"))
+		.replace(CONTROL_CHARS_RE, "")
+		.replace(/\t/g, "  ");
+	return stripTrailingImagePlaceholders(sanitized);
 }
 
 function inferImageMimeTypeFromPath(filePath: string): string {
@@ -774,6 +784,7 @@ export class PromptChipRegistry {
 		};
 		this.pendingPersistQueue.push(record);
 		this.submittedByExpanded.set(finalExpanded, record);
+		this.submittedByExpanded.set(canonicalizePromptLookupText(finalExpanded), record);
 
 		return {
 			transformed: true,
@@ -788,10 +799,14 @@ export class PromptChipRegistry {
 		timestamp: number | string | undefined,
 	): PersistedPromptChipsPayload | undefined {
 		const clean = stripTrailingImagePlaceholders(messageText);
+		const canonical = canonicalizePromptLookupText(messageText);
+		const matchesPayload = (r: PersistedPromptChipsPayload): boolean =>
+			r.expandedText === clean || canonicalizePromptLookupText(r.expandedText) === canonical;
 		const queued = this.pendingPersistQueue.find(
-			(r) => r.expandedText === clean && r.timestamp === undefined,
+			(r) => r.timestamp === undefined && matchesPayload(r),
 		);
-		const target = queued ?? this.submittedByExpanded.get(clean);
+		const target =
+			queued ?? this.submittedByExpanded.get(clean) ?? this.submittedByExpanded.get(canonical);
 		if (!target) return undefined;
 
 		const updated: PersistedPromptChipsPayload =
@@ -800,7 +815,8 @@ export class PromptChipRegistry {
 			const idx = this.pendingPersistQueue.indexOf(queued);
 			if (idx !== -1) this.pendingPersistQueue[idx] = updated;
 		}
-		this.submittedByExpanded.set(clean, updated);
+		this.submittedByExpanded.set(updated.expandedText, updated);
+		this.submittedByExpanded.set(canonicalizePromptLookupText(updated.expandedText), updated);
 		if (timestamp !== undefined) {
 			this.submittedByTimestamp.set(String(timestamp), updated);
 		}
@@ -812,16 +828,19 @@ export class PromptChipRegistry {
 		timestamp: number | string | undefined,
 	): PersistedPromptChipsPayload | undefined {
 		const clean = stripTrailingImagePlaceholders(messageText);
+		const canonical = canonicalizePromptLookupText(messageText);
 		const idx = this.pendingPersistQueue.findIndex(
 			(r) =>
 				(timestamp !== undefined && r.timestamp !== undefined && String(r.timestamp) === String(timestamp)) ||
-				r.expandedText === clean,
+				r.expandedText === clean ||
+				canonicalizePromptLookupText(r.expandedText) === canonical,
 		);
 		if (idx === -1) return undefined;
 		const base = this.pendingPersistQueue.splice(idx, 1)[0]!;
 		const finalized: PersistedPromptChipsPayload =
 			timestamp !== undefined ? { ...base, timestamp } : base;
 		this.submittedByExpanded.set(finalized.expandedText, finalized);
+		this.submittedByExpanded.set(canonicalizePromptLookupText(finalized.expandedText), finalized);
 		if (finalized.timestamp !== undefined) {
 			this.submittedByTimestamp.set(String(finalized.timestamp), finalized);
 		}
@@ -866,6 +885,7 @@ export class PromptChipRegistry {
 					chips: data.chips,
 				};
 				this.submittedByExpanded.set(payload.expandedText, payload);
+				this.submittedByExpanded.set(canonicalizePromptLookupText(payload.expandedText), payload);
 				if (payload.timestamp !== undefined) {
 					this.submittedByTimestamp.set(String(payload.timestamp), payload);
 				}
@@ -907,11 +927,14 @@ export class PromptChipRegistry {
 	): ReconstructedSubmittedPrompt {
 		const normalizedRaw = rawCardText.replace(/\r\n?/g, "\n").trim();
 		const clean = stripTrailingImagePlaceholders(normalizedRaw);
+		const canonical = canonicalizePromptLookupText(normalizedRaw);
 
 		const matchesRecordText = (rec: PersistedPromptChipsPayload): boolean =>
 			rec.expandedText === clean ||
 			rec.expandedText === normalizedRaw ||
-			rec.displayText === clean;
+			rec.displayText === clean ||
+			canonicalizePromptLookupText(rec.expandedText) === canonical ||
+			canonicalizePromptLookupText(rec.displayText) === canonical;
 
 		if (messageId !== undefined) {
 			const byId = this.submittedByMessageId.get(String(messageId));
@@ -928,7 +951,9 @@ export class PromptChipRegistry {
 		}
 
 		const byExpanded =
-			this.submittedByExpanded.get(clean) ?? this.submittedByExpanded.get(normalizedRaw);
+			this.submittedByExpanded.get(clean) ??
+			this.submittedByExpanded.get(normalizedRaw) ??
+			this.submittedByExpanded.get(canonical);
 		if (byExpanded) {
 			return { displayText: byExpanded.displayText, chips: byExpanded.chips };
 		}

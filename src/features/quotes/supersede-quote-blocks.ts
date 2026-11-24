@@ -135,6 +135,18 @@ export function scrubExternalQuoteBlocksUi(ctx: ExtensionContext): void {
 	}
 }
 
+function captureCallerSignature(): string {
+	const rawStack = new Error().stack ?? "";
+	const frames = rawStack
+		.split("\n")
+		.slice(1)
+		.map((line) => line.trim())
+		.filter((line) => line.startsWith("at ") && !line.includes("supersede-quote-blocks"));
+	if (frames.length === 0) return "";
+	const topWithoutLineCol = frames[0]!.replace(/:\d+:\d+(\)?)$/, "$1");
+	return `${topWithoutLineCol}\n${frames.slice(1).join("\n")}`;
+}
+
 export function installQuoteBlocksSuperseder(pi: ExtensionAPI): void {
 	installExtensionRunnerNeutralizer();
 	clearExternalQuoteBlocksSharedStore();
@@ -149,13 +161,14 @@ export function installQuoteBlocksSuperseder(pi: ExtensionAPI): void {
 
 	let ownsQuoteCommands = false;
 	let ownsAltQ = false;
-	let suppressingExternalSync = false;
+	const suppressedCallerSignatures = new Set<string>();
 
 	const markExternalQuoteBlocksDetected = () => {
-		if (suppressingExternalSync) return;
-		suppressingExternalSync = true;
+		const sig = captureCallerSignature();
+		if (!sig || suppressedCallerSignatures.has(sig)) return;
+		suppressedCallerSignatures.add(sig);
 		queueMicrotask(() => {
-			suppressingExternalSync = false;
+			suppressedCallerSignatures.delete(sig);
 		});
 	};
 
@@ -193,8 +206,11 @@ export function installQuoteBlocksSuperseder(pi: ExtensionAPI): void {
 	}) as ExtensionAPI["registerShortcut"];
 
 	pi.on = ((event: any, handler: any) => {
-		if (internalRegistrationDepth === 0 && suppressingExternalSync) {
-			return;
+		if (internalRegistrationDepth === 0 && suppressedCallerSignatures.size > 0) {
+			const sig = captureCallerSignature();
+			if (sig && suppressedCallerSignatures.has(sig)) {
+				return;
+			}
 		}
 		return origOn(event, handler);
 	}) as ExtensionAPI["on"];

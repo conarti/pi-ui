@@ -171,6 +171,7 @@ function stripSpecificTokensFromDraft(draftText: string, tokens: readonly string
 export interface EditDraftQuoteResult {
 	readonly found: boolean;
 	readonly removed: boolean;
+	readonly unchanged?: boolean;
 	readonly draftText: string;
 	readonly updatedToken?: string;
 }
@@ -181,19 +182,20 @@ export function editDraftQuote(
 	quoteNumber: number,
 	nextRawText: string,
 ): EditDraftQuoteResult {
-	const active = listActiveDraftQuotes(registry, draftText);
+	const baseDraft = draftText ? registry.syncDraft(draftText) : draftText;
+	const active = listActiveDraftQuotes(registry, baseDraft);
 	const target = active.find((item) => item.number === quoteNumber);
 	if (!target) {
 		return {
 			found: false,
 			removed: false,
-			draftText,
+			draftText: baseDraft,
 		};
 	}
 
 	const normalizedNext = normalizeQuoteText(nextRawText);
 	if (!normalizedNext) {
-		const stripped = stripSpecificTokensFromDraft(draftText, [target.token]);
+		const stripped = stripSpecificTokensFromDraft(baseDraft, [target.token]);
 		const synced = registry.syncDraft(stripped);
 		return {
 			found: true,
@@ -202,16 +204,26 @@ export function editDraftQuote(
 		};
 	}
 
+	if (normalizedNext === target.entry.text) {
+		return {
+			found: true,
+			removed: false,
+			unchanged: true,
+			draftText: baseDraft,
+			updatedToken: target.token,
+		};
+	}
+
 	const replaced = registry.replaceQuoteAtNumber(quoteNumber, normalizedNext, target.entry.sourceLabel);
 	if (!replaced) {
 		return {
 			found: false,
 			removed: false,
-			draftText,
+			draftText: baseDraft,
 		};
 	}
 
-	const nextDraft = draftText.split(target.token).join(replaced.token);
+	const nextDraft = baseDraft.split(target.token).join(replaced.token);
 	const synced = registry.syncDraft(nextDraft);
 	return {
 		found: true,
@@ -231,15 +243,16 @@ export function removeDraftQuote(
 	draftText: string,
 	quoteNumber: number,
 ): RemoveDraftQuoteResult {
-	const active = listActiveDraftQuotes(registry, draftText);
+	const baseDraft = draftText ? registry.syncDraft(draftText) : draftText;
+	const active = listActiveDraftQuotes(registry, baseDraft);
 	const target = active.find((item) => item.number === quoteNumber);
 	if (!target) {
 		return {
 			removed: false,
-			draftText,
+			draftText: baseDraft,
 		};
 	}
-	const stripped = stripSpecificTokensFromDraft(draftText, [target.token]);
+	const stripped = stripSpecificTokensFromDraft(baseDraft, [target.token]);
 	const synced = registry.syncDraft(stripped);
 	return {
 		removed: true,
@@ -256,15 +269,16 @@ export function clearAllDraftQuotes(
 	registry: PromptChipRegistry,
 	draftText: string,
 ): ClearAllDraftQuotesResult {
-	const active = listActiveDraftQuotes(registry, draftText);
+	const baseDraft = draftText ? registry.syncDraft(draftText) : draftText;
+	const active = listActiveDraftQuotes(registry, baseDraft);
 	if (active.length === 0) {
 		return {
 			removedCount: 0,
-			draftText,
+			draftText: baseDraft,
 		};
 	}
 	const stripped = stripSpecificTokensFromDraft(
-		draftText,
+		baseDraft,
 		active.map((item) => item.token),
 	);
 	const synced = registry.syncDraft(stripped);

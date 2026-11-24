@@ -335,11 +335,70 @@ function pointToScreenCoords(
 	return { col: point.col, row: point.row };
 }
 
+/* TuiBase.hasOverlay учитывает nonCapturing Hover Popup, поэтому локально подменяем проверку на блокирующие модалки */
+function withNonCapturingOverlaysTransparent<T>(self: any, fn: () => T): T {
+	const hadOwn = Object.prototype.hasOwnProperty.call(self, "hasOverlay");
+	const prevDesc = hadOwn ? Object.getOwnPropertyDescriptor(self, "hasOverlay") : undefined;
+	Object.defineProperty(self, "hasOverlay", {
+		configurable: true,
+		value: () => hasBlockingModalOverlay(self),
+	});
+	try {
+		return fn();
+	} finally {
+		if (hadOwn && prevDesc) {
+			Object.defineProperty(self, "hasOverlay", prevDesc);
+		} else {
+			delete self.hasOverlay;
+		}
+	}
+}
+
+function isPointCoveredByRenderedOverlay(self: any, x: number, y: number): boolean {
+	const layouts = self?.renderedOverlayLayouts;
+	if (!Array.isArray(layouts)) return false;
+	for (let i = layouts.length - 1; i >= 0; i--) {
+		const layout = layouts[i];
+		if (
+			layout &&
+			x >= layout.col &&
+			x < layout.col + layout.width &&
+			y >= layout.row &&
+			y < layout.row + layout.height
+		) {
+			return true;
+		}
+	}
+	return false;
+}
+
 export function installSelectionQuoteRuntimeHooks(
 	controller: SelectionQuoteOverlayController,
 ): void {
 	const altProto = (TuiAltScreen as unknown as { prototype?: object } | undefined)?.prototype;
 	if (altProto) {
+		hookMethod(
+			altProto,
+			"handleSelectionMouseEvent",
+			"quotes.allowSelectionWithHoverOverlays",
+			(self, args, original) =>
+				withNonCapturingOverlaysTransparent(self, () => original.apply(self, args)),
+		);
+
+		hookMethod(
+			altProto,
+			"getScrollbarTargetAt",
+			"quotes.allowScrollbarWithHoverOverlays",
+			(self, args, original) => {
+				const x = Number(args[0] ?? -1);
+				const y = Number(args[1] ?? -1);
+				if (isPointCoveredByRenderedOverlay(self, x, y)) {
+					return undefined;
+				}
+				return withNonCapturingOverlaysTransparent(self, () => original.apply(self, args));
+			},
+		);
+
 		hookMethod(
 			altProto,
 			"parseWheelEvent",
@@ -393,9 +452,9 @@ export function installSelectionQuoteRuntimeHooks(
 					const scrollBox = runtime.scroll
 						? findScrollViewLayoutBox(self.currentLayout?.root, runtime.scroll)
 						: undefined;
-					const inTranscript = !bounds?.start?.scrollView
-						? !scrollBox || raw.y < scrollBox.rect.y + scrollBox.rect.height
-						: bounds.start.scrollView === runtime.scroll;
+					const inTranscript = runtime.scroll
+						? bounds?.start?.scrollView === runtime.scroll
+						: !scrollBox || raw.y < scrollBox.rect.y + scrollBox.rect.height;
 
 					if (cleaned && bounds && inTranscript) {
 						const focusPt = self.selectionFocus as SelectionPointLike | undefined;
@@ -467,23 +526,25 @@ export function installSelectionQuoteRuntimeHooks(
 
 	const scrollProto = (ScrollView as unknown as { prototype?: object } | undefined)?.prototype;
 	if (scrollProto) {
-		hookMethod(
-			scrollProto,
-			"scrollTo",
-			"quotes.selectionScrollDismiss",
-			(self, args, original) => {
-				const prevTop = self.scrollTop;
-				const result = original.apply(self, args);
-				if (
-					controller.isShowing &&
-					self.scrollTop !== prevTop &&
-					self === getActiveHostRuntime()?.scroll
-				) {
-					controller.hide();
-					getActiveHostRuntime()?.requestRender();
-				}
-				return result;
-			},
-		);
+		for (const methodName of ["scrollTo", "scrollBy", "scrollToStart", "scrollToEnd"] as const) {
+			hookMethod(
+				scrollProto,
+				methodName,
+				`quotes.selectionScrollDismiss.${methodName}`,
+				(self, args, original) => {
+					const prevTop = self.scrollTop;
+					const result = original.apply(self, args);
+					if (
+						controller.isShowing &&
+						self.scrollTop !== prevTop &&
+						self === getActiveHostRuntime()?.scroll
+					) {
+						controller.hide();
+						getActiveHostRuntime()?.requestRender();
+					}
+					return result;
+				},
+			);
+		}
 	}
 }

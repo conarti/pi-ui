@@ -83,7 +83,7 @@ function createEmbeddedEditorTheme(theme: Theme): EditorTheme {
 
 export async function showQuotesManagerModal(
 	ctx: ExtensionContext,
-	options?: { initialEditQuoteNumber?: number },
+	options?: { initialEditQuoteNumber?: number; initialSelectQuoteNumber?: number },
 ): Promise<void> {
 	if (ctx.mode !== "tui" || !ctx.hasUI) return;
 	const registry = getActivePromptChipRegistry();
@@ -123,6 +123,15 @@ export async function showQuotesManagerModal(
 				return true;
 			};
 
+			if (options?.initialSelectQuoteNumber !== undefined) {
+				const foundSelectIdx = initialItems.findIndex(
+					(it) => it.number === options.initialSelectQuoteNumber,
+				);
+				if (foundSelectIdx !== -1) {
+					selectedIdx = foundSelectIdx;
+				}
+			}
+
 			if (options?.initialEditQuoteNumber !== undefined) {
 				const foundIdx = initialItems.findIndex((it) => it.number === options.initialEditQuoteNumber);
 				if (foundIdx !== -1) {
@@ -138,7 +147,7 @@ export async function showQuotesManagerModal(
 				mode = "inspect";
 				editingQuoteNumber = undefined;
 				editBuffer = undefined;
-				if (res.found) {
+				if (res.found && !(res.unchanged && res.draftText === draft)) {
 					writeComposerDraftTextWithUndo(ctx, res.draftText, preSnap);
 				}
 				const remaining = getItems();
@@ -372,6 +381,14 @@ export async function showQuotesManagerModal(
 				},
 				handleInput(data: string): void {
 					if (mode === "edit" && editBuffer) {
+						if (
+							(editBuffer as unknown as { isInPaste?: boolean }).isInPaste ||
+							data.includes("\x1b[200~")
+						) {
+							editBuffer.handleInput(data);
+							tui.requestRender();
+							return;
+						}
 						if (data === "\x1b" || matchesKey(data, "escape")) {
 							cancelEdit();
 							tui.requestRender();
@@ -507,6 +524,11 @@ export async function showQuotesManagerModal(
 		},
 		{ width: 76, minWidth: 46, anchor: "center", margin: 2 },
 	);
+
+	const activeEditor = getActiveComposerEditor();
+	if (activeEditor) {
+		getComposerHooks()?.onPointerOrCursorChange?.({ hovered: false }, activeEditor);
+	}
 }
 
 export async function handleQuotesCommand(rawArgs: string, ctx: ExtensionContext): Promise<void> {
@@ -563,7 +585,9 @@ export async function handleQuotesCommand(rawArgs: string, ctx: ExtensionContext
 				ctx.ui.notify(`Цитата #${targetNum} не найдена в черновике`, "warning");
 				return;
 			}
-			writeComposerDraftTextWithUndo(ctx, res.draftText, preSnap);
+			if (!(res.unchanged && res.draftText === draft)) {
+				writeComposerDraftTextWithUndo(ctx, res.draftText, preSnap);
+			}
 			ctx.ui.notify(
 				res.removed ? `Цитата #${targetNum} удалена` : `Цитата #${targetNum} обновлена`,
 				"info",
@@ -579,8 +603,17 @@ export async function handleQuotesCommand(rawArgs: string, ctx: ExtensionContext
 		return;
 	}
 
-	if (ctx.mode === "tui" && ctx.hasUI) {
-		await showQuotesManagerModal(ctx);
+	const directQuoteNum = sub !== "" && rest === "" ? parseQuoteTargetNumber(sub) : undefined;
+	if (sub !== "" && sub !== "list" && sub !== "preview" && directQuoteNum === undefined) {
+		ctx.ui.notify("Использование: /quotes [edit <номер> [текст] | remove <номер> | clear]", "warning");
+		return;
+	}
+
+	if (ctx.mode === "tui" && ctx.hasUI && sub !== "list") {
+		await showQuotesManagerModal(
+			ctx,
+			directQuoteNum !== undefined ? { initialSelectQuoteNumber: directQuoteNum } : undefined,
+		);
 		return;
 	}
 

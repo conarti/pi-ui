@@ -360,8 +360,15 @@ export class PiUiComposerEditor extends CustomEditor {
 	}
 
 	setTextWithUndoSnapshot(text: string, preCapturedSnapshot?: unknown): void {
+		const normalizedNext =
+			(this as unknown as { normalizeText?: (s: string) => string }).normalizeText?.(text) ?? text;
+		/* Editor.setText пропускает pushUndoSnapshot при неизменной строке (например, правка цитаты с тем же числом строк) */
+		const sameText = preCapturedSnapshot !== undefined && this.getText() === normalizedNext;
 		this.pendingUndoCapture = { hasValue: true, value: preCapturedSnapshot };
 		try {
+			if (sameText) {
+				(this as unknown as { pushUndoSnapshot(): void }).pushUndoSnapshot();
+			}
 			this.setText(text);
 		} finally {
 			this.pendingUndoCapture = undefined;
