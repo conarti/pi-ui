@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, truncateToWidth } from "@earendil-works/pi-tui";
+import { restoreDefaultWorkingIndicator, setComposerWorkingSuppressed } from "../chrome/working-indicator.ts";
 import { onTick } from "./clock.ts";
 import { colorizeRgb, interpolateRgb, paletteOf } from "./color.ts";
 import { progressGlow, type ColorRamp, type ThinkingLevel } from "./palette.ts";
@@ -123,6 +124,14 @@ export class ProgressController {
 		// point and rebuilds it at the next turn_start from the message last set here,
 		// so releasing the label at agent_end makes a retried turn reappear under Pi's
 		// default label. Release it at the final settlement instead.
+		pi.on("turn_start", () => {
+			if (this.context && this.message && !this.stopTicking) {
+				this.startTicking();
+			}
+		});
+		pi.on("agent_end", () => {
+			this.stopAnimation();
+		});
 		pi.on("agent_settled", () => {
 			this.activeTools.clear();
 			this.clearMessage();
@@ -150,6 +159,7 @@ export class ProgressController {
 		this.message = undefined;
 		this.frames = [];
 		this.frame = 0;
+		setComposerWorkingSuppressed(true, ctx);
 		ctx.ui.setWorkingVisible(true);
 		ctx.ui.setWorkingIndicator({ frames: [] });
 		if (message) this.setMessage(message);
@@ -163,7 +173,7 @@ export class ProgressController {
 		if (!preservePhase) this.message = undefined;
 		this.frames = [];
 		try { context?.ui.setWorkingMessage(); }
-		finally { context?.ui.setWorkingIndicator(); }
+		finally { restoreDefaultWorkingIndicator(context); }
 	}
 
 	private setMessage(message: string): void {
@@ -173,11 +183,21 @@ export class ProgressController {
 		this.frames = [];
 		this.frame = 0;
 		this.renderMessage();
+		this.startTicking();
+	}
+
+	private startTicking(): void {
 		if (this.stopTicking) return;
-		this.stopTicking = onTick(() => {
-			this.frame++;
-			this.renderMessage();
-		});
+		this.stopTicking = onTick(
+			() => {
+				this.frame++;
+				this.renderMessage();
+			},
+			undefined,
+			() => {
+				this.stopTicking = undefined;
+			},
+		);
 	}
 
 	private renderMessage(): void {

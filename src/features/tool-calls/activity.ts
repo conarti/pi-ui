@@ -272,6 +272,10 @@ export class SilentActivityAnimator {
 		// agent_end closes a low-level run, not retries/compaction/continuations.
 		// Keep the shared clock alive until Pi declares final settlement, as the
 		// working-label controller already does.
+		pi.on("agent_end", () => {
+			this.running = false;
+			this.refresh();
+		});
 		pi.on("agent_settled", () => {
 			this.running = false;
 			this.refresh();
@@ -333,15 +337,21 @@ export class SilentActivityAnimator {
 		}
 		// Ticks with the working label, so the two share one repaint per frame, and
 		// frames that look the same as the last one ask for no repaint at all.
-		this.stopTicking = onTick(() => {
-			this.frame++;
-			const state = sharedActivityState();
-			const level = this.readLevel();
-			const changed = frameChanges(this.frame) || level !== state.level;
-			state.frame = this.frame;
-			state.level = level;
-			if (changed) state.tui?.requestRender();
-		});
+		this.stopTicking = onTick(
+			() => {
+				this.frame++;
+				const state = sharedActivityState();
+				const level = this.readLevel();
+				const changed = frameChanges(this.frame) || level !== state.level;
+				state.frame = this.frame;
+				state.level = level;
+				if (changed) state.tui?.requestRender();
+			},
+			undefined,
+			() => {
+				this.stopTicking = undefined;
+			},
+		);
 	}
 
 	private hide(): void {

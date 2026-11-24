@@ -143,7 +143,13 @@ export class ToolRuntime {
 		} else {
 			this.indicators.set(toolCallId, { invalidate, drawnAt: this.clock() });
 		}
-		this.stopIndicatorTicks ??= onTick(() => this.tick(), INDICATOR_INTERVAL_MS);
+		this.stopIndicatorTicks ??= onTick(
+			() => this.tick(),
+			INDICATOR_INTERVAL_MS,
+			() => {
+				this.stopIndicatorTicks = undefined;
+			},
+		);
 		return this.indicatorFrame;
 	}
 
