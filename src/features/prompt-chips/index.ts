@@ -6,6 +6,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
 	CURSOR_MARKER,
+	getImageDimensions,
 	isKeyRelease,
 	matchesKey,
 	TuiAltScreen,
@@ -191,11 +192,137 @@ function findComponentScreenY(root: any, target: object): number | undefined {
 
 interface ComposerEditorLookupInternals {
 	tui?: TUI;
+	lastWidth?: number;
 	state: { lines: string[]; cursorLine: number; cursorCol: number };
 	scrollOffset: number;
 	renderedVisibleLineCount: number;
 	setCursorCol(col: number): void;
 	buildVisualLineMap?(width: number): Array<{ logicalLine: number; startCol: number; length: number }>;
+}
+
+function resolveComposerVisualLayout(
+	editor: PiUiComposerEditor,
+	totalWidth: number,
+): {
+	readonly compact: boolean;
+	readonly leftOffset: number;
+	readonly innerWidth: number;
+	readonly visualLines: Array<{ logicalLine: number; startCol: number; length: number }>;
+} {
+	const internal = editor as unknown as ComposerEditorLookupInternals;
+	const compact = totalWidth < 9;
+	const leftOffset = compact ? 1 : 4;
+	const innerWidth = Math.max(1, compact ? totalWidth - 2 : totalWidth - 6);
+	const fallbackWrapWidth = Math.max(1, (compact ? Math.max(3, innerWidth) : innerWidth) - 1);
+	const wrapWidth = internal.lastWidth && internal.lastWidth > 0 ? internal.lastWidth : fallbackWrapWidth;
+	const visualLines =
+		internal.buildVisualLineMap?.(wrapWidth) ??
+		internal.state.lines.map((line, idx) => ({
+			logicalLine: idx,
+			startCol: 0,
+			length: line.length,
+		}));
+	return { compact, leftOffset, innerWidth, visualLines };
+}
+
+function decorateComposerVisualLine(
+	rawInner: string,
+	visualLineIndex: number,
+	editor: PiUiComposerEditor,
+	registry: PromptChipRegistry,
+	theme: Theme,
+): string {
+	const internal = editor as unknown as ComposerEditorLookupInternals;
+	const totalWidth = internal.tui?.terminal?.columns ?? 80;
+	const { visualLines } = resolveComposerVisualLayout(editor, totalWidth);
+	const vl = visualLines[visualLineIndex];
+	if (!vl) {
+		return decorateComposerLineWithChips(rawInner, theme);
+	}
+	const logicalLine = internal.state.lines[vl.logicalLine] ?? "";
+	const vlEnd = vl.startCol + vl.length;
+	if (!logicalLine || vl.length <= 0 || !logicalLine.includes("[")) {
+		return rawInner;
+	}
+
+	const overlapping = findPromptChipSpans(logicalLine).filter(
+		(span) => span.end > vl.startCol && span.start < vlEnd && registry.isKnownChipSpan(span),
+	);
+	if (overlapping.length === 0) {
+		return rawInner;
+	}
+
+	let out = "";
+	let rawIdx = 0;
+	let logicalOffset = 0;
+	let spanPtr = 0;
+	let styledRun = "";
+	let styledSpan: (typeof overlapping)[number] | undefined;
+
+	const flushStyledRun = () => {
+		if (!styledRun || !styledSpan) return;
+		const isCursorOnChip =
+			internal.state.cursorLine === vl.logicalLine &&
+			internal.state.cursorCol === styledSpan.start;
+		out += styleInlinePromptChip(styledRun, {
+			kind: styledSpan.kind,
+			theme,
+			active: isCursorOnChip,
+		});
+		styledRun = "";
+	};
+
+	while (rawIdx < rawInner.length && logicalOffset < vl.length) {
+		if (rawInner.startsWith(CURSOR_MARKER, rawIdx)) {
+			flushStyledRun();
+			out += CURSOR_MARKER;
+			rawIdx += CURSOR_MARKER.length;
+			continue;
+		}
+		if (rawInner.startsWith(FAKE_CURSOR_START, rawIdx)) {
+			flushStyledRun();
+			out += FAKE_CURSOR_START;
+			rawIdx += FAKE_CURSOR_START.length;
+			continue;
+		}
+		if (rawInner.startsWith(FAKE_CURSOR_END, rawIdx)) {
+			flushStyledRun();
+			out += FAKE_CURSOR_END;
+			rawIdx += FAKE_CURSOR_END.length;
+			continue;
+		}
+
+		const absCol = vl.startCol + logicalOffset;
+		while (spanPtr < overlapping.length && overlapping[spanPtr]!.end <= absCol) {
+			spanPtr += 1;
+		}
+		const activeSpan =
+			spanPtr < overlapping.length &&
+			absCol >= overlapping[spanPtr]!.start &&
+			absCol < overlapping[spanPtr]!.end
+				? overlapping[spanPtr]
+				: undefined;
+
+		if (activeSpan !== styledSpan) {
+			flushStyledRun();
+			styledSpan = activeSpan;
+		}
+
+		const ch = rawInner[rawIdx]!;
+		if (styledSpan) {
+			styledRun += ch;
+		} else {
+			out += ch;
+		}
+		rawIdx += 1;
+		logicalOffset += 1;
+	}
+
+	flushStyledRun();
+	if (rawIdx < rawInner.length) {
+		out += rawInner.slice(rawIdx);
+	}
+	return out;
 }
 
 function resolveComposerTopRow(
@@ -225,9 +352,7 @@ function findHoveredComposerChip(
 	}
 	const internal = editor as unknown as ComposerEditorLookupInternals;
 	const totalWidth = pointer.width ?? tui?.terminal?.columns ?? 80;
-	const compact = totalWidth < 9;
-	const leftOffset = compact ? 1 : 4;
-	const innerWidth = Math.max(1, compact ? totalWidth - 2 : totalWidth - 6);
+	const { leftOffset, visualLines } = resolveComposerVisualLayout(editor, totalWidth);
 	const visibleRows = internal.renderedVisibleLineCount ?? Math.max(1, internal.state.lines.length);
 
 	if (pointer.mouseY < 1 || pointer.mouseY > visibleRows) {
@@ -235,13 +360,6 @@ function findHoveredComposerChip(
 	}
 
 	const visualIdx = (internal.scrollOffset ?? 0) + (pointer.mouseY - 1);
-	const visualLines =
-		internal.buildVisualLineMap?.(compact ? Math.max(3, innerWidth) : innerWidth) ??
-		internal.state.lines.map((line, idx) => ({
-			logicalLine: idx,
-			startCol: 0,
-			length: line.length,
-		}));
 	const vl = visualLines[visualIdx];
 	if (!vl) return undefined;
 
@@ -269,6 +387,7 @@ function findHoveredComposerChip(
 function findCaretComposerChip(
 	editor: PiUiComposerEditor,
 	registry: PromptChipRegistry,
+	tui: TUI | undefined,
 ): { chip: SerializedPromptChip; col: number } | undefined {
 	if (!editor.focused) return undefined;
 	const internal = editor as unknown as ComposerEditorLookupInternals;
@@ -285,9 +404,20 @@ function findCaretComposerChip(
 
 	const entry = registry.resolveChip(matched.kind, matched.number);
 	if (!entry) return undefined;
+
+	const totalWidth = tui?.terminal?.columns ?? 80;
+	const { leftOffset, visualLines } = resolveComposerVisualLayout(editor, totalWidth);
+	const targetVl = visualLines.find(
+		(vl) =>
+			vl.logicalLine === internal.state.cursorLine &&
+			matched.start >= vl.startCol &&
+			matched.start < vl.startCol + Math.max(1, vl.length),
+	);
+	const sliceFrom = targetVl ? targetVl.startCol : 0;
+
 	return {
 		chip: entryToSerializedChip(entry, matched.number),
-		col: 4 + visibleWidth(line.slice(0, matched.start)),
+		col: leftOffset + visibleWidth(line.slice(sliceFrom, matched.start)),
 	};
 }
 
@@ -330,7 +460,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 			return;
 		}
 
-		const caretMatch = findCaretComposerChip(editor, registry);
+		const caretMatch = findCaretComposerChip(editor, registry, tui);
 		if (caretMatch) {
 			const topRow = resolveComposerTopRow(tui, editor, lastPointer);
 			overlayController.show(tui, caretMatch.chip, "composer-caret", {
@@ -416,7 +546,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 					return;
 				}
 				const classified = classifyTextPaste(text);
-				if (classified.shouldCreateChip) {
+				if (!isBashDraft(editor) && classified.shouldCreateChip) {
 					const preSnap = registry.captureUndoSnapshot();
 					const chip = registry.registerPaste(text);
 					editor.insertTextWithUndoSnapshot(chip.token, preSnap);
@@ -496,16 +626,29 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 			if (classified.shouldCreateChip) {
 				return registry.registerPaste(pastedText).token;
 			}
-			return undefined;
+			/* Короткие вставки обходят Editor.handlePaste напрямую, чтобы табы >1000 колонок не рождали legacy [paste #N] */
+			let inlineText = classified.normalizedText;
+			if (/^[/~.]/.test(inlineText)) {
+				const internal = editor as unknown as ComposerEditorLookupInternals;
+				const currentLine = internal.state.lines[internal.state.cursorLine] ?? "";
+				const beforeChar =
+					internal.state.cursorCol > 0 ? currentLine[internal.state.cursorCol - 1] : "";
+				if (beforeChar && /\w/.test(beforeChar)) {
+					inlineText = ` ${inlineText}`;
+				}
+			}
+			return inlineText;
 		},
 
 		findAtomicTokenSpans(text) {
-			return findPromptChipSpans(text);
+			const registry = getActivePromptChipRegistry();
+			return findPromptChipSpans(text).filter((span) => registry.isKnownChipSpan(span));
 		},
 
-		decorateRenderedLine(line) {
+		decorateRenderedLine(line, visualLineIndex, editor) {
 			const theme = activeCtx?.ui.theme ?? getActiveGlobalTheme();
-			return decorateComposerLineWithChips(line, theme);
+			const registry = getActivePromptChipRegistry();
+			return decorateComposerVisualLine(line, visualLineIndex, editor, registry, theme);
 		},
 
 		onDraftChanged(text, editor) {
@@ -582,9 +725,30 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 		requestRender();
 	};
 
+	const hydratePersistedFromSession = (ctxOverride?: ExtensionContext): void => {
+		const sm = (ctxOverride ?? activeCtx ?? getActiveHostRuntime()?.ctx)?.sessionManager;
+		if (!sm) return;
+		const entries = sm.getEntries?.() ?? sm.getBranch?.() ?? [];
+		if (entries.length > 0) {
+			getActivePromptChipRegistry().restorePersistedEntries(entries);
+		}
+	};
+
 	const pillFormatter: PromptPillFormatter = (rawText, context) => {
 		const registry = getActivePromptChipRegistry();
-		const reconstructed = registry.reconstructSubmittedPrompt(rawText, context.timestamp);
+		let reconstructed = registry.reconstructSubmittedPrompt(
+			rawText,
+			context.timestamp,
+			context.messageId,
+		);
+		if (reconstructed.chips.length === 0) {
+			hydratePersistedFromSession();
+			reconstructed = registry.reconstructSubmittedPrompt(
+				rawText,
+				context.timestamp,
+				context.messageId,
+			);
+		}
 		if (reconstructed.chips.length === 0) {
 			return rawText;
 		}
@@ -672,13 +836,18 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 			lastDraftText = "";
 			lastPointer = undefined;
 		}
-		const entries = ctx.sessionManager.getBranch?.() ?? ctx.sessionManager.getEntries?.() ?? [];
+		const entries = ctx.sessionManager.getEntries?.() ?? ctx.sessionManager.getBranch?.() ?? [];
 		registry.restorePersistedEntries(entries);
 		if (ctx.mode === "tui" && ctx.hasUI) {
 			unsubscribeInputGuard = ctx.ui.onTerminalInput((data) => {
-				if ((data === "\x1b" || matchesKey(data, "escape")) && overlayController.source === "sent-pill") {
+				if (
+					!isKeyRelease(data) &&
+					(data === "\x1b" || matchesKey(data, "escape")) &&
+					overlayController.source === "sent-pill"
+				) {
 					overlayController.hide(["sent-pill"]);
 					requestRender();
+					return { consume: true };
 				}
 				queueMicrotask(() => {
 					const tui = resolveEditorTui(lastEditor);
@@ -691,6 +860,10 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 				return undefined;
 			});
 		}
+	});
+
+	pi.on("session_tree", async (_event, ctx) => {
+		hydratePersistedFromSession(ctx);
 	});
 
 	pi.on("message_start", async (event: any) => {
@@ -725,20 +898,24 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 			return { action: "continue" };
 		}
 
-		/* BMP конвертируется в PNG, так как базовый протокол вложений поддерживает только PNG/JPEG/WebP/GIF */
-		for (const span of spans) {
-			if (span.kind !== "image") continue;
-			const chip = registry.resolveChip("image", span.number);
-			if (chip && chip.kind === "image" && chip.mimeType === "image/bmp" && chip.base64Data) {
-				try {
-					const converted = await convertToPng(chip.base64Data, "image/bmp");
-					if (converted?.data) {
-						(chip as { base64Data?: string; mimeType?: string }).base64Data = converted.data;
-						(chip as { base64Data?: string; mimeType?: string }).mimeType = "image/png";
-					}
-				} catch {
-					/* Если photon недоступен, оставляем исходные данные */
+		/* BMP конвертируется в PNG через срез отправляемого черновика, т.к. submitValue уже очистил activeBindings */
+		for (const chip of registry.resolveChipsForSubmit(event.text)) {
+			if (chip.kind !== "image" || chip.mimeType !== "image/bmp" || !chip.base64Data) continue;
+			try {
+				const converted = await convertToPng(chip.base64Data, "image/bmp");
+				if (converted?.data) {
+					const pngBytes = Buffer.from(converted.data, "base64");
+					const dims = getImageDimensions(converted.data, "image/png");
+					registry.updateImageChipPayload(chip.id, {
+						mimeType: "image/png",
+						base64Data: converted.data,
+						byteLength: pngBytes.byteLength,
+						widthPx: dims?.widthPx,
+						heightPx: dims?.heightPx,
+					});
 				}
+			} catch {
+				/* Если photon недоступен, оставляем исходные данные */
 			}
 		}
 

@@ -25,6 +25,31 @@ const TINY_PNG_BASE64 =
 	"iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAYAAAC56t6BAAAADklEQVR4nGP4z8DAwMAAAwkB/7b5L2EAAAAASUVORK5CYII=";
 const TINY_PNG_BYTES = Uint8Array.from(Buffer.from(TINY_PNG_BASE64, "base64"));
 
+function createValidBmpBytes(widthPx = 2, heightPx = 3): Uint8Array {
+	const rowStride = Math.ceil((widthPx * 3) / 4) * 4;
+	const pixelBytes = rowStride * heightPx;
+	const buf = Buffer.alloc(54 + pixelBytes, 0);
+	buf[0] = 0x42;
+	buf[1] = 0x4d;
+	buf.writeUInt32LE(54 + pixelBytes, 2);
+	buf.writeUInt32LE(54, 10);
+	buf.writeUInt32LE(40, 14);
+	buf.writeInt32LE(widthPx, 18);
+	buf.writeInt32LE(heightPx, 22);
+	buf.writeUInt16LE(1, 26);
+	buf.writeUInt16LE(24, 28);
+	buf.writeUInt32LE(pixelBytes, 34);
+	for (let r = 0; r < heightPx; r++) {
+		for (let c = 0; c < widthPx; c++) {
+			const off = 54 + r * rowStride + c * 3;
+			buf[off] = 0xd8;
+			buf[off + 1] = 0x82;
+			buf[off + 2] = 0x3b;
+		}
+	}
+	return new Uint8Array(buf);
+}
+
 async function flushAsyncPaste(): Promise<void> {
 	for (let i = 0; i < 6; i++) {
 		await Promise.resolve();
@@ -651,5 +676,329 @@ describe("Prompt Chips end-to-end via ExtensionHarness + HostRuntime", () => {
 		expect(visiblePopups()).toHaveLength(1);
 		harness.tui.clickMouse(70, rowIdx + 4);
 		expect(visiblePopups()).toHaveLength(0);
+	});
+
+	it("converts pasted BMP paths to PNG on real Enter submit (with BMP dimensions in preview), keeps !bash Ctrl+V text & tab-heavy inline pastes chip-free, syncs onChange on renumbering, and reconstructs ISO-timestamped /reload + /tree entries", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "pi-ui-chip-bmp-"));
+		const bmpPath = join(tempDir, "diagram.bmp");
+		writeFileSync(bmpPath, createValidBmpBytes(4, 3));
+
+		let clipText: string | null = "echo one\necho two\necho three\necho four";
+		setHostClipboardProvider({
+			readFilePaths: async () => null,
+			readImage: async () => null,
+			readText: async () => clipText,
+		});
+
+		harness = createExtensionHarness({ theme: "dark", width: 96, height: 26 });
+		harness.mount(conartiPiUi);
+		await harness.startSession();
+
+		const editor = harness.editor as PiUiComposerEditor;
+		harness.tui.dock.addChild(editor);
+		harness.tui.renderViewport(96, 26);
+
+		let submittedFromEditor = "";
+		editor.onSubmit = (val: string) => {
+			submittedFromEditor = val;
+		};
+
+		/* 1. В режиме !bash Ctrl+V с 4-строчным текстом вставляет текст без превращения в [📋 Pasted #1] */
+		harness.ctx.ui.setEditorText("!");
+		await harness.sendTerminalInput("\x05");
+		await harness.sendTerminalInput("\x16");
+		await flushAsyncPaste();
+		expect(editor.getText()).not.toContain("[📋 Pasted");
+		expect(editor.getText()).toContain("echo four");
+
+		/* 2. Однострочная вставка из 260 табов (<=300 символов, >1000 после расширения табов) не рождает legacy [paste #1] */
+		harness.ctx.ui.setEditorText("");
+		await harness.sendTerminalInput(`\x1b[200~${"\t".repeat(260)}\x1b[201~`);
+		expect(editor.getText()).not.toContain("[paste #");
+
+		/* 3. onChange (harness.editorText) получает уже перенумерованный текст при удалении #1 из двух чипов */
+		harness.ctx.ui.setEditorText("");
+		await harness.sendTerminalInput(`\x1b[200~${bmpPath}\x1b[201~`);
+		await harness.sendTerminalInput(" ");
+		await harness.sendTerminalInput(`\x1b[200~${bmpPath}\x1b[201~`);
+		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2]");
+
+		await harness.sendTerminalInput("\x01");
+		await harness.sendTerminalInput("\x1b[3~");
+		expect(editor.getText()).toBe(" [🖼 Image #1]");
+		expect(harness.editorText).toBe(" [🖼 Image #1]");
+
+		/* 4. Hover Popup на BMP чипе показывает размеры 4×3, а отправка по реальному Enter (\r) конвертирует BMP -> image/png */
+		const visibleHoverOverlays = () =>
+			harness!.tui.overlayStack.filter(
+				(e) => e.options?.nonCapturing === true && harness!.tui.isOverlayVisible(e),
+			);
+		await harness.sendTerminalInput("\x05");
+		expect(visibleHoverOverlays()).toHaveLength(1);
+		const bmpPreview = stripTerminalSequences(
+			visibleHoverOverlays()[0]!.component.render(52).join("\n"),
+		);
+		expect(bmpPreview).toContain("diagram.bmp");
+		expect(bmpPreview).toContain("4×3");
+
+		await harness.sendTerminalInput("\r");
+		expect(submittedFromEditor).toBe("[🖼 Image #1]");
+
+		const bmpInputRes = await harness.emit("input", {
+			type: "input",
+			text: submittedFromEditor,
+			source: "interactive",
+		});
+		const bmpTransformed = bmpInputRes.find((r: any) => r?.action === "transform") as {
+			action: "transform";
+			text: string;
+			images?: Array<{ type: "image"; data: string; mimeType: string }>;
+		};
+		expect(bmpTransformed).toBeDefined();
+		expect(bmpTransformed.images).toHaveLength(1);
+		expect(bmpTransformed.images![0]!.mimeType).toBe("image/png");
+		const decodedPng = Buffer.from(bmpTransformed.images![0]!.data, "base64");
+		expect(Array.from(decodedPng.subarray(0, 8))).toEqual([
+			0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+		]);
+
+		/* 5. /reload (карточки смонтированы ДО session_start с ISO entry.timestamp) и /tree на соседнюю ветку */
+		const allSessionEntries = [
+			{
+				type: "custom",
+				id: "c-b1",
+				parentId: null,
+				timestamp: "2026-05-10T12:00:00.100Z",
+				customType: "conarti-prompt-chips",
+				data: {
+					timestamp: 1715342400000,
+					displayText: "Fix [📋 Pasted #1 · 4 lines]",
+					expandedText: "Fix a\nb\nc\nd",
+					chips: [
+						{
+							id: "chip-b1",
+							kind: "paste",
+							number: 1,
+							token: "[📋 Pasted #1 · 4 lines]",
+							lineCount: 4,
+							charCount: 7,
+							metric: "lines",
+							previewText: "a\nb\nc\nd",
+						},
+					],
+				},
+			},
+			{
+				type: "message",
+				id: "m-b1",
+				parentId: "c-b1",
+				timestamp: "2026-05-10T12:00:00.101Z",
+				message: {
+					role: "user",
+					timestamp: 1715342400000,
+					content: [{ type: "text", text: "Fix a\nb\nc\nd" }],
+				},
+			},
+			{
+				type: "custom",
+				id: "c-b2",
+				parentId: null,
+				timestamp: "2026-05-10T12:05:00.100Z",
+				customType: "conarti-prompt-chips",
+				data: {
+					timestamp: 1715342700000,
+					displayText: "Branch2 [📋 Pasted #1 · 4 lines]",
+					expandedText: "Branch2 w\nx\ny\nz",
+					chips: [
+						{
+							id: "chip-b2",
+							kind: "paste",
+							number: 1,
+							token: "[📋 Pasted #1 · 4 lines]",
+							lineCount: 4,
+							charCount: 7,
+							metric: "lines",
+							previewText: "w\nx\ny\nz",
+						},
+					],
+				},
+			},
+			{
+				type: "message",
+				id: "m-b2",
+				parentId: "c-b2",
+				timestamp: "2026-05-10T12:05:00.101Z",
+				message: {
+					role: "user",
+					timestamp: 1715342700000,
+					content: [{ type: "text", text: "Branch2 w\nx\ny\nz" }],
+				},
+			},
+		];
+
+		await harness.shutdownSession();
+		/* При старте активна только ветка 1 (branch содержит только c-b1, m-b1), а entries содержит обе ветки */
+		harness = createExtensionHarness({
+			theme: "dark",
+			width: 96,
+			height: 22,
+			entries: allSessionEntries,
+			branch: allSessionEntries.slice(0, 2),
+		});
+		harness.mount(conartiPiUi);
+
+		/* Имитируем InteractiveMode.handleReloadCommand: rebuildChatFromMessages выполняется ДО session_start */
+		const preStartCard = new UserMessageComponent(
+			"Fix a\nb\nc\nd",
+			{} as any,
+			0,
+			[],
+			"m-b1",
+			"2026-05-10T12:00:00.101Z" as any,
+		);
+		harness.tui.chatContainer.addChild(preStartCard);
+		await harness.emit("session_start", { reason: "reload" });
+
+		const reloadScreen = harness.tui.renderViewport(96, 22).map((l) => stripTerminalSequences(l));
+		expect(reloadScreen.join("\n")).toContain("Fix [📋 Pasted #1 · 4 lines]");
+
+		/* Переключение /tree на вторую ветку рендерит пилюлю из второй ветки без нового session_start */
+		harness.tui.chatContainer.clear();
+		harness.setEntries(allSessionEntries, allSessionEntries.slice(2, 4));
+		await harness.emit("session_tree", {});
+		const treeCard = new UserMessageComponent(
+			"Branch2 w\nx\ny\nz",
+			{} as any,
+			0,
+			[],
+			"m-b2",
+			"2026-05-10T12:05:00.101Z" as any,
+		);
+		harness.tui.chatContainer.addChild(treeCard);
+		const treeScreen = harness.tui.renderViewport(96, 22).map((l) => stripTerminalSequences(l));
+		expect(treeScreen.join("\n")).toContain("Branch2 [📋 Pasted #1 · 4 lines]");
+	});
+
+	it("aligns composer hover/caret previews and pill styling across wrapped lines (including innerWidth-1 wrap boundary), keeps hand-typed literal [🖼 Image #99] non-atomic, isolates adjacent chips on Ctrl+W, and consumes Esc when dismissing sent-pill popups", async () => {
+		setHostClipboardProvider({
+			readFilePaths: async () => null,
+			readImage: async () => ({
+				bytes: TINY_PNG_BYTES,
+				mimeType: "image/png",
+				fileName: "wrap-check.png",
+			}),
+			readText: async () => null,
+		});
+
+		harness = createExtensionHarness({ theme: "dark", width: 40, height: 24 });
+		harness.mount(conartiPiUi);
+		await harness.startSession();
+
+		const editor = harness.editor as PiUiComposerEditor;
+		harness.tui.dock.addChild(editor);
+
+		const visibleHoverOverlays = () =>
+			harness!.tui.overlayStack.filter(
+				(e) => e.options?.nonCapturing === true && harness!.tui.isOverlayVisible(e),
+			);
+
+		/* 1. На ширине 40 innerWidth=34, но Editor переносит по lastWidth=33: строка ровно в 34 колонки уводит чип на 2-ю строку (y=2) */
+		const imgChipCols = visibleWidth("[🖼 Image #1]");
+		await harness.sendTerminalInput(`${"x".repeat(34 - imgChipCols - 1)} `);
+		await harness.sendTerminalInput("\x16");
+		await flushAsyncPaste();
+		await harness.sendTerminalInput(" ok");
+		harness.tui.renderViewport(40, 24);
+		expect(visibleHoverOverlays()).toHaveLength(0);
+
+		editor.handleMouse({
+			type: "move",
+			button: "none",
+			x: 6,
+			y: 2,
+			screenX: 6,
+			screenY: 20,
+			width: 40,
+			height: 4,
+		} as any);
+		expect(visibleHoverOverlays()).toHaveLength(1);
+		expect(
+			stripTerminalSequences(visibleHoverOverlays()[0]!.component.render(36).join("\n")),
+		).toContain("wrap-check.png");
+
+		/* 2. Каретка на перенесённом чипе позиционирует Hover Popup над колонкой чипа на его визуальной строке (col=4), а не у правого края экрана */
+		editor.handleMouse({
+			type: "move",
+			button: "none",
+			x: 35,
+			y: 2,
+			screenX: 35,
+			screenY: 20,
+			width: 40,
+			height: 4,
+		} as any);
+		expect(visibleHoverOverlays()).toHaveLength(0);
+
+		harness.tui.renderViewport(100, 24);
+		harness.ctx.ui.setEditorText("");
+		await harness.sendTerminalInput(`${"a".repeat(86)} `);
+		await harness.sendTerminalInput("\x16");
+		await flushAsyncPaste();
+		harness.tui.renderViewport(100, 24);
+		/* Переместим каретку на сам чип (Left) и проверим col попапа */
+		await harness.sendTerminalInput("\x1b[D");
+		expect(visibleHoverOverlays()).toHaveLength(1);
+		expect(visibleHoverOverlays()[0]!.options?.col).toBe(4);
+
+		/* 3. Узкая ширина 24 разбивает [📋 Pasted #1 · 5 lines] на 2 визуальные строки - обе сохраняют фон пилюли \x1b[48;2; */
+		harness.ctx.ui.setEditorText("");
+		await harness.sendTerminalInput("\x1b[200~l1\nl2\nl3\nl4\nl5\x1b[201~");
+		const narrowLines = editor.render(24);
+		for (const line of narrowLines) {
+			expect(visibleWidth(line)).toBe(24);
+		}
+		expect(narrowLines[1]).toContain("\x1b[48;2;");
+		expect(narrowLines[2]).toContain("\x1b[48;2;");
+
+		/* 4. Набранный вручную незарегистрированный текст "[🖼 Image #99]" редактируется посимвольно, а два слитных зарегистрированных чипа удаляются по одному на Ctrl+W */
+		harness.ctx.ui.setEditorText("");
+		for (const ch of "[🖼 Image #99]") {
+			await harness.sendTerminalInput(ch);
+		}
+		await harness.sendTerminalInput("\x7f");
+		expect(editor.getText()).toBe("[🖼 Image #99");
+
+		harness.ctx.ui.setEditorText("");
+		await harness.sendTerminalInput("\x16");
+		await flushAsyncPaste();
+		await harness.sendTerminalInput("\x16");
+		await flushAsyncPaste();
+		expect(editor.getText()).toBe("[🖼 Image #1][🖼 Image #2]");
+		await harness.sendTerminalInput("\x17");
+		expect(editor.getText()).toBe("[🖼 Image #1]");
+
+		/* 5. Esc при открытом попапе отправленной пилюли закрывает только попап, не вызывая editor.onEscape (не прерывая стриминг) */
+		harness.ctx.ui.setEditorText("");
+		(harness.keybindings as any).matches = (data: string, action: string) =>
+			action === "app.interrupt" && data === "\x1b";
+		let escapeCalled = 0;
+		editor.onEscape = () => {
+			escapeCalled += 1;
+		};
+		const card = new UserMessageComponent("Check [Image #1: /var/tmp/esc-test.png]");
+		harness.tui.chatContainer.addChild(card);
+		const screen = harness.tui.renderViewport(88, 24).map((l) => stripTerminalSequences(l));
+		const rowIdx = screen.findIndex((r) => r.includes("[🖼 Image #1]"));
+		const colIdx = screen[rowIdx]!.indexOf("[🖼 Image #1]") + 2;
+		harness.tui.clickMouse(colIdx, rowIdx);
+		expect(visibleHoverOverlays()).toHaveLength(1);
+
+		await harness.sendTerminalInput("\x1b");
+		expect(visibleHoverOverlays()).toHaveLength(0);
+		expect(escapeCalled).toBe(0);
+
+		/* Повторный Esc при закрытом попапе штатно доходит до editor.onEscape */
+		await harness.sendTerminalInput("\x1b");
+		expect(escapeCalled).toBe(1);
 	});
 });

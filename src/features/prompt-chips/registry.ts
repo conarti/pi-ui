@@ -320,6 +320,7 @@ export class PromptChipRegistry {
 	private readonly historyByToken = new Map<string, string>();
 	private readonly stagedDrafts: StagedDraftSnapshot[] = [];
 	private readonly pendingPersistQueue: PersistedPromptChipsPayload[] = [];
+	private readonly submittedByMessageId = new Map<string, PersistedPromptChipsPayload>();
 	private readonly submittedByTimestamp = new Map<string, PersistedPromptChipsPayload>();
 	private readonly submittedByExpanded = new Map<string, PersistedPromptChipsPayload>();
 
@@ -397,6 +398,63 @@ export class PromptChipRegistry {
 
 	getChipById(id: string): PromptChipEntry | undefined {
 		return this.sessionVault.get(id);
+	}
+
+	isKnownChipSpan(span: Pick<PromptChipSpan, "kind" | "number" | "token">): boolean {
+		const key = makeChipBindingKey(span.kind, span.number);
+		const chipId =
+			this.activeBindings.get(key) ??
+			this.historyByToken.get(span.token) ??
+			this.historyByBindingKey.get(key);
+		const entry = chipId ? this.sessionVault.get(chipId) : undefined;
+		return Boolean(entry && entry.kind === span.kind);
+	}
+
+	resolveChipsForSubmit(inputText: string): PromptChipEntry[] {
+		const spans = findPromptChipSpans(inputText);
+		if (spans.length === 0) return [];
+		const trimmedInput = inputText.trim();
+		const stagedIdx = this.stagedDrafts.findLastIndex((s) => s.rawText === trimmedInput);
+		const lookupBindings =
+			stagedIdx !== -1 ? this.stagedDrafts[stagedIdx]!.bindings : this.activeBindings;
+		const resolved: PromptChipEntry[] = [];
+		const seenIds = new Set<string>();
+		for (const span of spans) {
+			const key = makeChipBindingKey(span.kind, span.number);
+			const chipId =
+				lookupBindings.get(key) ??
+				this.activeBindings.get(key) ??
+				this.historyByToken.get(span.token) ??
+				this.historyByBindingKey.get(key);
+			const entry = chipId ? this.sessionVault.get(chipId) : undefined;
+			if (entry && entry.kind === span.kind && !seenIds.has(entry.id)) {
+				seenIds.add(entry.id);
+				resolved.push(entry);
+			}
+		}
+		return resolved;
+	}
+
+	updateImageChipPayload(
+		chipId: string,
+		patch: {
+			readonly mimeType: string;
+			readonly base64Data: string;
+			readonly byteLength?: number;
+			readonly widthPx?: number;
+			readonly heightPx?: number;
+		},
+	): void {
+		const existing = this.sessionVault.get(chipId);
+		if (!existing || existing.kind !== "image") return;
+		this.sessionVault.set(chipId, {
+			...existing,
+			mimeType: patch.mimeType,
+			base64Data: patch.base64Data,
+			byteLength: patch.byteLength ?? existing.byteLength,
+			widthPx: patch.widthPx ?? existing.widthPx,
+			heightPx: patch.heightPx ?? existing.heightPx,
+		});
 	}
 
 	captureUndoSnapshot(): PromptChipUndoSnapshot {
@@ -480,6 +538,8 @@ export class PromptChipRegistry {
 			const newKey = makeChipBindingKey(item.entry.kind, newNumber);
 			const newToken = formatPromptChipToken(item.entry, newNumber);
 			nextBindings.set(newKey, item.chipId);
+			this.historyByBindingKey.set(newKey, item.chipId);
+			this.historyByToken.set(newToken, item.chipId);
 			replacementByOldKey.set(item.oldKey, newToken);
 		}
 
@@ -565,7 +625,7 @@ export class PromptChipRegistry {
 		}
 
 		const trimmedInput = inputText.trim();
-		const stagedIdx = this.stagedDrafts.findIndex((s) => s.rawText === trimmedInput);
+		const stagedIdx = this.stagedDrafts.findLastIndex((s) => s.rawText === trimmedInput);
 		const staged = stagedIdx !== -1 ? this.stagedDrafts.splice(stagedIdx, 1)[0] : undefined;
 		const lookupBindings = staged?.bindings ?? this.activeBindings;
 
@@ -737,47 +797,100 @@ export class PromptChipRegistry {
 	}
 
 	restorePersistedEntries(entries: readonly unknown[]): void {
+		const customByEntryId = new Map<string, PersistedPromptChipsPayload>();
+		let immediatelyPrecedingPayload: PersistedPromptChipsPayload | undefined;
+
 		for (const raw of entries) {
 			if (!raw || typeof raw !== "object") continue;
-			const entry = raw as { type?: unknown; customType?: unknown; data?: unknown };
-			if (entry.type !== "custom" || entry.customType !== PROMPT_CHIPS_CUSTOM_ENTRY_TYPE) continue;
-			const data = entry.data as Partial<PersistedPromptChipsPayload> | undefined;
-			if (
-				!data ||
-				typeof data.displayText !== "string" ||
-				typeof data.expandedText !== "string" ||
-				!Array.isArray(data.chips)
-			) {
+			const entry = raw as {
+				type?: unknown;
+				id?: unknown;
+				parentId?: unknown;
+				timestamp?: unknown;
+				customType?: unknown;
+				data?: unknown;
+				message?: {
+					role?: unknown;
+					timestamp?: unknown;
+					content?: unknown;
+				};
+			};
+
+			if (entry.type === "custom" && entry.customType === PROMPT_CHIPS_CUSTOM_ENTRY_TYPE) {
+				const data = entry.data as Partial<PersistedPromptChipsPayload> | undefined;
+				if (
+					!data ||
+					typeof data.displayText !== "string" ||
+					typeof data.expandedText !== "string" ||
+					!Array.isArray(data.chips)
+				) {
+					immediatelyPrecedingPayload = undefined;
+					continue;
+				}
+				const payload: PersistedPromptChipsPayload = {
+					timestamp: data.timestamp,
+					displayText: data.displayText,
+					expandedText: data.expandedText,
+					chips: data.chips,
+				};
+				this.submittedByExpanded.set(payload.expandedText, payload);
+				if (payload.timestamp !== undefined) {
+					this.submittedByTimestamp.set(String(payload.timestamp), payload);
+				}
+				if (typeof entry.id === "string" && entry.id.length > 0) {
+					customByEntryId.set(entry.id, payload);
+				}
+				immediatelyPrecedingPayload = payload;
 				continue;
 			}
-			const payload: PersistedPromptChipsPayload = {
-				timestamp: data.timestamp,
-				displayText: data.displayText,
-				expandedText: data.expandedText,
-				chips: data.chips,
-			};
-			this.submittedByExpanded.set(payload.expandedText, payload);
-			if (payload.timestamp !== undefined) {
-				this.submittedByTimestamp.set(String(payload.timestamp), payload);
+
+			if (entry.type === "message" && entry.message?.role === "user") {
+				const msgTs = entry.message.timestamp;
+				const byParent =
+					typeof entry.parentId === "string" ? customByEntryId.get(entry.parentId) : undefined;
+				const byMsgTs =
+					msgTs !== undefined ? this.submittedByTimestamp.get(String(msgTs)) : undefined;
+				const matched = byParent ?? byMsgTs ?? immediatelyPrecedingPayload;
+				if (matched) {
+					if (entry.id !== undefined && entry.id !== null) {
+						this.submittedByMessageId.set(String(entry.id), matched);
+					}
+					if (typeof entry.timestamp === "string" || typeof entry.timestamp === "number") {
+						this.submittedByTimestamp.set(String(entry.timestamp), matched);
+					}
+					if (typeof msgTs === "string" || typeof msgTs === "number") {
+						this.submittedByTimestamp.set(String(msgTs), matched);
+					}
+				}
 			}
+
+			immediatelyPrecedingPayload = undefined;
 		}
 	}
 
 	reconstructSubmittedPrompt(
 		rawCardText: string,
 		timestamp?: number | string,
+		messageId?: string,
 	): ReconstructedSubmittedPrompt {
 		const normalizedRaw = rawCardText.replace(/\r\n?/g, "\n").trim();
 		const clean = stripTrailingImagePlaceholders(normalizedRaw);
 
+		const matchesRecordText = (rec: PersistedPromptChipsPayload): boolean =>
+			rec.expandedText === clean ||
+			rec.expandedText === normalizedRaw ||
+			rec.displayText === clean;
+
+		if (messageId !== undefined) {
+			const byId = this.submittedByMessageId.get(String(messageId));
+			if (byId && matchesRecordText(byId)) {
+				return { displayText: byId.displayText, chips: byId.chips };
+			}
+		}
+
 		if (timestamp !== undefined) {
 			const byTs = this.submittedByTimestamp.get(String(timestamp));
-			if (
-				byTs &&
-				(byTs.expandedText === clean ||
-					byTs.expandedText === normalizedRaw ||
-					byTs.displayText === clean)
-			) {
+			if (byTs && matchesRecordText(byTs)) {
 				return { displayText: byTs.displayText, chips: byTs.chips };
 			}
 		}
@@ -875,6 +988,7 @@ export class PromptChipRegistry {
 		this.historyByToken.clear();
 		this.stagedDrafts.length = 0;
 		this.pendingPersistQueue.length = 0;
+		this.submittedByMessageId.clear();
 		this.submittedByTimestamp.clear();
 		this.submittedByExpanded.clear();
 	}

@@ -306,7 +306,12 @@ export class PiUiComposerEditor extends CustomEditor {
 				if (hooks?.restoreUndoState && snap !== undefined) {
 					hooks.restoreUndoState(snap, this);
 				}
-				hooks?.onDraftChanged?.(this.getText(), this);
+				const beforeSyncText = this.getText();
+				hooks?.onDraftChanged?.(beforeSyncText, this);
+				const afterSyncText = this.getText();
+				if (afterSyncText !== beforeSyncText) {
+					hostOnChange?.(afterSyncText);
+				}
 			}
 		};
 
@@ -327,7 +332,7 @@ export class PiUiComposerEditor extends CustomEditor {
 				if (!this.restoringUndo) {
 					getComposerHooks()?.onDraftChanged?.(text, this);
 				}
-				hostOnChange?.(text);
+				hostOnChange?.(this.getText());
 			},
 			set: (fn: ((text: string) => void) | undefined) => {
 				hostOnChange = fn;

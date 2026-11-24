@@ -396,6 +396,25 @@ async function normalizeClipboardImageBytes(
 	}
 }
 
+const PREFERRED_CLIPBOARD_IMAGE_MIMES = [
+	"image/png",
+	"image/jpeg",
+	"image/webp",
+	"image/gif",
+] as const;
+
+function selectPreferredClipboardImageTarget(types: readonly string[]): string | undefined {
+	const entries = types
+		.map((raw) => raw.trim())
+		.filter(Boolean)
+		.map((raw) => ({ raw, base: raw.split(";")[0]?.trim().toLowerCase() ?? raw.toLowerCase() }));
+	for (const preferred of PREFERRED_CLIPBOARD_IMAGE_MIMES) {
+		const hit = entries.find((entry) => entry.base === preferred);
+		if (hit) return hit.raw;
+	}
+	return entries.find((entry) => entry.base.startsWith("image/"))?.raw;
+}
+
 export const defaultHostClipboardProvider: HostClipboardProvider = {
 	async readFilePaths() {
 		try {
@@ -413,15 +432,8 @@ export const defaultHostClipboardProvider: HostClipboardProvider = {
 			if (process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === "wayland") {
 				const listBuf = await runClipboardExec("wl-paste", ["--list-types"], 1000);
 				if (listBuf !== undefined) {
-					const types = listBuf
-						.toString("utf8")
-						.split(/\r?\n/)
-						.map((t) => t.trim())
-						.filter(Boolean);
-					const preferred =
-						["image/png", "image/jpeg", "image/webp", "image/gif"].find((m) =>
-							types.some((t) => t.split(";")[0]?.trim().toLowerCase() === m),
-						) ?? types.find((t) => t.toLowerCase().startsWith("image/"));
+					const types = listBuf.toString("utf8").split(/\r?\n/);
+					const preferred = selectPreferredClipboardImageTarget(types);
 					if (!preferred) return null;
 					const imgBuf = await runClipboardExec("wl-paste", ["--type", preferred, "--no-newline"], 3000);
 					if (!imgBuf || imgBuf.length === 0) return null;
@@ -435,15 +447,8 @@ export const defaultHostClipboardProvider: HostClipboardProvider = {
 					1000,
 				);
 				if (targetsBuf !== undefined) {
-					const types = targetsBuf
-						.toString("utf8")
-						.split(/\r?\n/)
-						.map((t) => t.trim())
-						.filter(Boolean);
-					const preferred =
-						["image/png", "image/jpeg", "image/webp", "image/gif"].find((m) =>
-							types.some((t) => t.split(";")[0]?.trim().toLowerCase() === m),
-						) ?? types.find((t) => t.toLowerCase().startsWith("image/"));
+					const types = targetsBuf.toString("utf8").split(/\r?\n/);
+					const preferred = selectPreferredClipboardImageTarget(types);
 					if (!preferred) return null;
 					const imgBuf = await runClipboardExec(
 						"xclip",
@@ -471,7 +476,7 @@ export const defaultHostClipboardProvider: HostClipboardProvider = {
 			if (out !== undefined) return out.toString("utf8") || null;
 		}
 		if (process.platform === "linux") {
-			if (process.env.WAYLAND_DISPLAY) {
+			if (process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === "wayland") {
 				const out = await runClipboardExec("wl-paste", ["--no-newline", "--type", "text"], 3000);
 				if (out !== undefined) return out.toString("utf8") || null;
 			}

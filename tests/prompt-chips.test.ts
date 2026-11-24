@@ -299,4 +299,149 @@ describe("Prompt Chip pure registry & paste threshold seams", () => {
 			"Follow: [📋 Pasted #1 · 5 lines]",
 		);
 	});
+
+	it("expands the latest chip after clearing a prior draft, keeps renumbered #2->#1 attachment across cut/yank or history browse, and disambiguates identical expanded prompts on /reload via messageId and ISO entry timestamps", () => {
+		const registry = new PromptChipRegistry();
+
+		/* 1. Удалённый черновик с [🖼 Image #1] не должен подменять новый [🖼 Image #1] при отправке */
+		const abandonedImg = registry.registerImage({
+			filePath: "/tmp/wrong-shot.png",
+			fileName: "wrong-shot.png",
+			mimeType: "image/png",
+			byteLength: 100,
+			base64Data: "WRONG_B64",
+		});
+		registry.stageDraftBeforeClear(abandonedImg.token);
+		registry.syncDraft("");
+
+		const freshImg = registry.registerImage({
+			filePath: "/tmp/right-shot.png",
+			fileName: "right-shot.png",
+			mimeType: "image/png",
+			byteLength: 200,
+			base64Data: "RIGHT_B64",
+		});
+		expect(freshImg.token).toBe("[🖼 Image #1]");
+		registry.stageDraftBeforeClear(freshImg.token);
+		registry.syncDraft("");
+
+		const submittedFresh = registry.expandDraftForSubmit(freshImg.token);
+		expect(submittedFresh.text).toBe("[Image #1: /tmp/right-shot.png]");
+		expect(submittedFresh.images).toEqual([
+			{ type: "image", data: "RIGHT_B64", mimeType: "image/png" },
+		]);
+
+		/* 2. После удаления #1 перенумерованный #2 -> #1 сохраняет свою привязку при вырезании/вставке или просмотре истории */
+		const yankRegistry = new PromptChipRegistry();
+		yankRegistry.registerImage({
+			filePath: "/tmp/deleted-first.png",
+			fileName: "deleted-first.png",
+			mimeType: "image/png",
+			byteLength: 111,
+			base64Data: "FIRST_B64",
+		});
+		const secondImg = yankRegistry.registerImage({
+			filePath: "/tmp/kept-second.png",
+			fileName: "kept-second.png",
+			mimeType: "image/png",
+			byteLength: 222,
+			base64Data: "SECOND_B64",
+		});
+		expect(yankRegistry.syncDraft(secondImg.token)).toBe("[🖼 Image #1]");
+		expect(yankRegistry.resolveChip("image", 1)?.id).toBe(secondImg.entry.id);
+
+		/* Пользователь листает историю (черновик временно без чипов) и возвращается к "[🖼 Image #1]" */
+		yankRegistry.syncDraft("previous plain prompt");
+		yankRegistry.syncDraft("[🖼 Image #1]");
+		expect(yankRegistry.resolveChip("image", 1)?.id).toBe(secondImg.entry.id);
+
+		/* 3. Два хода с одинаковым путём файла имеют разный размер/разрешение и ISO timestamp записи SessionMessageEntry */
+		const turn1Img = yankRegistry.registerImage({
+			filePath: "/tmp/mockup.png",
+			fileName: "mockup.png",
+			mimeType: "image/png",
+			byteLength: 1024,
+			base64Data: "V1",
+			widthPx: 320,
+			heightPx: 240,
+		});
+		yankRegistry.syncDraft(turn1Img.token);
+		const exp1 = yankRegistry.expandDraftForSubmit(`Inspect ${turn1Img.token}`);
+		yankRegistry.bindSubmittedMessageTimestamp(exp1.text, 1715340300000);
+		const persisted1 = yankRegistry.consumePersistPayload(exp1.text, 1715340300000)!;
+
+		const turn2Img = yankRegistry.registerImage({
+			filePath: "/tmp/mockup.png",
+			fileName: "mockup.png",
+			mimeType: "image/png",
+			byteLength: 8192,
+			base64Data: "V2",
+			widthPx: 1280,
+			heightPx: 720,
+		});
+		const exp2 = yankRegistry.expandDraftForSubmit(`Inspect ${turn2Img.token}`);
+		yankRegistry.bindSubmittedMessageTimestamp(exp2.text, 1715340360000);
+		const persisted2 = yankRegistry.consumePersistPayload(exp2.text, 1715340360000)!;
+
+		const sessionFileEntries = [
+			{
+				type: "custom",
+				id: "c1",
+				parentId: null,
+				timestamp: "2026-05-10T11:25:00.500Z",
+				customType: "conarti-prompt-chips",
+				data: persisted1,
+			},
+			{
+				type: "message",
+				id: "m1",
+				parentId: "c1",
+				timestamp: "2026-05-10T11:25:00.501Z",
+				message: {
+					role: "user",
+					timestamp: 1715340300000,
+					content: [{ type: "text", text: exp1.text }],
+				},
+			},
+			{
+				type: "custom",
+				id: "c2",
+				parentId: "m1",
+				timestamp: "2026-05-10T11:26:00.500Z",
+				customType: "conarti-prompt-chips",
+				data: persisted2,
+			},
+			{
+				type: "message",
+				id: "m2",
+				parentId: "c2",
+				timestamp: "2026-05-10T11:26:00.501Z",
+				message: {
+					role: "user",
+					timestamp: 1715340360000,
+					content: [{ type: "text", text: exp2.text }],
+				},
+			},
+		];
+
+		const reloaded = new PromptChipRegistry();
+		reloaded.restorePersistedEntries(sessionFileEntries);
+
+		const rec1ByIso = reloaded.reconstructSubmittedPrompt(
+			exp1.text,
+			"2026-05-10T11:25:00.501Z",
+			"m1",
+		);
+		const rec2ByIso = reloaded.reconstructSubmittedPrompt(
+			exp2.text,
+			"2026-05-10T11:26:00.501Z",
+			"m2",
+		);
+		expect(rec1ByIso.chips[0]).toMatchObject({ byteLength: 1024, widthPx: 320, heightPx: 240 });
+		expect(rec2ByIso.chips[0]).toMatchObject({ byteLength: 8192, widthPx: 1280, heightPx: 720 });
+
+		/* Даже без messageId (только по ISO timestamp записи из renderSessionEntries) оба хода различаются */
+		const rec1IsoOnly = reloaded.reconstructSubmittedPrompt(exp1.text, "2026-05-10T11:25:00.501Z");
+		expect(rec1IsoOnly.chips[0]).toMatchObject({ byteLength: 1024, widthPx: 320, heightPx: 240 });
+	});
 });

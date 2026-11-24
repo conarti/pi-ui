@@ -65,6 +65,24 @@ export function normalizeCandidateImagePath(rawToken: string, cwd: string): stri
 	return isAbsolute(candidate) ? candidate : resolve(cwd, candidate);
 }
 
+function readBmpDimensions(bytes: Uint8Array): { widthPx: number; heightPx: number } | null {
+	if (bytes.byteLength < 26 || bytes[0] !== 0x42 || bytes[1] !== 0x4d) {
+		return null;
+	}
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	const dibHeaderSize = view.getUint32(14, true);
+	let widthPx = 0;
+	let heightPx = 0;
+	if (dibHeaderSize === 12) {
+		widthPx = view.getUint16(18, true);
+		heightPx = view.getUint16(20, true);
+	} else if (dibHeaderSize >= 16) {
+		widthPx = Math.abs(view.getInt32(18, true));
+		heightPx = Math.abs(view.getInt32(22, true));
+	}
+	return widthPx > 0 && heightPx > 0 ? { widthPx, heightPx } : null;
+}
+
 export function tryReadImageFileSync(
 	rawPath: string,
 	cwd: string,
@@ -81,7 +99,9 @@ export function tryReadImageFileSync(
 		const base64Data = bytes.toString("base64");
 		const dims = DIRECT_SUPPORTED_IMAGE_MIMES.has(mimeType)
 			? getImageDimensions(base64Data, mimeType)
-			: null;
+			: mimeType === "image/bmp"
+				? readBmpDimensions(bytes)
+				: null;
 		return {
 			filePath: resolvedPath,
 			fileName: basename(resolvedPath),
