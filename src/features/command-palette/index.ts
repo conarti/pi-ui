@@ -1,8 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
-	CURSOR_MARKER,
 	matchesKey,
-	renderFakeCursor,
 	truncateToWidth,
 	visibleWidth,
 	type Component,
@@ -10,7 +8,13 @@ import {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
-import { bgRgb, fgRgb, renderCardFrame } from "../../shared/ansi.ts";
+import { bgRgb, fgRgb } from "../../shared/ansi.ts";
+import {
+	createModalCard,
+	createSingleLineInput,
+	getThemeSurfacePalette,
+	openModalCard,
+} from "../../shared/modal-card.ts";
 import { getStore, MODE_META } from "../../shared/session-store.ts";
 import { showContextInspector } from "../context-inspector/index.ts";
 import { getOutlineSettings } from "../outline-rail/index.ts";
@@ -268,18 +272,20 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 		});
 	}
 
-	const picked = await ctx.ui.custom<PaletteItem | null>(
+	const picked = await openModalCard<PaletteItem | null>(
+		ctx,
 		(_tui, theme, _kb, done) => {
-			let query = "";
+			const card = createModalCard();
+			const searchInput = createSingleLineInput();
 			let selectedIdx = 0;
 			let scrollOffset = 0;
 			let hoveredIdx: number | null = null;
-			let closeHovered = false;
 			let rowMap = new Map<number, number>();
-			let closeHit: { xStart: number; xEnd: number } | null = null;
 
 			const getFiltered = (): PaletteItem[] =>
-				items.filter((it) => fuzzyMatch(query, `${it.group} ${it.label} ${it.keywords} ${it.hint ?? ""}`));
+				items.filter((it) =>
+					fuzzyMatch(searchInput.getValue(), `${it.group} ${it.label} ${it.keywords} ${it.hint ?? ""}`),
+				);
 
 			const comp: Component & Focusable = {
 				focused: true,
@@ -287,6 +293,7 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 				invalidate() {},
 				render(width: number): string[] {
 					rowMap = new Map();
+					const palette = getThemeSurfacePalette(theme);
 					const innerWidth = Math.max(24, width - 4);
 					const filtered = getFiltered();
 
@@ -296,12 +303,14 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 					if (selectedIdx >= scrollOffset + maxVisible) scrollOffset = selectedIdx - maxVisible + 1;
 					scrollOffset = Math.max(0, Math.min(scrollOffset, Math.max(0, filtered.length - maxVisible)));
 
-					const marker = comp.focused ? CURSOR_MARKER : "";
-					const searchPrompt = fgRgb(97, 175, 239, theme.bold("⌕ "));
-					const placeholder = query
-						? `${fgRgb(220, 232, 248, query)}${marker}${renderFakeCursor(" ")}`
-						: `${marker}${renderFakeCursor(" ")}${theme.fg("dim", "Поиск команд, режимов, тем, тулзов, скиллов…")}`;
-					const searchRow = truncateToWidth(` ${searchPrompt}${placeholder}`, innerWidth, "…");
+					const searchPrompt = fgRgb(palette.accent[0], palette.accent[1], palette.accent[2], theme.bold("⌕ "));
+					const inputRendered = searchInput.render({
+						theme,
+						focused: Boolean(comp.focused),
+						maxWidth: Math.max(8, innerWidth - 3),
+						placeholder: "Поиск команд, режимов, тем, тулзов, скиллов…",
+					});
+					const searchRow = truncateToWidth(` ${searchPrompt}${inputRendered}`, innerWidth, "…");
 
 					const body: string[] = [searchRow, theme.fg("borderMuted", "─".repeat(innerWidth))];
 
@@ -318,13 +327,19 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 
 							const badge = theme.fg("dim", `[${item.group}]`);
 							const rightHint = item.hint ? theme.fg("muted", ` ${item.hint} `) : "";
-							const iconPart = isSelected
-								? fgRgb(125, 207, 255, theme.bold(`${item.icon} `))
-								: fgRgb(97, 175, 239, `${item.icon} `);
+							const iconRgb = isSelected ? palette.accentBright : palette.accent;
+							const iconPart = fgRgb(
+								iconRgb[0],
+								iconRgb[1],
+								iconRgb[2],
+								isSelected ? theme.bold(`${item.icon} `) : `${item.icon} `,
+							);
 
 							const availLeft = Math.max(10, innerWidth - visibleWidth(rightHint) - visibleWidth(badge) - 5);
 							const mainText = truncateToWidth(
-								isSelected ? fgRgb(235, 244, 255, theme.bold(item.label)) : theme.fg("text", item.label),
+								isSelected
+									? fgRgb(palette.selectedText[0], palette.selectedText[1], palette.selectedText[2], theme.bold(item.label))
+									: theme.fg("text", item.label),
 								availLeft,
 								"…",
 							);
@@ -334,8 +349,11 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 							const pad = " ".repeat(Math.max(0, innerWidth - visibleWidth(fullRow)));
 							fullRow += pad;
 
-							if (isSelected) fullRow = bgRgb(39, 52, 74, fullRow);
-							else if (isHovered) fullRow = bgRgb(31, 39, 54, fullRow);
+							if (isSelected) {
+								fullRow = bgRgb(palette.selectedRowBg[0], palette.selectedRowBg[1], palette.selectedRowBg[2], fullRow);
+							} else if (isHovered) {
+								fullRow = bgRgb(palette.hoveredRowBg[0], palette.hoveredRowBg[1], palette.hoveredRowBg[2], fullRow);
+							}
 
 							rowMap.set(renderRowIdx, itemIndex);
 							body.push(fullRow);
@@ -344,20 +362,18 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 					}
 
 					const modeMeta = MODE_META[st.mode];
-					const footer = `${fgRgb(modeMeta.rgb[0], modeMeta.rgb[1], modeMeta.rgb[2], `${modeMeta.icon} ${modeMeta.label}`)}  ${theme.fg("dim", "·  ↑↓ / колесо выбор  ·  Enter / клик запуск  ·  Esc закрыть")}`;
-					const countInfo = theme.fg("muted", `${filtered.length}`);
-					const closeBtn = closeHovered ? fgRgb(224, 108, 117, "✕") : theme.fg("muted", "✕");
-					closeHit = { xStart: Math.max(0, width - 5), xEnd: width - 1 };
+					const modeRgb =
+						st.mode === "plan" ? palette.warning : st.mode === "safe" ? palette.info : palette.accent;
+					const footer = `${fgRgb(modeRgb[0], modeRgb[1], modeRgb[2], `${modeMeta.icon} ${modeMeta.label}`)}  ${theme.fg("dim", "·  ↑↓ / колесо выбор  ·  Enter / клик запуск  ·  Esc закрыть")}`;
 
-					return renderCardFrame(
-						fgRgb(125, 207, 255, theme.bold("⌘ Command Palette")),
-						`${countInfo}  ${closeBtn}`,
-						body,
-						footer,
-						width,
-						theme,
-						[97, 175, 239],
-					);
+					return card.render(width, theme, {
+						title: fgRgb(palette.accentBright[0], palette.accentBright[1], palette.accentBright[2], theme.bold("⌘ Command Palette")),
+						headerMeta: theme.fg("muted", `${filtered.length}`),
+						onClose: () => done(null),
+						bodyLines: body,
+						footerText: footer,
+						borderVariant: "primary",
+					});
 				},
 				handleInput(data: string): void {
 					const filtered = getFiltered();
@@ -385,22 +401,8 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 						selectedIdx = Math.min(Math.max(0, filtered.length - 1), selectedIdx + 6);
 						return;
 					}
-					if (matchesKey(data, "ctrl+u")) {
-						query = "";
-						selectedIdx = 0;
-						scrollOffset = 0;
-						return;
-					}
-					if (matchesKey(data, "backspace")) {
-						const segs = [...new Intl.Segmenter().segment(query)];
-						segs.pop();
-						query = segs.map((s) => s.segment).join("");
-						selectedIdx = 0;
-						scrollOffset = 0;
-						return;
-					}
-					if (data.length >= 1 && !data.startsWith("\x1b") && data.charCodeAt(0) >= 32) {
-						query += data;
+					const inputRes = searchInput.handleInput(data);
+					if (inputRes.changed) {
 						selectedIdx = 0;
 						scrollOffset = 0;
 					}
@@ -412,19 +414,15 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 						selectedIdx = Math.max(0, Math.min(filtered.length - 1, selectedIdx + delta));
 						return { handled: true, render: true };
 					}
+					const cardOutcome = card.handleMouse(event);
 					if (event.type === "move") {
-						const nextClose = Boolean(event.y === 0 && closeHit && event.x >= closeHit.xStart && event.x <= closeHit.xEnd);
-						const nextHover = rowMap.get(event.y) ?? null;
-						if (nextClose !== closeHovered || nextHover !== hoveredIdx) {
-							closeHovered = nextClose;
-							hoveredIdx = nextHover;
-							return { handled: true, render: true };
-						}
-						return { handled: true, render: false };
+						const nextHover = cardOutcome.handled ? null : (rowMap.get(event.y) ?? null);
+						const rowChanged = nextHover !== hoveredIdx;
+						hoveredIdx = nextHover;
+						return { handled: true, render: cardOutcome.render || rowChanged };
 					}
 					if (event.type === "click" && event.button === "left") {
-						if (event.y === 0 && closeHit && event.x >= closeHit.xStart && event.x <= closeHit.xEnd) {
-							done(null);
+						if (cardOutcome.triggered) {
 							return { handled: true };
 						}
 						const hitIdx = rowMap.get(event.y);
@@ -438,10 +436,7 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 			};
 			return comp;
 		},
-		{
-			overlay: true,
-			overlayOptions: { width: 78, minWidth: 46, anchor: "center", margin: 2 },
-		},
+		{ width: 78, minWidth: 46, anchor: "center", margin: 2 },
 	);
 
 	if (picked) {
