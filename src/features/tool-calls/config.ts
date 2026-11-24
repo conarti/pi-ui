@@ -19,7 +19,7 @@ type JsonObject = Record<string, unknown>;
 
 export const DEFAULT_CONFIG: CompactToolsConfig = {
 	mode: "normal",
-	style: "grok",
+	style: "density",
 	density: "detailed",
 	tools: [...SUPPORTED_TOOLS],
 	auto_compact: {
@@ -144,7 +144,7 @@ export function mergeConfig(base: CompactToolsConfig, value: unknown, path: stri
 	let density: ToolDensity = base.density;
 	if (rawStyle !== undefined) {
 		if (rawStyle === "detailed" || rawStyle === "diff-focus" || rawStyle === "compact") {
-			style = "grok";
+			style = "density";
 			density = rawStyle;
 		} else {
 			style = rawStyle;
@@ -153,7 +153,7 @@ export function mergeConfig(base: CompactToolsConfig, value: unknown, path: stri
 	if (rawDensity !== undefined) {
 		density = rawDensity;
 		if (rawStyle === undefined) {
-			style = "grok";
+			style = "density";
 		}
 	}
 	const tools = value.tools === undefined ? base.tools : (parseTools(value.tools, path) ?? base.tools);

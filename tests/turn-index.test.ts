@@ -126,7 +126,6 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 		const railLines = outlineRail.render(2);
 		expect(railLines.length).toBe(12);
 
-		/* При 5 репликах в высоте 12: totalRows = 7, top = 2, ticksY = 3, индекс 3 (четвертая реплика) на y = 6 */
 		outlineRail.handleMouse?.({
 			type: "move",
 			button: "none",
@@ -205,7 +204,6 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 		const { stickyBar, outlineRail } = getViewportComponents(harness);
 		const docRenderSpy = vi.spyOn(harness.tui.chatContainer, "render");
 
-		/* Карточка Turn 1 на строках 2..4 (3 строки), resp1 на 5..16 (12 строк), карточка Turn 2 на 17..19 (3 строки) */
 		harness.tui.scroll.scrollTo(20, { disableFollow: true });
 		expect(stripTerminalSequences(stickyBar.render(117).join("\n"))).toContain("10:05");
 		outlineRail.render(2);
@@ -228,7 +226,6 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 		await harness.emit("session_tree", {});
 		outlineRail.render(2);
 
-		/* При 2 репликах в постоянной высоте 12: totalRows = 4, top = 4, ticksY = 5 (Turn 1 на y = 5, Turn 2 на y = 6) */
 		outlineRail.handleMouse?.({
 			type: "click",
 			button: "left",
@@ -323,7 +320,6 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 		expect(resp1RenderSpy).toHaveBeenCalledTimes(3);
 
 		const t3 = new Date(2026, 0, 15, 11, 10).getTime();
-		/* Во время live message_start карточка новой реплики уже смонтирована в chatContainer до записи в sessionManager.getBranch() */
 		const liveTurn3Card = new UserMessageComponent("Third turn live", undefined, 1, [], "u3", new Date(t3).toISOString());
 		harness.tui.chatContainer.addChild(liveTurn3Card);
 		harness.tui.scroll.updateLayout(initialHeight + 18, 12, () => harness!.tui.requestRender());
@@ -358,7 +354,6 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 		harness.mount(conartiPiUi);
 		await harness.startSession();
 
-		/* Каждая карточка реплики занимает 3 строки (vpad = 1), каждый ответ 15 строк: Turn 1 = 0, Turn 2 = 18, Turn 3 = 36 */
 		harness.tui.chatContainer.addChild(new UserMessageComponent("Turn one"));
 		harness.tui.chatContainer.addChild(createMultilineBlock("resp1", 15));
 		harness.tui.chatContainer.addChild(new UserMessageComponent("Turn two"));
@@ -374,7 +369,6 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 		const { stickyBar, outlineRail } = getViewportComponents(harness);
 		outlineRail.render(2);
 
-		/* При 3 репликах в высоте 12: upY = 3, tick0 = 4, tick1 = 5, tick2 = 6, downY = 7 */
 		const clickRail = (y: number) =>
 			outlineRail.handleMouse?.({
 				type: "click",

@@ -1,6 +1,5 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
-	ScrollView,
 	stripTerminalSequences,
 	truncateToWidth,
 	TuiAltScreen,
@@ -8,6 +7,7 @@ import {
 	type Component,
 	type OverlayHandle,
 	type OverlayOptions,
+	type ScrollView,
 	type TUI,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
@@ -18,8 +18,14 @@ import {
 	paintSurfaceRow,
 	type RgbTuple,
 } from "../../shared/ansi.ts";
-import { findScrollViewLayoutBox } from "../../shared/fullscreen-layout.ts";
-import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
+import {
+	findScrollViewLayoutBox,
+	isCoveredByRenderedOverlay,
+} from "../../shared/fullscreen-layout.ts";
+import {
+	getActiveHostRuntime,
+	installViewportScrollDismissHooks,
+} from "../../shared/host-runtime.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
 import {
@@ -354,27 +360,15 @@ function withNonCapturingOverlaysTransparent<T>(self: any, fn: () => T): T {
 	}
 }
 
-function isPointCoveredByRenderedOverlay(self: any, x: number, y: number): boolean {
-	const layouts = self?.renderedOverlayLayouts;
-	if (!Array.isArray(layouts)) return false;
-	for (let i = layouts.length - 1; i >= 0; i--) {
-		const layout = layouts[i];
-		if (
-			layout &&
-			x >= layout.col &&
-			x < layout.col + layout.width &&
-			y >= layout.row &&
-			y < layout.row + layout.height
-		) {
-			return true;
-		}
-	}
-	return false;
-}
-
 export function installSelectionQuoteRuntimeHooks(
 	controller: SelectionQuoteOverlayController,
 ): void {
+	installViewportScrollDismissHooks(
+		"quotes.selection",
+		() => controller.isShowing,
+		() => controller.hide(),
+	);
+
 	const altProto = (TuiAltScreen as unknown as { prototype?: object } | undefined)?.prototype;
 	if (altProto) {
 		hookMethod(
@@ -392,24 +386,10 @@ export function installSelectionQuoteRuntimeHooks(
 			(self, args, original) => {
 				const x = Number(args[0] ?? -1);
 				const y = Number(args[1] ?? -1);
-				if (isPointCoveredByRenderedOverlay(self, x, y)) {
+				if (isCoveredByRenderedOverlay(self, x, y)) {
 					return undefined;
 				}
 				return withNonCapturingOverlaysTransparent(self, () => original.apply(self, args));
-			},
-		);
-
-		hookMethod(
-			altProto,
-			"parseWheelEvent",
-			"quotes.selectionWheelDismiss",
-			(self, args, original) => {
-				const parsed = original.apply(self, args);
-				if (parsed && controller.isShowing) {
-					controller.hide();
-					self.requestRender?.();
-				}
-				return parsed;
 			},
 		);
 
@@ -522,29 +502,5 @@ export function installSelectionQuoteRuntimeHooks(
 				return res;
 			},
 		);
-	}
-
-	const scrollProto = (ScrollView as unknown as { prototype?: object } | undefined)?.prototype;
-	if (scrollProto) {
-		for (const methodName of ["scrollTo", "scrollBy", "scrollToStart", "scrollToEnd"] as const) {
-			hookMethod(
-				scrollProto,
-				methodName,
-				`quotes.selectionScrollDismiss.${methodName}`,
-				(self, args, original) => {
-					const prevTop = self.scrollTop;
-					const result = original.apply(self, args);
-					if (
-						controller.isShowing &&
-						self.scrollTop !== prevTop &&
-						self === getActiveHostRuntime()?.scroll
-					) {
-						controller.hide();
-						getActiveHostRuntime()?.requestRender();
-					}
-					return result;
-				},
-			);
-		}
 	}
 }

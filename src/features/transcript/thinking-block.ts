@@ -191,12 +191,6 @@ export function observeAssistantThinkingMessage(
 	}
 }
 
-export function startThinkingWave(): void {
-	activateAnimationSurface(THINKING_WAVE_SURFACE_KEY, () => {
-		requestRender();
-	});
-}
-
 export function stopThinkingWave(): void {
 	deactivateAnimationSurface(THINKING_WAVE_SURFACE_KEY);
 }

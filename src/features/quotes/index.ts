@@ -2,14 +2,13 @@ import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earend
 import { isKeyRelease, matchesKey } from "@earendil-works/pi-tui";
 import { getActiveGlobalTheme } from "../../shared/ansi.ts";
 import {
-	defaultHostClipboardProvider,
 	getActiveHostRuntime,
-	getHostClipboardProvider,
+	resolveActiveClipboardProvider,
 } from "../../shared/host-runtime.ts";
 import { registerOptionShortcutChord } from "../../shared/keyboard-layout.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
-import { getActiveComposerEditor, type PiUiComposerEditor } from "../chrome/composer.ts";
+import { getActiveComposerEditor } from "../chrome/composer.ts";
 import {
 	getActivePromptChipRegistry,
 	insertQuoteChipInComposer,
@@ -52,18 +51,6 @@ export {
 	withConartiInternalRegistration,
 } from "./supersede-quote-blocks.ts";
 
-function resolveClipboardProvider() {
-	return (
-		getActiveHostRuntime()?.clipboard ??
-		getHostClipboardProvider() ??
-		defaultHostClipboardProvider
-	);
-}
-
-function resolveComposerEditor(): PiUiComposerEditor | undefined {
-	return getActiveComposerEditor();
-}
-
 export function insertQuoteIntoDraft(
 	ctx: ExtensionContext,
 	rawQuoteText: string,
@@ -72,7 +59,7 @@ export function insertQuoteIntoDraft(
 	const cleaned = normalizeQuoteText(rawQuoteText);
 	if (!cleaned) return undefined;
 
-	const editor = resolveComposerEditor();
+	const editor = getActiveComposerEditor();
 	if (editor) {
 		const tui = getActiveHostRuntime()?.tui;
 		if (tui && !hasBlockingModalOverlay(tui)) {
@@ -121,7 +108,7 @@ export function registerQuotesFeature(pi: ExtensionAPI): void {
 			selTui.resetTextSelection?.();
 			selTui.clearTextSelection?.();
 			insertQuoteIntoDraft(ctx, selectedText, "selection");
-			const editor = resolveComposerEditor();
+			const editor = getActiveComposerEditor();
 			if (editor && !hasBlockingModalOverlay(tui)) {
 				tui.setFocus(editor);
 				editor.focused = true;
@@ -160,7 +147,7 @@ export function registerQuotesFeature(pi: ExtensionAPI): void {
 			return;
 		}
 
-		const clipRaw = await resolveClipboardProvider().readText?.();
+		const clipRaw = await resolveActiveClipboardProvider().readText?.();
 		const clipText = typeof clipRaw === "string" ? normalizeQuoteText(clipRaw) : "";
 		if (clipText) {
 			insertQuoteIntoDraft(ctx, clipText, "clipboard");

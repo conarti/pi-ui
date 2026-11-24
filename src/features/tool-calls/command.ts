@@ -45,7 +45,7 @@ const DENSITY_CHOICES: Record<ToolDensity, string> = {
 	compact: "Compact - completed edit, command, and tool runs folded into summary rows",
 };
 
-const STYLE_CHOICES: Record<Exclude<DisplayStyle, "grok">, string> = {
+const STYLE_CHOICES: Record<Exclude<DisplayStyle, "density">, string> = {
 	detailed: DENSITY_CHOICES.detailed,
 	"diff-focus": DENSITY_CHOICES["diff-focus"],
 	compact: DENSITY_CHOICES.compact,
@@ -74,7 +74,7 @@ export function loadEffectiveConfig(cwd?: string, projectTrusted = false): Compa
 	const override = getSessionStyleOverride();
 	if (!override) return base;
 	if (override.style === "detailed" || override.style === "diff-focus" || override.style === "compact") {
-		return { ...base, style: "grok", density: override.style };
+		return { ...base, style: "density", density: override.style };
 	}
 	return {
 		...base,
@@ -127,8 +127,8 @@ export function saveStyle(path: string, style: DisplayStyle): void {
 	const payload: Record<string, unknown> =
 		style === "detailed" || style === "diff-focus" || style === "compact"
 			? { ...data, style, density: style }
-			: style === "grok"
-				? { ...data, style: "grok", density: "detailed" }
+			: style === "density"
+				? { ...data, style: "density", density: "detailed" }
 				: { ...data, style };
 	const temporary = join(dirname(path), `.compact-tools-${randomUUID()}.tmp`);
 	try {
@@ -158,7 +158,7 @@ function errorMessage(error: unknown): string {
 }
 
 function formatStatus(config: CompactToolsConfig, ctx: ExtensionContext): string {
-	const activePreset = config.style === "grok" ? config.density : config.style;
+	const activePreset = config.style === "density" ? config.density : config.style;
 	return [
 		`Density: ${config.density} · active style: ${activePreset} · mode: ${config.mode} · preview: ${config.previewLines} lines`,
 		`Thinking styling: ${config.thinking} · working override: ${config.working}`,
@@ -205,8 +205,8 @@ function applySelection(
 		setSessionStyleOverride(undefined);
 		const effectiveConfig = loadConfig(ctx.cwd, trusted);
 		const effectiveLabel =
-			effectiveConfig.style === "grok" ? effectiveConfig.density : effectiveConfig.style;
-		const requestedLabel = selection === "grok" ? "detailed" : selection;
+			effectiveConfig.style === "density" ? effectiveConfig.density : effectiveConfig.style;
+		const requestedLabel = selection === "density" ? "detailed" : selection;
 		const where = targetScope === "project" ? "this project" : "global settings";
 
 		if (targetScope === "global" && effectiveLabel !== requestedLabel) {
@@ -242,14 +242,14 @@ function applySelection(
 
 	/* Без явного scope и без существующего файла настроек переключаем плотность только в памяти сессии. */
 	if (selection === "detailed" || selection === "diff-focus" || selection === "compact") {
-		setSessionStyleOverride({ style: "grok", density: selection });
-	} else if (selection === "grok") {
-		setSessionStyleOverride({ style: "grok", density: "detailed" });
+		setSessionStyleOverride({ style: "density", density: selection });
+	} else if (selection === "density") {
+		setSessionStyleOverride({ style: "density", density: "detailed" });
 	} else {
 		setSessionStyleOverride({ style: selection });
 	}
 
-	const label = selection === "grok" ? "detailed" : selection;
+	const label = selection === "density" ? "detailed" : selection;
 	if (!reloads && applyStyle!(ctx.cwd, trusted, ctx)) {
 		ctx.ui.notify(`Switched to ${label}.`, "info");
 	}
@@ -323,7 +323,7 @@ export function registerCompactToolsCommand(
 	getConfig: () => CompactToolsConfig,
 	applyStyle?: ApplyStyle,
 ): void {
-	const selectableStyles = Object.keys(STYLE_CHOICES) as Array<Exclude<DisplayStyle, "grok">>;
+	const selectableStyles = Object.keys(STYLE_CHOICES) as Array<Exclude<DisplayStyle, "density">>;
 	pi.registerCommand("compact-tools", {
 		description: "Choose Tool Density preset or legacy/native tool rendering",
 		getArgumentCompletions: (prefix) => {
@@ -369,7 +369,7 @@ export function registerCompactToolsCommand(
 					return;
 				}
 				const current = getConfig();
-				const activeLabel = current.style === "grok" ? current.density : current.style;
+				const activeLabel = current.style === "density" ? current.density : current.style;
 				const selected = await ctx.ui.select(
 					`Tool density / style (current: ${activeLabel})`,
 					Object.values(STYLE_CHOICES),

@@ -28,11 +28,10 @@ import { getActiveHostRuntime, type HostRuntimeHandle } from "../../shared/host-
 import { hookMethod } from "../../shared/runtime-hooks.ts";
 import { formatDurationMs, type RowStatus } from "./core.ts";
 import {
-	classifyGrokExploration,
-	formatGrokDuration,
-	formatGrokExploredSummary,
-	grokPalette,
-} from "./grok.ts";
+	densityPalette,
+	formatDensityDuration,
+	formatExploredSummary,
+} from "./density.ts";
 import { getTextResult } from "./invocation.ts";
 import { outputPadLines } from "./layout.ts";
 import { chromePainter, paintIndicator } from "./palette.ts";
@@ -86,15 +85,14 @@ function argsOf(row: ToolRowLike): ToolArgs {
 	return typeof row.args === "object" && row.args !== null ? row.args as ToolArgs : {};
 }
 
-// Keyed by the row and checked against its arguments, which stream in: a command is
-// parsed once rather than on every frame the whole transcript repaints.
-const kinds = new WeakMap<object, { args: unknown; kind: LookKind | undefined }>();
+const kinds = new WeakMap<object, { args: unknown; fingerprint: string; kind: LookKind | undefined }>();
 
 function kindOf(row: ToolRowLike): LookKind | undefined {
+	const fingerprint = rowArgsFingerprint(row);
 	const cached = kinds.get(row);
-	if (cached && cached.args === row.args) return cached.kind;
+	if (cached && cached.args === row.args && cached.fingerprint === fingerprint) return cached.kind;
 	const kind = lookKind(row.toolName, argsOf(row));
-	kinds.set(row, { args: row.args, kind });
+	kinds.set(row, { args: row.args, fingerprint, kind });
 	return kind;
 }
 
@@ -262,22 +260,10 @@ export class ToolGroupComponent extends Container {
 	}
 }
 
-const grokKinds = new WeakMap<object, { args: unknown; fingerprint: string; kind: LookKind | undefined }>();
-
-function grokKindOf(row: ToolRowLike): LookKind | undefined {
-	const fingerprint = rowArgsFingerprint(row);
-	const cached = grokKinds.get(row);
-	if (cached && cached.args === row.args && cached.fingerprint === fingerprint) return cached.kind;
-	const kind = classifyGrokExploration(row.toolName, argsOf(row));
-	grokKinds.set(row, { args: row.args, fingerprint, kind });
-	return kind;
-}
-
-export type GroupStyle = "grok" | "claude" | "codex";
+export type GroupStyle = "density" | "claude" | "codex";
 
 function isGroupable(child: unknown, style: GroupStyle = "claude"): child is ToolRowLike {
 	if (!isKind(child, ToolExecutionComponent)) return false;
-	if (style === "grok") return grokKindOf(child as ToolRowLike) !== undefined;
 	return style === "codex" ? exploreOf(child as ToolRowLike) !== undefined : kindOf(child as ToolRowLike) !== undefined;
 }
 
@@ -313,7 +299,7 @@ export function groupChildren(
 	let members: unknown[] = [];
 	let pending: unknown[] = [];
 	const flush = () => {
-		if (style === "grok" && rows.length === 1) {
+		if (style === "density" && rows.length === 1) {
 			grouped.push(...members);
 		} else if (rows.length > 0) {
 			grouped.push(makeGroup(rows, members));
@@ -359,7 +345,7 @@ export class ToolGroupController {
 		const chat = resolvedHost?.chatContainer ?? (resolvedHost ? findChat(resolvedHost.tui) : undefined);
 		if (chat && resolvedHost) {
 			const isGroupStyle = (style: string): style is GroupStyle =>
-				style === "grok" || style === "claude" || style === "codex";
+				style === "density" || style === "claude" || style === "codex";
 			hookMethod(chat, "render", "claude.groups", (self, args, original) => {
 				const style = this.runtime.config.style;
 				if (!this.context || isSilent() || !isGroupStyle(style)) return original.apply(self, args);
@@ -374,7 +360,7 @@ export class ToolGroupController {
 					this.paint = undefined;
 				}
 			});
-			hookMethod(chat, "handleMouse", "grok.groups.mouse", (self, args, original) => {
+			hookMethod(chat, "handleMouse", "density.groups.mouse", (self, args, original) => {
 				const style = this.runtime.config.style;
 				const event = args[0] as { width?: number } | undefined;
 				if (
@@ -435,11 +421,11 @@ export class ToolGroupController {
 		const theme = this.context?.ui.theme;
 		if (!theme) return undefined;
 		const chrome = chromePainter(theme);
-		const grokKey = this.runtime.config.style === "grok" ? grokPalette(theme).key : "";
+		const densityKey = this.runtime.config.style === "density" ? densityPalette(theme).key : "";
 		// The style is part of the key: a group drawn in one style is never reused in another.
 		const key =
 			this.runtime.config.style +
-			grokKey +
+			densityKey +
 			PAINT_COLORS.map((color) => theme.fg(color, "x")).join("") +
 			theme.bold("x") +
 			chrome("x");
@@ -473,7 +459,7 @@ export class ToolGroupController {
 
 	/** Claude's quiet completed exploration; active and interrupted calls keep a status cue. */
 	private draw(rows: readonly ToolRowLike[], width: number, expanded: boolean, paint: Paint): string[] {
-		if (this.runtime.config.style === "grok") return this.drawGrok(rows, width, expanded, paint);
+		if (this.runtime.config.style === "density") return this.drawDensity(rows, width, expanded, paint);
 		if (this.runtime.config.style === "codex") return this.drawCodex(rows, width, expanded, paint);
 		// Ctrl+O replaces the summary with individual calls, as Claude's transcript
 		// does. A locally clicked group retains its header as a collapse target.
@@ -556,8 +542,8 @@ export class ToolGroupController {
 		return lines;
 	}
 
-	private drawGrok(rows: readonly ToolRowLike[], width: number, expanded: boolean, paint: Paint): string[] {
-		const pal = grokPalette(paint.theme);
+	private drawDensity(rows: readonly ToolRowLike[], width: number, expanded: boolean, paint: Paint): string[] {
+		const pal = densityPalette(paint.theme);
 		const fit = (line: string) => truncateToWidth(line, Math.max(1, width), "…");
 		const running = lastRunning(rows, this.canRun);
 		const statuses = rows.map((row) => memberStatus(row, this.canRun));
@@ -578,7 +564,7 @@ export class ToolGroupController {
 					? "pending"
 					: "success";
 
-		const summary = formatGrokExploredSummary(rows, this.canRun);
+		const summary = formatExploredSummary(rows, this.canRun);
 		const diamond = pal.diamond(status, expanded);
 		const styledSummary = pal.title(summary, status, expanded);
 
@@ -586,7 +572,7 @@ export class ToolGroupController {
 		if (running) {
 			const started = this.runtime.timing(running.toolCallId)?.startedAt;
 			const elapsed = started !== undefined ? Date.now() - started : 0;
-			const dur = elapsed >= 1000 ? formatGrokDuration(elapsed) : undefined;
+			const dur = elapsed >= 1000 ? formatDensityDuration(elapsed) : undefined;
 			if (dur) meta = ` ${pal.dim(`(${dur})`)}`;
 		} else {
 			const failedCount = statuses.filter((s) => s === "error").length;
@@ -610,7 +596,7 @@ export class ToolGroupController {
 			}
 			const parts: string[] = [];
 			if (failedCount > 0) parts.push(`${failedCount} failed`);
-			const dur = hasDuration ? formatGrokDuration(totalMs) : undefined;
+			const dur = hasDuration ? formatDensityDuration(totalMs) : undefined;
 			if (dur) parts.push(dur);
 			if (parts.length > 0) meta = ` ${pal.dim(`(${parts.join(" · ")})`)}`;
 		}

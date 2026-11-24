@@ -12,14 +12,13 @@ import {
 import { getActiveGlobalTheme, isLightTheme, type RgbTuple } from "../../shared/ansi.ts";
 import { colorizeRgb } from "./color.ts";
 import {
-	analyzeShell,
-	isHarmlessRedirect,
-	unwrapCommandWords,
-	type ShellDialect,
-} from "../../shared/shell-analysis.ts";
-import { pathOf, type LookKind } from "./claude.ts";
+	classifyShellCommand as classifyShellExploration,
+	lookKind as classifyExploration,
+	pathOf,
+	type LookKind,
+} from "./claude.ts";
 import { isEmptyOutput, shellOutcome } from "./codex.ts";
-import { GROK_DIAMOND, normalizeLineEndings, type RowStatus } from "./core.ts";
+import { TOOL_DIAMOND, normalizeLineEndings, type RowStatus } from "./core.ts";
 import {
 	countEditChanges,
 	formatResultLineSummary,
@@ -153,134 +152,7 @@ export function extractCommandOutput(
 	return { lines, exitCode };
 }
 
-const GROK_NEUTRAL_COMMANDS = new Set([
-	"cd",
-	"pushd",
-	"popd",
-	"set-location",
-	"sl",
-	"push-location",
-	"pop-location",
-	"echo",
-	"printf",
-	"write-output",
-	"write-host",
-	"true",
-	"false",
-	":",
-]);
-
-const GROK_SEARCH_COMMANDS = new Set([
-	"find",
-	"fd",
-	"fdfind",
-	"grep",
-	"egrep",
-	"fgrep",
-	"rg",
-	"ag",
-	"ack",
-	"pt",
-	"locate",
-	"which",
-	"whereis",
-	"select-string",
-	"sls",
-	"get-command",
-	"gcm",
-]);
-
-const GROK_LIST_COMMANDS = new Set([
-	"ls",
-	"dir",
-	"tree",
-	"du",
-	"df",
-	"pwd",
-	"dirs",
-	"get-childitem",
-	"gci",
-	"get-location",
-	"gl",
-]);
-
-function normalizeProgramName(raw: string, dialect: ShellDialect): string {
-	const base = raw.includes("/") ? raw.slice(raw.lastIndexOf("/") + 1) : raw;
-	return dialect === "powershell" ? base.replace(/\.exe$/iu, "").toLowerCase() : base.toLowerCase();
-}
-
-function classifyReadOnlyGitExploration(args: readonly string[]): LookKind | undefined {
-	let idx = 0;
-	while (idx < args.length && args[idx]!.startsWith("-")) {
-		const flag = args[idx]!;
-		if (flag === "-C" || flag === "--git-dir" || flag === "--work-tree" || flag === "--namespace") {
-			idx += 2;
-		} else {
-			idx += 1;
-		}
-	}
-	const sub = args[idx];
-	if (!sub) return "read";
-	if (sub === "grep") return "search";
-	if (sub === "ls-files" || sub === "ls-tree") return "list";
-	return "read";
-}
-
-export function classifyGrokShellExploration(
-	command: string,
-	dialect: ShellDialect = "bash",
-): LookKind | undefined {
-	const analysis = analyzeShell(command, dialect);
-	if (!analysis.valid || analysis.opaque || analysis.effect.kind !== "read-only") {
-		return undefined;
-	}
-	let hasSearch = false;
-	let hasRead = false;
-	let hasList = false;
-
-	for (const cmd of analysis.commands) {
-		if (!cmd.redirects.every(isHarmlessRedirect)) return undefined;
-		const unwrapped = unwrapCommandWords(cmd.words);
-		if (unwrapped.kind !== "command" || unwrapped.words.length === 0) continue;
-		const program = normalizeProgramName(unwrapped.words[0]!, dialect);
-		const rest = unwrapped.words.slice(1);
-		if (GROK_NEUTRAL_COMMANDS.has(program)) continue;
-		if (program === "git") {
-			const gitKind = classifyReadOnlyGitExploration(rest);
-			if (!gitKind) return undefined;
-			if (gitKind === "search") hasSearch = true;
-			else if (gitKind === "list") hasList = true;
-			else hasRead = true;
-			continue;
-		}
-		if ((program === "rg" || program === "ripgrep") && rest.includes("--files")) {
-			hasList = true;
-			continue;
-		}
-		if (GROK_SEARCH_COMMANDS.has(program) || (dialect === "bash" && program === "type")) {
-			hasSearch = true;
-		} else if (GROK_LIST_COMMANDS.has(program)) {
-			hasList = true;
-		} else {
-			/* Все остальные команды в этой ветке уже прошли строгую проверку read-only через Shell Effect. */
-			hasRead = true;
-		}
-	}
-
-	return hasSearch ? "search" : hasList ? "list" : hasRead ? "read" : undefined;
-}
-
-export function classifyGrokExploration(toolName: string, args: ToolArgs): LookKind | undefined {
-	if (toolName === "read") return "read";
-	if (toolName === "grep" || toolName === "find") return "search";
-	if (toolName === "ls") return "list";
-	if (toolName === "bash" || toolName === "powershell") {
-		const cmd = typeof args.command === "string" ? args.command : "";
-		if (!cmd.trim()) return undefined;
-		return classifyGrokShellExploration(cmd, toolName === "powershell" ? "powershell" : "bash");
-	}
-	return undefined;
-}
+export { classifyExploration, classifyShellExploration };
 
 export interface ExplorationRowInput {
 	toolName: string;
@@ -290,13 +162,13 @@ export interface ExplorationRowInput {
 	isPartial: boolean;
 }
 
-export interface GrokExplorationCounts {
+export interface DensityExplorationCounts {
 	files: number;
 	searches: number;
 	directories: number;
 }
 
-export function countGrokExploration(rows: readonly ExplorationRowInput[]): GrokExplorationCounts {
+export function countExploration(rows: readonly ExplorationRowInput[]): DensityExplorationCounts {
 	const readPaths = new Set<string>();
 	let unnamedReads = 0;
 	let searches = 0;
@@ -305,7 +177,7 @@ export function countGrokExploration(rows: readonly ExplorationRowInput[]): Grok
 	for (const row of rows) {
 		const args: ToolArgs =
 			typeof row.args === "object" && row.args !== null ? (row.args as ToolArgs) : {};
-		const kind = classifyGrokExploration(row.toolName, args);
+		const kind = classifyExploration(row.toolName, args);
 		if (kind === "read") {
 			if (row.toolName === "read") {
 				const p = pathOf(args).trim();
@@ -328,11 +200,11 @@ export function countGrokExploration(rows: readonly ExplorationRowInput[]): Grok
 	};
 }
 
-export function formatGrokExploredSummary<TRow extends ExplorationRowInput>(
+export function formatExploredSummary<TRow extends ExplorationRowInput>(
 	rows: readonly TRow[],
 	canRun: (row: TRow) => boolean = () => true,
 ): string {
-	const { files, searches, directories } = countGrokExploration(rows);
+	const { files, searches, directories } = countExploration(rows);
 	const running = rows.some((row) => (!row.result || row.isPartial) && canRun(row));
 	const verb = running ? "Exploring" : "Explored";
 	const parts: string[] = [];
@@ -344,7 +216,7 @@ export function formatGrokExploredSummary<TRow extends ExplorationRowInput>(
 	return parts.length > 0 ? `${verb} ${parts.join(", ")}` : verb;
 }
 
-export interface GrokPalette {
+export interface DensityPalette {
 	readonly theme: Theme;
 	readonly light: boolean;
 	readonly key: string;
@@ -356,16 +228,16 @@ export interface GrokPalette {
 	rail(text: string): string;
 }
 
-function paintGrokRgb(theme: Theme, rgb: RgbTuple, text: string): string {
+function paintDensityRgb(theme: Theme, rgb: RgbTuple, text: string): string {
 	return colorizeRgb(theme, { r: rgb[0], g: rgb[1], b: rgb[2] }, text);
 }
 
-function paintGrokWaveGlyph(theme: Theme, light: boolean, row: number, glyph: string): string {
+function paintDensityWaveGlyph(theme: Theme, light: boolean, row: number, glyph: string): string {
 	const rgb = sampleBreathingWaveRgb(row, { theme, light });
-	return paintGrokRgb(theme, rgb, glyph);
+	return paintDensityRgb(theme, rgb, glyph);
 }
 
-export function grokPalette(fallbackTheme: Theme): GrokPalette {
+export function densityPalette(fallbackTheme: Theme): DensityPalette {
 	const theme = getActiveGlobalTheme(fallbackTheme);
 	const light = isLightTheme(theme);
 	const colorMode = theme.getColorMode?.() ?? "truecolor";
@@ -377,29 +249,29 @@ export function grokPalette(fallbackTheme: Theme): GrokPalette {
 		key,
 		diamond(status: RowStatus, expanded: boolean): string {
 			if (status === "running") {
-				return paintGrokWaveGlyph(theme, light, 0, GROK_DIAMOND);
+				return paintDensityWaveGlyph(theme, light, 0, TOOL_DIAMOND);
 			}
 			if (status === "error") {
-				return theme.fg("error", GROK_DIAMOND);
+				return theme.fg("error", TOOL_DIAMOND);
 			}
 			if (expanded && status === "success") {
-				return paintGrokRgb(theme, light ? [37, 99, 235] : [97, 175, 239], GROK_DIAMOND);
+				return paintDensityRgb(theme, light ? [37, 99, 235] : [97, 175, 239], TOOL_DIAMOND);
 			}
-			return paintGrokRgb(theme, light ? [112, 128, 152] : [92, 110, 136], GROK_DIAMOND);
+			return paintDensityRgb(theme, light ? [112, 128, 152] : [92, 110, 136], TOOL_DIAMOND);
 		},
 		title(text: string, status: RowStatus, expanded: boolean): string {
 			if (status === "error") {
 				return theme.fg("error", expanded ? theme.bold(text) : text);
 			}
 			if (status === "running" || expanded) {
-				const painted = paintGrokRgb(theme, light ? [24, 48, 82] : [172, 194, 222], text);
+				const painted = paintDensityRgb(theme, light ? [24, 48, 82] : [172, 194, 222], text);
 				return theme.bold(painted);
 			}
-			return paintGrokRgb(theme, light ? [68, 86, 112] : [136, 154, 178], text);
+			return paintDensityRgb(theme, light ? [68, 86, 112] : [136, 154, 178], text);
 		},
 		target(text: string, expanded: boolean): string {
 			if (!text) return "";
-			return paintGrokRgb(
+			return paintDensityRgb(
 				theme,
 				light
 					? expanded
@@ -412,18 +284,18 @@ export function grokPalette(fallbackTheme: Theme): GrokPalette {
 			);
 		},
 		dim(text: string): string {
-			return paintGrokRgb(theme, light ? [124, 140, 164] : [84, 100, 124], text);
+			return paintDensityRgb(theme, light ? [124, 140, 164] : [84, 100, 124], text);
 		},
 		body(text: string): string {
-			return paintGrokRgb(theme, light ? [72, 90, 116] : [128, 144, 168], text);
+			return paintDensityRgb(theme, light ? [72, 90, 116] : [128, 144, 168], text);
 		},
 		rail(text: string): string {
-			return paintGrokRgb(theme, light ? [124, 140, 164] : [84, 100, 124], text);
+			return paintDensityRgb(theme, light ? [124, 140, 164] : [84, 100, 124], text);
 		},
 	};
 }
 
-export function formatGrokDuration(durationMs: number | undefined): string | undefined {
+export function formatDensityDuration(durationMs: number | undefined): string | undefined {
 	if (durationMs === undefined || !Number.isFinite(durationMs) || durationMs < 0) {
 		return undefined;
 	}
@@ -442,12 +314,12 @@ export function formatGrokDuration(durationMs: number | undefined): string | und
 
 function durationFromState(state: RowState, running: boolean): string | undefined {
 	if (!running && state.durationMs !== undefined) {
-		return formatGrokDuration(state.durationMs);
+		return formatDensityDuration(state.durationMs);
 	}
 	if (state.startedAt === undefined) return undefined;
 	const elapsed = (running ? Date.now() : (state.endedAt ?? Date.now())) - state.startedAt;
 	if (running && elapsed < 1000) return undefined;
-	return formatGrokDuration(elapsed);
+	return formatDensityDuration(elapsed);
 }
 
 function singleLineText(raw: string, maxChars = 120): string {
@@ -478,7 +350,7 @@ export function isCommandLikeTool(name: string): boolean {
 }
 
 function formatParentheticalMeta(
-	pal: GrokPalette,
+	pal: DensityPalette,
 	status: RowStatus,
 	state: RowState,
 	name: string,
@@ -490,27 +362,27 @@ function formatParentheticalMeta(
 		return duration ? ` ${pal.dim(`(${duration})`)}` : "";
 	}
 
-	const grokMeta = state.grok;
+	const densityMeta = state.density;
 	if (status === "error") {
 		const parts: string[] = [];
-		if (grokMeta?.exitCode !== undefined) parts.push(`exit ${grokMeta.exitCode}`);
+		if (densityMeta?.exitCode !== undefined) parts.push(`exit ${densityMeta.exitCode}`);
 		else parts.push("failed");
 		if (duration) parts.push(duration);
 		return ` ${pal.dim(`(${parts.join(" · ")})`)}`;
 	}
 
-	if ((name === "edit" || name === "write") && grokMeta?.changes) {
-		const added = pal.theme.fg("toolDiffAdded", `+${grokMeta.changes.added}`);
-		const removed = pal.theme.fg("toolDiffRemoved", `-${grokMeta.changes.removed}`);
+	if ((name === "edit" || name === "write") && densityMeta?.changes) {
+		const added = pal.theme.fg("toolDiffAdded", `+${densityMeta.changes.added}`);
+		const removed = pal.theme.fg("toolDiffRemoved", `-${densityMeta.changes.removed}`);
 		const durSuffix = duration ? pal.dim(` · ${duration}`) : "";
 		return ` ${pal.dim("(")}${added}${pal.dim(" ")}${removed}${durSuffix}${pal.dim(")")}`;
 	}
 
 	const parts: string[] = [];
-	if (grokMeta?.lineSummary) parts.push(grokMeta.lineSummary);
+	if (densityMeta?.lineSummary) parts.push(densityMeta.lineSummary);
 	if (duration) parts.push(duration);
 	const base = parts.length > 0 ? ` ${pal.dim(`(${parts.join(" · ")})`)}` : "";
-	const resolvedNested = liveNestedSummary ?? grokMeta?.nestedSummary;
+	const resolvedNested = liveNestedSummary ?? densityMeta?.nestedSummary;
 	const nested = resolvedNested ? `${pal.dim(" · ")}${resolvedNested}` : "";
 	return base + nested;
 }
@@ -584,19 +456,19 @@ function buildHeaderParts(
 	}
 }
 
-class GrokLiveLines implements Component {
+class DensityLiveLines implements Component {
 	private cache?: { key: string; width: number; lines: string[] };
 
 	constructor(
-		private readonly computeKey: (width: number, pal: GrokPalette) => string,
-		private readonly draw: (width: number, pal: GrokPalette) => string[],
+		private readonly computeKey: (width: number, pal: DensityPalette) => string,
+		private readonly draw: (width: number, pal: DensityPalette) => string[],
 		private readonly fallbackTheme: Theme,
 	) {}
 
 	render(width: number): string[] {
 		if (width <= 0) return [];
 		const safeWidth = Math.max(1, width);
-		const pal = grokPalette(this.fallbackTheme);
+		const pal = densityPalette(this.fallbackTheme);
 		const key = `${pal.key}|${this.computeKey(safeWidth, pal)}`;
 		if (!this.cache || this.cache.key !== key || this.cache.width !== safeWidth) {
 			const raw = this.draw(safeWidth, pal);
@@ -616,7 +488,7 @@ class GrokLiveLines implements Component {
 	}
 }
 
-export function renderGrokCall(options: {
+export function renderDensityCall(options: {
 	name: string;
 	args: ToolArgs;
 	theme: Theme;
@@ -626,29 +498,29 @@ export function renderGrokCall(options: {
 	getNestedSummary?: () => string | undefined;
 }): Component {
 	const { name, args, theme, state, getStatus, syncRunning, getNestedSummary } = options;
-	/* Активируем подписку на 30 fps таймер сразу при создании строки для активного вызова. */
 	syncRunning(getStatus() === "running");
 
-	return new GrokLiveLines(
+	return new DensityLiveLines(
 		() => {
 			const status = getStatus();
 			syncRunning(status === "running");
 			const expanded = state.expanded === true;
 			const elapsedBucket = status === "running" ? String(getAnimationElapsedMs()) : "settled";
-			const g = state.grok;
+			const d = state.density;
 			const { verb, target } = buildHeaderParts(name, args, status);
-			const liveNested = getNestedSummary?.() ?? g?.nestedSummary ?? "";
+			const liveNested = getNestedSummary?.() ?? d?.nestedSummary ?? "";
 			return [
 				status,
 				expanded ? "1" : "0",
+				d ? "1" : "0",
 				elapsedBucket,
 				verb,
 				target,
 				state.durationMs ?? "",
 				state.endedAt ?? "",
-				g?.exitCode ?? "",
-				g?.changes ? `${g.changes.added}/${g.changes.removed}` : "",
-				g?.lineSummary ?? "",
+				d?.exitCode ?? "",
+				d?.changes ? `${d.changes.added}/${d.changes.removed}` : "",
+				d?.lineSummary ?? "",
 				liveNested,
 			].join("|");
 		},
@@ -662,6 +534,12 @@ export function renderGrokCall(options: {
 			const meta = formatParentheticalMeta(pal, status, state, name, getNestedSummary?.());
 			const head = ` ${diamond} ${styledVerb}${styledTarget}${meta}`;
 			const lines = [truncateToWidth(head, width, "…")];
+
+			if (status === "running" && isCommandLikeTool(name) && !state.density) {
+				const avail = Math.max(1, width - 5);
+				const bar = paintDensityWaveGlyph(pal.theme, pal.light, 1, "▎");
+				lines.push(`   ${bar} ${pal.dim(truncateToWidth("Running…", avail, "…"))}`);
+			}
 
 			if (expanded && !isCommandLikeTool(name) && name !== "read" && name !== "edit" && name !== "write" && name !== "grep" && name !== "find" && name !== "ls") {
 				if (Object.keys(args).length > 0) {
@@ -729,7 +607,7 @@ export function countDiffChangesFromResult(
 	};
 }
 
-export function renderGrokResult(options: {
+export function renderDensityResult(options: {
 	name: string;
 	args: ToolArgs;
 	result: AgentToolResult<unknown>;
@@ -797,7 +675,7 @@ export function renderGrokResult(options: {
 		}
 	}
 
-	state.grok = {
+	state.density = {
 		exitCode: extractedCmd?.exitCode,
 		changes: diffInfo?.changes,
 		lineSummary,
@@ -805,7 +683,7 @@ export function renderGrokResult(options: {
 		failureReason: isError && !isPartial ? summarizeFailure(name, output) : undefined,
 	};
 
-	return new GrokLiveLines(
+	return new DensityLiveLines(
 		() => {
 			const running = isPartial && canRun();
 			syncRunning(running);
@@ -825,7 +703,7 @@ export function renderGrokResult(options: {
 				if (!cmdLike) return [];
 				const lines = extractedCmd?.lines ?? [];
 				if (lines.length === 0) {
-					const bar = paintGrokWaveGlyph(pal.theme, pal.light, 1, "▎");
+					const bar = paintDensityWaveGlyph(pal.theme, pal.light, 1, "▎");
 					return [`   ${bar} ${pal.dim(truncateToWidth("Running…", avail, "…"))}`];
 				}
 				const sliced = expanded
@@ -837,7 +715,7 @@ export function renderGrokResult(options: {
 					...sliced.tail.map((t) => ({ text: t })),
 				];
 				return entries.map((entry, idx) => {
-					const bar = paintGrokWaveGlyph(pal.theme, pal.light, idx + 1, "▎");
+					const bar = paintDensityWaveGlyph(pal.theme, pal.light, idx + 1, "▎");
 					const painted = entry.dim
 						? pal.dim("…")
 						: pal.body(truncateToWidth(entry.text, avail, "…"));
@@ -878,9 +756,9 @@ export function renderGrokResult(options: {
 					});
 				}
 
-				if (isError && state.grok?.failureReason) {
+				if (isError && state.density?.failureReason) {
 					return [
-						truncateToWidth(`${rail}${pal.theme.fg("error", state.grok.failureReason)}`, width, "…"),
+						truncateToWidth(`${rail}${pal.theme.fg("error", state.density.failureReason)}`, width, "…"),
 					];
 				}
 				return [];

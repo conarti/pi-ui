@@ -326,7 +326,6 @@ function extractAndStripPillHits(
 	return { cleanedRow, hits };
 }
 
-/* Восстанавливает основной цвет текста после встроенных ANSI-пилюль, не затирая их собственный fg */
 function styleBodyPreservingPills(line: string, rgb: RgbTuple): string {
 	const fgEsc = `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m`;
 	const patched = line

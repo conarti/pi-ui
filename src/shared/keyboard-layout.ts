@@ -85,16 +85,30 @@ const MACOS_OPTION_TO_QWERTY: ReadonlyArray<readonly [string, string, boolean?]>
 	["¥", "y"],
 	["Ω", "z"],
 	["ј", "q"],
+	["Ј", "q", true],
 	["џ", "w"],
+	["Џ", "w", true],
 	["ђ", "z"],
+	["Ђ", "z", true],
 	["ћ", "d"],
+	["Ћ", "d", true],
 	["ѕ", "i"],
+	["Ѕ", "i", true],
 	["љ", "k"],
+	["Љ", "k", true],
 	["њ", "y"],
+	["Њ", "y", true],
 	["ѓ", "u"],
+	["Ѓ", "u", true],
 	["і", "b"],
+	["І", "b", true],
 	["ќ", "r"],
-	["ў", "e"],
+	["Ќ", "r", true],
+	["ў", "o"],
+	["Ў", "o", true],
+	["„", "o", true],
+	["‘", "p"],
+	["’", "p", true],
 	["Œ", "q", true],
 	["Â", "m", true],
 	["◊", "v", true],
@@ -133,6 +147,21 @@ const MODIFY_OTHER_KEYS_RE = /^\x1b\[27;(\d+);(\d+)~$/;
 const CSI_PREFIX_RE = /^\x1b\[[0-9;:?<>]*[@-~]/;
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
+
+function isCtrlLetterControlCodepoint(codepoint: number): boolean {
+	return (
+		codepoint >= 0x01 &&
+		codepoint <= 0x1a &&
+		codepoint !== 0x08 &&
+		codepoint !== 0x09 &&
+		codepoint !== 0x0a &&
+		codepoint !== 0x0d
+	);
+}
+
+function isAsciiLetterCodepoint(codepoint: number): boolean {
+	return (codepoint >= 65 && codepoint <= 90) || (codepoint >= 97 && codepoint <= 122);
+}
 
 function normalizeAsciiBaseCodepoint(codepoint: number): number | undefined {
 	if (codepoint >= 65 && codepoint <= 90) {
@@ -193,14 +222,7 @@ function normalizeSingleEscapeSequence(data: string, options?: KeyboardLayoutNor
 		}
 		/* При активном Kitty-протоколе хост отключает разбор legacy ESC+<ascii> и ESC+<ctrl> */
 		if (isKittyProtocolActive()) {
-			if (
-				secondCp >= 0x01 &&
-				secondCp <= 0x1a &&
-				secondCp !== 0x08 &&
-				secondCp !== 0x09 &&
-				secondCp !== 0x0a &&
-				secondCp !== 0x0d
-			) {
+			if (isCtrlLetterControlCodepoint(secondCp)) {
 				const latinCp = secondCp + 96;
 				const chordId = `ctrl+alt+${String.fromCharCode(latinCp)}`;
 				if (isChordEnabled(chordId, options)) {
@@ -239,17 +261,17 @@ function normalizeSingleEscapeSequence(data: string, options?: KeyboardLayoutNor
 
 		if ((modifier & SHORTCUT_MODIFIER_MASK) !== 0) {
 			if (codepoint > 127) {
+				const optEntry = OPTION_CODEPOINT_MAP.get(codepoint);
+				if (optEntry) {
+					const nextMod = (modifier | MOD_ALT | (optEntry.shift ? MOD_SHIFT : 0)) + 1;
+					return `\x1b[27;${nextMod};${optEntry.latinCodepoint}~`;
+				}
 				const mapped = CYRILLIC_CODEPOINT_MAP.get(codepoint);
 				if (mapped) {
 					return `\x1b[27;${cleanModValue};${mapped.latinCodepoint}~`;
 				}
-				if ((modifier & MOD_ALT) === 0) {
-					const optEntry = OPTION_CODEPOINT_MAP.get(codepoint);
-					if (optEntry) {
-						const nextMod = (modifier | MOD_ALT | (optEntry.shift ? MOD_SHIFT : 0)) + 1;
-						return `\x1b[27;${nextMod};${optEntry.latinCodepoint}~`;
-					}
-				}
+			} else if ((modifier & MOD_CTRL) !== 0 && isCtrlLetterControlCodepoint(codepoint)) {
+				return `\x1b[27;${cleanModValue};${codepoint + 96}~`;
 			} else if (rawModifier !== modifier) {
 				return `\x1b[27;${cleanModValue};${codepoint}~`;
 			}
@@ -270,6 +292,7 @@ function normalizeSingleEscapeSequence(data: string, options?: KeyboardLayoutNor
 
 	const codepoint = Number.parseInt(csiMatch[1]!, 10);
 	const baseLayoutKey = csiMatch[3] ? Number.parseInt(csiMatch[3], 10) : undefined;
+	const asciiBase = baseLayoutKey !== undefined ? normalizeAsciiBaseCodepoint(baseLayoutKey) : undefined;
 	const modValue = csiMatch[4] ? Number.parseInt(csiMatch[4], 10) : 1;
 	const modifier = modValue - 1;
 	const eventSuffix = csiMatch[5] ? `:${csiMatch[5]}` : "";
@@ -278,36 +301,59 @@ function normalizeSingleEscapeSequence(data: string, options?: KeyboardLayoutNor
 		const effectiveMod = modifier & ~LOCK_MASK;
 		if ((effectiveMod === 0 || effectiveMod === MOD_SHIFT) && codepoint > 127) {
 			const optEntry = OPTION_CODEPOINT_MAP.get(codepoint);
-			if (optEntry && isChordEnabled(optEntry.chordId, options)) {
-				const nextMod = (modifier | MOD_ALT | (optEntry.shift ? MOD_SHIFT : 0)) + 1;
-				return `\x1b[${optEntry.latinCodepoint};${nextMod}${eventSuffix}u`;
+			if (optEntry && !CYRILLIC_CODEPOINT_MAP.has(codepoint)) {
+				const targetCp =
+					asciiBase !== undefined && asciiBase >= 97 && asciiBase <= 122
+						? asciiBase
+						: optEntry.latinCodepoint;
+				const isShift = effectiveMod === MOD_SHIFT || optEntry.shift;
+				const lat = String.fromCharCode(targetCp);
+				const chordId = isShift ? `shift+alt+${lat}` : `alt+${lat}`;
+				if (isChordEnabled(chordId, options)) {
+					const nextMod = (modifier | MOD_ALT | (isShift ? MOD_SHIFT : 0)) + 1;
+					return `\x1b[${targetCp};${nextMod}${eventSuffix}u`;
+				}
 			}
 		}
 		return data;
 	}
 
+	if (asciiBase !== undefined) {
+		if (codepoint > 127) {
+			const optEntry = !CYRILLIC_CODEPOINT_MAP.has(codepoint)
+				? OPTION_CODEPOINT_MAP.get(codepoint)
+				: undefined;
+			if (optEntry && (modifier & MOD_ALT) === 0) {
+				const nextMod = (modifier | MOD_ALT | (optEntry.shift ? MOD_SHIFT : 0)) + 1;
+				return `\x1b[${asciiBase};${nextMod}${eventSuffix}u`;
+			}
+			return `\x1b[${asciiBase};${modValue}${eventSuffix}u`;
+		}
+		if (!isAsciiLetterCodepoint(codepoint) && asciiBase >= 97 && asciiBase <= 122) {
+			if ((modifier & MOD_CTRL) !== 0 && (modifier & MOD_ALT) === 0 && codepoint !== asciiBase - 96) {
+				const nextMod = (modifier | MOD_ALT) + 1;
+				return `\x1b[${asciiBase};${nextMod}${eventSuffix}u`;
+			}
+			return `\x1b[${asciiBase};${modValue}${eventSuffix}u`;
+		}
+	}
+
 	if (codepoint <= 127) {
+		if ((modifier & MOD_CTRL) !== 0 && isCtrlLetterControlCodepoint(codepoint)) {
+			return `\x1b[${codepoint + 96};${modValue}${eventSuffix}u`;
+		}
 		return data;
 	}
 
-	if (baseLayoutKey !== undefined) {
-		const asciiBase = normalizeAsciiBaseCodepoint(baseLayoutKey);
-		if (asciiBase !== undefined) {
-			return `\x1b[${asciiBase};${modValue}${eventSuffix}u`;
-		}
+	const optEntry = OPTION_CODEPOINT_MAP.get(codepoint);
+	if (optEntry) {
+		const nextMod = (modifier | MOD_ALT | (optEntry.shift ? MOD_SHIFT : 0)) + 1;
+		return `\x1b[${optEntry.latinCodepoint};${nextMod}${eventSuffix}u`;
 	}
 
 	const mapped = CYRILLIC_CODEPOINT_MAP.get(codepoint);
 	if (mapped) {
 		return `\x1b[${mapped.latinCodepoint};${modValue}${eventSuffix}u`;
-	}
-
-	if ((modifier & MOD_ALT) === 0) {
-		const optEntry = OPTION_CODEPOINT_MAP.get(codepoint);
-		if (optEntry) {
-			const nextMod = (modifier | MOD_ALT | (optEntry.shift ? MOD_SHIFT : 0)) + 1;
-			return `\x1b[${optEntry.latinCodepoint};${nextMod}${eventSuffix}u`;
-		}
 	}
 
 	return data;

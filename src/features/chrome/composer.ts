@@ -90,6 +90,7 @@ export interface PiUiComposerDeps {
 }
 
 interface EditorInternals {
+	lastWidth?: number;
 	state: { lines: string[]; cursorLine: number; cursorCol: number };
 	lastAction: unknown;
 	scrollOffset: number;
@@ -101,6 +102,15 @@ interface EditorInternals {
 	isEditorEmpty(): boolean;
 	insertTextAtCursor(text: string): void;
 	buildVisualLineMap?(width: number): Array<{ logicalLine: number; startCol: number; length: number }>;
+}
+
+export interface ComposerVisualSlice {
+	readonly logicalLineIndex: number;
+	readonly logicalLine: string;
+	readonly startCol: number;
+	readonly length: number;
+	readonly cursorLine: number;
+	readonly cursorCol: number;
 }
 
 const baseEditorProto = Editor.prototype as unknown as {
@@ -143,6 +153,138 @@ export class PiUiComposerEditor extends CustomEditor {
 		return this as unknown as EditorInternals;
 	}
 
+	private resolveBoxLayout(totalWidth: number): {
+		readonly compact: boolean;
+		readonly leftOffset: number;
+		readonly innerWidth: number;
+		readonly visualLines: Array<{ logicalLine: number; startCol: number; length: number }>;
+	} {
+		const internal = this.internals();
+		const compact = totalWidth < 9;
+		const leftOffset = compact ? 1 : 4;
+		const innerWidth = Math.max(1, compact ? totalWidth - 2 : totalWidth - 6);
+		const fallbackWrapWidth = Math.max(1, (compact ? Math.max(3, innerWidth) : innerWidth) - 1);
+		const wrapWidth = internal.lastWidth && internal.lastWidth > 0 ? internal.lastWidth : fallbackWrapWidth;
+		const visualLines =
+			internal.buildVisualLineMap?.(wrapWidth) ??
+			internal.state.lines.map((line, idx) => ({
+				logicalLine: idx,
+				startCol: 0,
+				length: line.length,
+			}));
+		return { compact, leftOffset, innerWidth, visualLines };
+	}
+
+	getTui(): TUI {
+		return this.tui;
+	}
+
+	getRenderedBoxHeight(): number {
+		return (this.internals().renderedVisibleLineCount ?? 1) + 2;
+	}
+
+	getCharBeforeCursor(): string {
+		const { state } = this.internals();
+		const currentLine = state.lines[state.cursorLine] ?? "";
+		return state.cursorCol > 0 ? (currentLine[state.cursorCol - 1] ?? "") : "";
+	}
+
+	getVisualSlice(visualLineIndex: number, totalWidth?: number): ComposerVisualSlice | undefined {
+		const internal = this.internals();
+		const width = totalWidth ?? this.tui?.terminal?.columns ?? 80;
+		const { visualLines } = this.resolveBoxLayout(width);
+		const vl = visualLines[visualLineIndex];
+		if (!vl) return undefined;
+		return {
+			logicalLineIndex: vl.logicalLine,
+			logicalLine: internal.state.lines[vl.logicalLine] ?? "",
+			startCol: vl.startCol,
+			length: vl.length,
+			cursorLine: internal.state.cursorLine,
+			cursorCol: internal.state.cursorCol,
+		};
+	}
+
+	findSpanColumnAtMouse<TSpan extends { readonly start: number; readonly end: number }>(
+		mouseX: number,
+		mouseY: number,
+		totalWidth: number,
+		findSpans: (logicalLine: string) => ReadonlyArray<TSpan>,
+	): { readonly span: TSpan; readonly col: number } | undefined {
+		const internal = this.internals();
+		const { leftOffset, visualLines } = this.resolveBoxLayout(totalWidth);
+		const visibleRows = internal.renderedVisibleLineCount ?? Math.max(1, internal.state.lines.length);
+		if (mouseY < 1 || mouseY > visibleRows) return undefined;
+
+		const visualIdx = (internal.scrollOffset ?? 0) + (mouseY - 1);
+		const vl = visualLines[visualIdx];
+		if (!vl) return undefined;
+
+		const logicalLine = internal.state.lines[vl.logicalLine] ?? "";
+		const vlEnd = vl.startCol + vl.length;
+		for (const span of findSpans(logicalLine)) {
+			if (span.end <= vl.startCol || span.start >= vlEnd) continue;
+			const sliceStart = Math.max(vl.startCol, span.start);
+			const sliceEnd = Math.min(vlEnd, span.end);
+			const colStart = leftOffset + visibleWidth(logicalLine.slice(vl.startCol, sliceStart));
+			const colEnd = colStart + visibleWidth(logicalLine.slice(sliceStart, sliceEnd));
+			if (mouseX >= colStart && mouseX < colEnd) {
+				return { span, col: colStart };
+			}
+		}
+		return undefined;
+	}
+
+	findSpanColumnAtCursor<TSpan extends { readonly start: number; readonly end: number }>(
+		totalWidth: number,
+		findSpans: (logicalLine: string) => ReadonlyArray<TSpan>,
+	): { readonly span: TSpan; readonly col: number } | undefined {
+		if (!this.focused) return undefined;
+		const internal = this.internals();
+		const line = internal.state.lines[internal.state.cursorLine] ?? "";
+		if (!line) return undefined;
+		const col = internal.state.cursorCol;
+		const spans = findSpans(line);
+		if (spans.length === 0) return undefined;
+
+		const matched =
+			spans.find((s) => s.start <= col && col < s.end) ??
+			spans.find((s) => s.end === col);
+		if (!matched) return undefined;
+
+		const { leftOffset, visualLines } = this.resolveBoxLayout(totalWidth);
+		const targetVl = visualLines.find(
+			(vl) =>
+				vl.logicalLine === internal.state.cursorLine &&
+				matched.start >= vl.startCol &&
+				matched.start < vl.startCol + Math.max(1, vl.length),
+		);
+		const sliceFrom = targetVl ? targetVl.startCol : 0;
+		return {
+			span: matched,
+			col: leftOffset + visibleWidth(line.slice(sliceFrom, matched.start)),
+		};
+	}
+
+	syncDraftLinesWithCursor(
+		syncFn: (
+			lines: string[],
+			cursorLine: number,
+			cursorCol: number,
+		) => { lines: string[]; cursorLine: number; cursorCol: number; changed: boolean },
+	): string | undefined {
+		const internal = this.internals();
+		const synced = syncFn(
+			internal.state.lines,
+			internal.state.cursorLine,
+			internal.state.cursorCol,
+		);
+		if (!synced.changed) return undefined;
+		internal.state.lines = synced.lines;
+		internal.setCursorCol(synced.cursorCol);
+		return synced.lines.join("\n");
+	}
+
 	updateDeps(deps: PiUiComposerDeps): void {
 		this.deps = deps;
 	}
@@ -167,8 +309,9 @@ export class PiUiComposerEditor extends CustomEditor {
 		if (st.mode === "plan") return light ? [180, 83, 9] : [196, 160, 92];
 		if (st.mode === "safe") return light ? [15, 118, 110] : [76, 162, 174];
 		if (st.isStreaming) return light ? [37, 99, 235] : [97, 175, 239];
-		if (this.editorHovered && this.focused) return light ? [59, 130, 246] : [92, 138, 198];
-		return light ? [203, 213, 225] : [58, 68, 86];
+		if (this.editorHovered) return light ? [59, 130, 246] : [92, 138, 198];
+		if (this.focused) return light ? [148, 163, 184] : [76, 91, 115];
+		return light ? [203, 213, 225] : [52, 62, 80];
 	}
 
 	private paintBorder(text: string): string {
@@ -615,9 +758,7 @@ export class PiUiComposerEditor extends CustomEditor {
 	override handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		const hooks = getComposerHooks();
 		const totalWidth = event.width ?? 80;
-		const compact = totalWidth < 9;
-		const leftOffset = compact ? 1 : 4;
-		const innerWidth = Math.max(1, compact ? totalWidth - 2 : totalWidth - 6);
+		const { compact, leftOffset, innerWidth } = this.resolveBoxLayout(totalWidth);
 		const visibleRows = this.internals().renderedVisibleLineCount ?? 1;
 		const autocompleteStartRow = visibleRows + 2;
 		const inBox = event.y >= 0 && event.y < autocompleteStartRow;

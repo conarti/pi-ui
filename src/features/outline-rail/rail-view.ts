@@ -9,6 +9,7 @@ import {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
+import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import { sanitizeTurnText, type IndexedTurn, type TranscriptTurnIndex } from "../../shared/turn-index.ts";
 
@@ -266,7 +267,7 @@ export class OutlineRailComponent implements Component {
 			return { handled: true, render: true };
 		}
 
-		if ((this.tui as any).getTopmostVisibleOverlay?.()) {
+		if (hasBlockingModalOverlay(this.tui)) {
 			this.clearHover();
 			return undefined;
 		}
@@ -354,7 +355,7 @@ export class OutlineRailComponent implements Component {
 			return lines;
 		}
 
-		if (this.lastPointer && !(this.tui as any).getTopmostVisibleOverlay?.()) {
+		if (this.lastPointer && !hasBlockingModalOverlay(this.tui)) {
 			const syncedHit = hitTestRail(geo, this.lastPointer.x, this.lastPointer.y);
 			const syncedTurn = this.resolveTurnForHit(geo, syncedHit, turns);
 			const syncedTurnId = syncedTurn?.id;
