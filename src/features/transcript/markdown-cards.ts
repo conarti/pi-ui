@@ -38,7 +38,9 @@ export function installMarkdownCardsAndHeadings(): void {
 				const light = isLightTheme(getActiveGlobalTheme(self?.theme));
 				let headingStyleFn: (text: string) => string;
 
-				if (depth === 1) {
+				if (self.__conartiThinkingMarkdown) {
+					headingStyleFn = (text: string) => self.theme.heading(self.theme.bold(text));
+				} else if (depth === 1) {
 					headingStyleFn = (text: string) => self.theme.heading(self.theme.bold(self.theme.underline(text)));
 				} else if (depth === 2) {
 					headingStyleFn = (text: string) => self.theme.heading(self.theme.bold(text));
@@ -60,7 +62,7 @@ export function installMarkdownCardsAndHeadings(): void {
 				return out;
 			}
 
-			if (token?.type === "code" && !self.defaultTextStyle?.bgColor && width >= 16) {
+			if (!self.__conartiThinkingMarkdown && token?.type === "code" && !self.defaultTextStyle?.bgColor && width >= 16) {
 				const lang = String(token.lang || "").trim();
 				const rawCode = String(token.text ?? "");
 				const isLight = isLightTheme(getActiveGlobalTheme(self?.theme));
@@ -117,7 +119,12 @@ export function installMarkdownCardsAndHeadings(): void {
 		(self, args, original) => {
 			const [block, token] = args as [any, any];
 			const res = original.apply(self, args);
-			if (token?.type === "code" && !self.defaultTextStyle?.bgColor) {
+			if (
+				!self.__conartiThinkingMarkdown &&
+				!self.__conartiSkipReplyCopy &&
+				token?.type === "code" &&
+				!self.defaultTextStyle?.bgColor
+			) {
 				block.__conartiCode = {
 					lang: String(token.lang || "").trim() || "code",
 					raw: String(token.text ?? ""),
@@ -137,7 +144,13 @@ export function installMarkdownCardsAndHeadings(): void {
 		(self, args, original) => {
 			const width = args[0] as number;
 			const baseLines: string[] = original.apply(self, args);
-			if (self.defaultTextStyle?.bgColor || baseLines.length === 0 || width < 20) {
+			if (
+				self.__conartiSkipReplyCopy ||
+				self.__conartiThinkingMarkdown ||
+				self.defaultTextStyle?.bgColor ||
+				baseLines.length === 0 ||
+				width < 20
+			) {
 				self.__conartiCodeZones = [];
 				return baseLines;
 			}
@@ -223,7 +236,9 @@ export function installMarkdownCardsAndHeadings(): void {
 		"transcript.markdownMouse",
 		(self, args) => {
 			const event = args[0] as TuiMouseEvent;
-			if (self.defaultTextStyle?.bgColor) return undefined;
+			if (self.__conartiSkipReplyCopy || self.__conartiThinkingMarkdown || self.defaultTextStyle?.bgColor) {
+				return undefined;
+			}
 
 			const zones: CodeZone[] = self.__conartiCodeZones ?? [];
 

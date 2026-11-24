@@ -272,6 +272,10 @@ export class SilentActivityAnimator {
 		// agent_end closes a low-level run, not retries/compaction/continuations.
 		// Keep the shared clock alive until Pi declares final settlement, as the
 		// working-label controller already does.
+		pi.on("agent_end", () => {
+			this.running = false;
+			this.refresh();
+		});
 		pi.on("agent_settled", () => {
 			this.running = false;
 			this.refresh();

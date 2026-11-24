@@ -2,7 +2,6 @@ import {
 	CustomEditor,
 	type ExtensionAPI,
 	type ExtensionContext,
-	type WorkingIndicatorOptions,
 } from "@earendil-works/pi-coding-agent";
 import {
 	matchesKey,
@@ -17,30 +16,14 @@ import { getSessionWorkflow, MODE_META } from "../../shared/session-workflow.ts"
 import { setAppActionRunner, setRequestRender } from "../../shared/ui-action-bridge.ts";
 import { setSessionMode } from "../plan-studio/index.ts";
 import { showPlanStudio } from "../plan-studio/studio-overlay.ts";
+import { bindComposerWorkingIndicator, buildWaveIndicator } from "./working-indicator.ts";
 
-export function buildWaveIndicator(): WorkingIndicatorOptions {
-	const c1 = (s: string) => fgRgb(62, 84, 118, s);
-	const c2 = (s: string) => fgRgb(86, 148, 214, s);
-	const c3 = (s: string) => fgRgb(125, 207, 255, s);
-	const c4 = (s: string) => fgRgb(86, 212, 224, s);
-
-	return {
-		intervalMs: 95,
-		frames: [
-			`${c3("●")}${c2("∙")}${c1("∙")}`,
-			`${c4("●")}${c3("●")}${c1("∙")}`,
-			`${c2("∙")}${c4("●")}${c3("●")}`,
-			`${c1("∙")}${c2("∙")}${c4("●")}`,
-			`${c1("∙")}${c3("●")}${c2("∙")}`,
-			`${c2("●")}${c1("∙")}${c1("∙")}`,
-		],
-	};
-}
+export { buildWaveIndicator };
 
 export function mountComposer(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	if (ctx.mode !== "tui" || !ctx.hasUI) return;
 
-	ctx.ui.setWorkingIndicator(buildWaveIndicator());
+	bindComposerWorkingIndicator(ctx);
 
 	const previousFactory = ctx.ui.getEditorComponent();
 

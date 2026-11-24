@@ -123,6 +123,14 @@ export class ProgressController {
 		// point and rebuilds it at the next turn_start from the message last set here,
 		// so releasing the label at agent_end makes a retried turn reappear under Pi's
 		// default label. Release it at the final settlement instead.
+		pi.on("turn_start", () => {
+			if (this.context && this.message && !this.stopTicking) {
+				this.startTicking();
+			}
+		});
+		pi.on("agent_end", () => {
+			this.stopAnimation();
+		});
 		pi.on("agent_settled", () => {
 			this.activeTools.clear();
 			this.clearMessage();
@@ -173,6 +181,10 @@ export class ProgressController {
 		this.frames = [];
 		this.frame = 0;
 		this.renderMessage();
+		this.startTicking();
+	}
+
+	private startTicking(): void {
 		if (this.stopTicking) return;
 		this.stopTicking = onTick(() => {
 			this.frame++;
