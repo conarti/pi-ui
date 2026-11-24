@@ -54,10 +54,10 @@ export function mountComposer(pi: ExtensionAPI, ctx: ExtensionContext): void {
 
 		const anyEditor = baseEditor as any;
 		anyEditor.embedWorkingStatus = true;
-		if (typeof baseEditor.setPaddingX === "function" && baseEditor.getPaddingX() < 2) {
+		if (typeof baseEditor.setPaddingX === "function" && typeof anyEditor.getPaddingX === "function" && anyEditor.getPaddingX() < 2) {
 			baseEditor.setPaddingX(2);
 		}
-		if (typeof baseEditor.setAutocompleteMaxVisible === "function" && baseEditor.getAutocompleteMaxVisible() < 10) {
+		if (typeof baseEditor.setAutocompleteMaxVisible === "function" && typeof anyEditor.getAutocompleteMaxVisible === "function" && anyEditor.getAutocompleteMaxVisible() < 10) {
 			baseEditor.setAutocompleteMaxVisible(10);
 		}
 
@@ -113,7 +113,7 @@ export function mountComposer(pi: ExtensionAPI, ctx: ExtensionContext): void {
 			if (lines.length < 2 || width < 28) return lines;
 
 			const theme = ctx.ui.theme;
-			const bLine = (s: string) => baseEditor.borderColor(s);
+			const bLine = (s: string) => baseEditor.borderColor?.(s) ?? s;
 			const visibleRows: number = anyEditor.renderedVisibleLineCount ?? Math.max(1, lines.length - 2);
 			const bottomRowIdx = Math.min(lines.length - 1, visibleRows + 1);
 

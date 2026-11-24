@@ -185,7 +185,7 @@ function patchTranscriptAlignment(tui: TUI): void {
 	}, [LEGACY_TRANSCRIPT_RENDER]);
 }
 
-type ContainerLike = { children?: unknown[]; render(width: number): string[] };
+type ContainerLike = { children?: unknown[]; render(width: number): readonly string[] };
 
 function isSpacer(component: unknown): boolean {
 	return typeof component === "object" && component !== null && component.constructor?.name === "Spacer";

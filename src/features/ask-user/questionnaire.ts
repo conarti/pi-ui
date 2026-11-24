@@ -172,9 +172,10 @@ export class Questionnaire implements Component, Focusable {
 
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.editing || this.confirming) return undefined;
-    if (event.type === "mouse_wheel_up" || event.type === "mouse_wheel_down") {
-      const delta = event.type === "mouse_wheel_up" ? -1 : 1;
-      const count = Math.max(1, event.scrollDelta ?? 1);
+    const eventType: string = event.type;
+    if (eventType === "mouse_wheel_up" || eventType === "mouse_wheel_down") {
+      const delta = eventType === "mouse_wheel_up" ? -1 : 1;
+      const count = Math.max(1, (event as { scrollDelta?: number }).scrollDelta ?? 1);
       this.scroll = Math.max(0, this.scroll + delta * count);
       this.followFocus = false;
       this.tui.requestRender();
