@@ -16,53 +16,10 @@ import {
 	paintSurfaceRow,
 	type RgbTuple,
 } from "../../shared/ansi.ts";
-import {
-	formatPromptChipToken,
-	type PromptChipEntry,
-	type SerializedPromptChip,
-} from "./registry.ts";
+import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
+import type { SerializedPromptChip } from "./registry.ts";
 
 const MAX_EXCERPT_LINES = 8;
-
-export function entryToSerializedChip(entry: PromptChipEntry, number: number): SerializedPromptChip {
-	const token = formatPromptChipToken(entry, number);
-	if (entry.kind === "image") {
-		return {
-			id: entry.id,
-			kind: "image",
-			number,
-			token,
-			filePath: entry.filePath,
-			fileName: entry.fileName,
-			mimeType: entry.mimeType,
-			byteLength: entry.byteLength,
-			...(entry.widthPx !== undefined ? { widthPx: entry.widthPx } : {}),
-			...(entry.heightPx !== undefined ? { heightPx: entry.heightPx } : {}),
-		};
-	}
-	if (entry.kind === "paste") {
-		return {
-			id: entry.id,
-			kind: "paste",
-			number,
-			token,
-			lineCount: entry.lineCount,
-			charCount: entry.charCount,
-			metric: entry.metric,
-			previewText: entry.text,
-		};
-	}
-	return {
-		id: entry.id,
-		kind: "quote",
-		number,
-		token,
-		lineCount: entry.lineCount,
-		charCount: entry.charCount,
-		...(entry.sourceLabel ? { sourceLabel: entry.sourceLabel } : {}),
-		previewText: entry.text,
-	};
-}
 
 export interface PreviewContentSpec {
 	readonly title: string;
@@ -238,7 +195,7 @@ export class PromptChipOverlayController {
 		source: PreviewTriggerSource,
 		anchor: { col: number; rowAbove: number; rowBelow?: number },
 	): void {
-		if (!tui || (tui as unknown as { getTopmostVisibleOverlay?: () => unknown }).getTopmostVisibleOverlay?.()) {
+		if (!tui || hasBlockingModalOverlay(tui)) {
 			this.hide();
 			return;
 		}
@@ -278,7 +235,7 @@ export class PromptChipOverlayController {
 				visible: () =>
 					this.visible &&
 					Boolean(this.activeTui) &&
-					!(this.activeTui as unknown as { getTopmostVisibleOverlay?: () => unknown }).getTopmostVisibleOverlay?.(),
+					!hasBlockingModalOverlay(this.activeTui!),
 			};
 		} else {
 			this.options.width = width;

@@ -160,7 +160,6 @@ export function installQuoteBlocksSuperseder(pi: ExtensionAPI): void {
 	const origOn = pi.on.bind(pi);
 
 	let ownsQuoteCommands = false;
-	let ownsAltQ = false;
 	const suppressedCallerSignatures = new Set<string>();
 
 	const markExternalQuoteBlocksDetected = () => {
@@ -190,15 +189,9 @@ export function installQuoteBlocksSuperseder(pi: ExtensionAPI): void {
 	pi.registerShortcut = ((key, options) => {
 		const normKey = String(key).trim().toLowerCase();
 		if (internalRegistrationDepth > 0) {
-			if (normKey === "alt+q") {
-				ownsAltQ = true;
-			}
 			return origRegisterShortcut(key, options);
 		}
-		if (
-			(ownsAltQ && isExternalQuoteBlocksShortcut(normKey, options?.description)) ||
-			isExternalQuoteBlocksShortcut(normKey, options?.description)
-		) {
+		if (isExternalQuoteBlocksShortcut(normKey, options?.description)) {
 			markExternalQuoteBlocksDetected();
 			return;
 		}

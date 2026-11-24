@@ -42,7 +42,6 @@ describe("conartiPiUi end-to-end extension smoke", () => {
 		expect(headerLines.length).toBeGreaterThan(0);
 		expect(editorLines.length).toBeGreaterThan(0);
 
-		/* Полноэкранный layoutRoot остается нетронутым, а Sticky Prompt и Outline Rail монтируются как композитные слоты */
 		expect(harness.tui.layoutRoot).toBe(originalRoot);
 		expect(harness.tui.layoutRoot).toBeInstanceOf(VStack);
 		expect(harness.tui.scroll).toBeInstanceOf(ScrollView);

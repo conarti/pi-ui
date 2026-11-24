@@ -257,7 +257,7 @@ function stripTrailingImagePlaceholders(text: string): string {
 	return text.replace(/\r\n?/g, "\n").replace(TRAILING_IMAGE_PLACEHOLDER_RE, "").trim();
 }
 
-/* Канонизирует текст карточки промпта с учётом замены табов на два пробела в renderUserPromptCardLines */
+/* renderUserPromptCardLines заменяет табы на два пробела, поэтому ключи поиска нормализуют их одинаково */
 function canonicalizePromptLookupText(text: string): string {
 	const sanitized = stripTerminalSequences(text.replace(/\r\n?/g, "\n"))
 		.replace(CONTROL_CHARS_RE, "")
@@ -273,7 +273,11 @@ function inferImageMimeTypeFromPath(filePath: string): string {
 	return "image/png";
 }
 
-function serializePromptChip(entry: PromptChipEntry, number: number): SerializedPromptChip {
+export function serializePromptChip(
+	entry: PromptChipEntry,
+	number: number,
+	maxPreviewChars?: number,
+): SerializedPromptChip {
 	const token = formatPromptChipToken(entry, number);
 	switch (entry.kind) {
 		case "image":
@@ -298,7 +302,8 @@ function serializePromptChip(entry: PromptChipEntry, number: number): Serialized
 				lineCount: entry.lineCount,
 				charCount: entry.charCount,
 				metric: entry.metric,
-				previewText: entry.text.slice(0, MAX_PERSISTED_PREVIEW_CHARS),
+				previewText:
+					maxPreviewChars !== undefined ? entry.text.slice(0, maxPreviewChars) : entry.text,
 			};
 		case "quote":
 			return {
@@ -309,7 +314,8 @@ function serializePromptChip(entry: PromptChipEntry, number: number): Serialized
 				lineCount: entry.lineCount,
 				charCount: entry.charCount,
 				...(entry.sourceLabel ? { sourceLabel: entry.sourceLabel } : {}),
-				previewText: entry.text.slice(0, MAX_PERSISTED_PREVIEW_CHARS),
+				previewText:
+					maxPreviewChars !== undefined ? entry.text.slice(0, maxPreviewChars) : entry.text,
 			};
 	}
 }
@@ -698,7 +704,7 @@ export class PromptChipRegistry {
 			}
 
 			anyExpanded = true;
-			serializedChips.push(serializePromptChip(entry, span.number));
+			serializedChips.push(serializePromptChip(entry, span.number, MAX_PERSISTED_PREVIEW_CHARS));
 			const chunkBefore = inputText.slice(cursor, span.start);
 
 			if (entry.kind === "image") {
@@ -721,7 +727,6 @@ export class PromptChipRegistry {
 				continue;
 			}
 
-			/* Для цитат вставляем Markdown blockquote с пустыми строками вокруг */
 			let combinedBefore = (expanded + chunkBefore).replace(/[ \t]+$/, "");
 			let quoteLead = "";
 			if (combinedBefore.length > 0) {
@@ -992,7 +997,7 @@ export class PromptChipRegistry {
 					this.historyByBindingKey.get(key);
 				const known = chipId ? this.sessionVault.get(chipId) : undefined;
 				if (known && known.kind === span.kind) {
-					return serializePromptChip(known, span.number);
+					return serializePromptChip(known, span.number, MAX_PERSISTED_PREVIEW_CHARS);
 				}
 				if (span.kind === "image") {
 					return {
@@ -1049,4 +1054,40 @@ export class PromptChipRegistry {
 		this.submittedByTimestamp.clear();
 		this.submittedByExpanded.clear();
 	}
+}
+
+const REGISTRY_KEY = Symbol.for("conarti.pi-ui.prompt-chip-registry.v1");
+
+export function getActivePromptChipRegistry(): PromptChipRegistry {
+	const g = globalThis as Record<symbol, PromptChipRegistry | undefined>;
+	if (!g[REGISTRY_KEY]) {
+		g[REGISTRY_KEY] = new PromptChipRegistry();
+	}
+	return g[REGISTRY_KEY]!;
+}
+
+export function reconstructTurnPromptText(
+	rawPrompt: string,
+	options?: {
+		readonly timestamp?: number | string;
+		readonly messageId?: string;
+		readonly entries?: readonly unknown[];
+	},
+): string {
+	if (!rawPrompt) return "";
+	const registry = getActivePromptChipRegistry();
+	let reconstructed = registry.reconstructSubmittedPrompt(
+		rawPrompt,
+		options?.timestamp,
+		options?.messageId,
+	);
+	if (reconstructed.chips.length === 0 && options?.entries && options.entries.length > 0) {
+		registry.restorePersistedEntries(options.entries);
+		reconstructed = registry.reconstructSubmittedPrompt(
+			rawPrompt,
+			options?.timestamp,
+			options?.messageId,
+		);
+	}
+	return reconstructed.displayText;
 }

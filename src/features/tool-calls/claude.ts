@@ -7,7 +7,7 @@ import {
 	summarizeCustomArguments,
 	summarizeFailure,
 } from "./invocation.ts";
-import { analyzeShell, isHarmlessRedirect, type ShellDialect } from "../../shared/shell-analysis.ts";
+import { analyzeShell, isHarmlessRedirect, unwrapCommandWords, type ShellDialect } from "../../shared/shell-analysis.ts";
 import type { ToolArgs } from "./types.ts";
 
 /**
@@ -129,50 +129,121 @@ export function claudeTitle(name: string, args: ToolArgs, expanded = false): { l
 	return { label: claudeLabel(name), argument: claudeArgument(name, args, expanded) };
 }
 
-// Claude Code's own lists: a command made only of these only looks around, so it
-// folds into a group with reads and searches.
-const SEARCH_COMMANDS = new Set(["find", "grep", "rg", "ag", "ack", "locate", "which", "whereis"]);
-const READ_COMMANDS = new Set([
-	"cat", "head", "tail", "less", "more", "wc", "stat", "file", "strings", "jq", "awk", "cut", "sort", "uniq", "tr",
+const EXPLORATION_NEUTRAL_COMMANDS = new Set([
+	"cd",
+	"pushd",
+	"popd",
+	"set-location",
+	"sl",
+	"push-location",
+	"pop-location",
+	"echo",
+	"printf",
+	"write-output",
+	"write-host",
+	"true",
+	"false",
+	":",
 ]);
-const LIST_COMMANDS = new Set(["ls", "tree", "du"]);
-const NEUTRAL_COMMANDS = new Set(["echo", "printf", "true", "false", ":"]);
+
+const EXPLORATION_SEARCH_COMMANDS = new Set([
+	"find",
+	"fd",
+	"fdfind",
+	"grep",
+	"egrep",
+	"fgrep",
+	"rg",
+	"ag",
+	"ack",
+	"pt",
+	"locate",
+	"which",
+	"whereis",
+	"select-string",
+	"sls",
+	"get-command",
+	"gcm",
+]);
+
+const EXPLORATION_LIST_COMMANDS = new Set([
+	"ls",
+	"dir",
+	"tree",
+	"du",
+	"df",
+	"pwd",
+	"dirs",
+	"get-childitem",
+	"gci",
+	"get-location",
+	"gl",
+]);
 
 export type LookKind = "search" | "read" | "list";
 
-/**
- * How a shell command looks around, if that is all it does: `rg x | head` searches,
- * `cat a.ts` reads, `ls src` lists. Anything that runs something else, writes a
- * file, or redirects anywhere but /dev/null is undefined, so a group never hides it.
- */
-export function classifyShellCommand(command: string, dialect: ShellDialect = "bash"): LookKind | undefined {
-	const analysis = analyzeShell(command, dialect);
-	if (!analysis.valid || analysis.opaque || analysis.effect.kind !== "read-only") return undefined;
-	let search = false;
-	let read = false;
-	let list = false;
-	for (const { words, redirects } of analysis.commands) {
-		if (!redirects.every(isHarmlessRedirect)) return undefined;
-		const rawProgram = words[0];
-		if (!rawProgram) continue;
-		const program = dialect === "powershell" ? rawProgram.toLowerCase() : rawProgram;
-		if (NEUTRAL_COMMANDS.has(program)) continue;
-		if (SEARCH_COMMANDS.has(program) || program === "select-string" || program === "sls") search = true;
-		else if (READ_COMMANDS.has(program) || program === "get-content" || program === "gc") read = true;
-		else if (LIST_COMMANDS.has(program) || program === "get-childitem" || program === "gci") list = true;
-		else return undefined;
-	}
-	// Claude Code counts a call once: as a listing first, then a search, then a read.
-	return list ? "list" : search ? "search" : read ? "read" : undefined;
+function normalizeExplorationProgram(raw: string, dialect: ShellDialect): string {
+	const base = raw.includes("/") ? raw.slice(raw.lastIndexOf("/") + 1) : raw;
+	return dialect === "powershell" ? base.replace(/\.exe$/iu, "").toLowerCase() : base.toLowerCase();
 }
 
-/** Whether a call only looks around, and how; such calls fold into one group. */
+function classifyReadOnlyGitSubcommand(args: readonly string[]): LookKind {
+	let idx = 0;
+	while (idx < args.length && args[idx]!.startsWith("-")) {
+		const flag = args[idx]!;
+		idx += flag === "-C" || flag === "--git-dir" || flag === "--work-tree" || flag === "--namespace" ? 2 : 1;
+	}
+	const sub = args[idx];
+	if (sub === "grep") return "search";
+	if (sub === "ls-files" || sub === "ls-tree") return "list";
+	return "read";
+}
+
+export function classifyShellCommand(command: string, dialect: ShellDialect = "bash"): LookKind | undefined {
+	if (!command.trim()) return undefined;
+	const analysis = analyzeShell(command, dialect);
+	if (!analysis.valid || analysis.opaque || analysis.effect.kind !== "read-only") return undefined;
+	let hasSearch = false;
+	let hasRead = false;
+	let hasList = false;
+	for (const cmd of analysis.commands) {
+		if (!cmd.redirects.every(isHarmlessRedirect)) return undefined;
+		const unwrapped = unwrapCommandWords(cmd.words);
+		if (unwrapped.kind !== "command" || unwrapped.words.length === 0) continue;
+		const program = normalizeExplorationProgram(unwrapped.words[0]!, dialect);
+		const rest = unwrapped.words.slice(1);
+		if (EXPLORATION_NEUTRAL_COMMANDS.has(program)) continue;
+		if (program === "git") {
+			const gitKind = classifyReadOnlyGitSubcommand(rest);
+			if (gitKind === "search") hasSearch = true;
+			else if (gitKind === "list") hasList = true;
+			else hasRead = true;
+			continue;
+		}
+		if ((program === "rg" || program === "ripgrep") && rest.includes("--files")) {
+			hasList = true;
+			continue;
+		}
+		if (EXPLORATION_SEARCH_COMMANDS.has(program) || (dialect === "bash" && program === "type")) {
+			hasSearch = true;
+		} else if (EXPLORATION_LIST_COMMANDS.has(program)) {
+			hasList = true;
+		} else {
+			/* Все остальные команды в этой ветке уже прошли строгую проверку read-only через Shell Effect */
+			hasRead = true;
+		}
+	}
+	return hasSearch ? "search" : hasList ? "list" : hasRead ? "read" : undefined;
+}
+
 export function lookKind(name: string, args: ToolArgs): LookKind | undefined {
 	if (name === "read") return "read";
 	if (name === "grep" || name === "find") return "search";
 	if (name === "ls") return "list";
 	if (name === "bash" || name === "powershell") {
-		return classifyShellCommand(commandOf(args), name === "powershell" ? "powershell" : "bash");
+		const cmd = commandOf(args);
+		if (!cmd.trim()) return undefined;
+		return classifyShellCommand(cmd, name === "powershell" ? "powershell" : "bash");
 	}
 	return undefined;
 }

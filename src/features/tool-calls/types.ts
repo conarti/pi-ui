@@ -12,7 +12,7 @@ export const DISPLAY_MODES = ["normal", "silent"] as const;
 export type DisplayMode = (typeof DISPLAY_MODES)[number];
 export const TOOL_DENSITIES = ["detailed", "diff-focus", "compact"] as const;
 export type ToolDensity = (typeof TOOL_DENSITIES)[number];
-export const DISPLAY_STYLES = ["grok", "detailed", "diff-focus", "compact", "claude", "codex", "off"] as const;
+export const DISPLAY_STYLES = ["density", "detailed", "diff-focus", "compact", "claude", "codex", "off"] as const;
 export type DisplayStyle = (typeof DISPLAY_STYLES)[number];
 
 export interface CustomToolsConfig {
@@ -69,7 +69,7 @@ export interface RowState {
 		/** Whether the row draws opened at a width: Codex opens only a call whose preview leaves something out. */
 		opens?: (width: number) => boolean;
 	};
-	grok?: {
+	density?: {
 		exitCode?: number;
 		changes?: { added: number; removed: number };
 		lineSummary?: string;

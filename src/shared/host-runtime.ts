@@ -307,7 +307,7 @@ function enablePointerMotionTracking(tui: TUI): void {
 	}
 }
 
-const SUPPORTED_DIRECT_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+export const SUPPORTED_DIRECT_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 
 export function sniffSupportedImageMimeType(bytes: Uint8Array): string | null {
 	if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
@@ -373,13 +373,14 @@ function runClipboardExec(command: string, args: string[], timeoutMs = 1500): Pr
 	});
 }
 
-async function normalizeClipboardImageBytes(
+export async function normalizeClipboardImageBytes(
 	bytes: Uint8Array,
 	rawMime?: string,
+	fallbackMime = "application/octet-stream",
 ): Promise<ClipboardImagePayload | null> {
 	if (bytes.length === 0) return null;
 	const baseMime = rawMime?.split(";")[0]?.trim().toLowerCase();
-	const detected = sniffSupportedImageMimeType(bytes) ?? baseMime ?? "application/octet-stream";
+	const detected = sniffSupportedImageMimeType(bytes) ?? baseMime ?? fallbackMime;
 	if (SUPPORTED_DIRECT_IMAGE_MIMES.has(detected)) {
 		return { bytes, mimeType: detected };
 	}
@@ -393,6 +394,48 @@ async function normalizeClipboardImageBytes(
 		};
 	} catch {
 		return null;
+	}
+}
+
+export function resolveActiveClipboardProvider(): HostClipboardProvider {
+	return getActiveHostRuntime()?.clipboard ?? getHostClipboardProvider() ?? defaultHostClipboardProvider;
+}
+
+export function installViewportScrollDismissHooks(
+	namespace: string,
+	isActive: () => boolean,
+	onDismiss: () => void,
+): void {
+	const altProto = (TuiAltScreen as unknown as { prototype?: object } | undefined)?.prototype;
+	if (altProto) {
+		hookMethod(altProto, "parseWheelEvent", `${namespace}.wheelDismiss`, (self, args, original) => {
+			const parsed = original.apply(self, args);
+			if (parsed && isActive()) {
+				onDismiss();
+				self.requestRender?.();
+			}
+			return parsed;
+		});
+	}
+
+	const scrollProto = (ScrollView as unknown as { prototype?: object } | undefined)?.prototype;
+	if (scrollProto) {
+		for (const methodName of ["scrollTo", "scrollBy", "scrollToStart", "scrollToEnd"] as const) {
+			hookMethod(
+				scrollProto,
+				methodName,
+				`${namespace}.scrollDismiss.${methodName}`,
+				(self, args, original) => {
+					const prevTop = self.scrollTop;
+					const result = original.apply(self, args);
+					if (isActive() && self.scrollTop !== prevTop && self === getActiveHostRuntime()?.scroll) {
+						onDismiss();
+						getActiveHostRuntime()?.requestRender();
+					}
+					return result;
+				},
+			);
+		}
 	}
 }
 

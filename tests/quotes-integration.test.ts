@@ -87,7 +87,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 
 		const editor = harness.editor as PiUiComposerEditor;
 
-		/* 1. Активное выделение во fullscreen viewport + кириллический Alt+й (Kitty CSI-u без baseLayoutKey) */
 		harness.tui.pressMouse(0, 0, "left");
 		harness.tui.dragMouse(20, 1, "left");
 		harness.tui.releaseMouse(20, 1, "left");
@@ -100,7 +99,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		expect(harness.tui.getActiveSelectionText()).toBeUndefined();
 		expect(harness.widgets.has("quote-blocks")).toBe(false);
 
-		/* 2. Нет активного выделения -> фоллбэк на HostRuntime.clipboard через все раскладки Alt+Q / Option+Q */
 		const altQSequences = [
 			"\x1bq",
 			"\x1b[113;3u",
@@ -115,7 +113,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 
 		for (let i = 0; i < altQSequences.length; i++) {
 			harness.ctx.ui.setEditorText("Prefix  suffix");
-			/* Поставим курсор ровно между двумя пробелами ("Prefix | suffix"), чтобы проверить вставку в позицию курсора */
 			await harness.sendTerminalInput("\x05");
 			for (let left = 0; left < 7; left++) {
 				await harness.sendTerminalInput("\x1b[D");
@@ -131,7 +128,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			expect(editor.getText()).not.toContain("ј");
 		}
 
-		/* 3. /quote (по умолчанию 1 = последний ответ ассистента) и /quote 2 (предпоследний ответ) */
 		harness.ctx.ui.setEditorText("");
 		await harness.runCommand("quote", "");
 		expect(editor.getText()).toBe("[❝ Quote #1 · 1 line]");
@@ -141,7 +137,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		expect(editor.getText()).toBe("[❝ Quote #1 · 1 line] [❝ Quote #2 · 2 lines]");
 		expect(harness.widgets.has("quote-blocks")).toBe(false);
 
-		/* Невалидный аргумент и выход за пределы истории не портят черновик */
 		const countBeforeInvalid = harness.notifications.length;
 		await harness.runCommand("quote", "99");
 		expect(harness.notifications.length).toBeGreaterThan(countBeforeInvalid);
@@ -170,12 +165,10 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 
 		const editor = harness.editor as PiUiComposerEditor;
 
-		/* Пустой черновик: /quotes уведомляет и не открывает пустую модалку */
 		await harness.runCommand("quotes", "");
 		expect(harness.activeCustomModal).toBeUndefined();
 		expect(harness.notifications.length).toBeGreaterThan(0);
 
-		/* Соберём смешанный черновик: [🖼 Image #1] + [❝ Quote #2 · 2 lines] + [❝ Quote #3 · 1 line] */
 		await harness.sendTerminalInput("\x16");
 		await flushAsyncQuote();
 		expect(editor.getText()).toBe("[🖼 Image #1]");
@@ -195,7 +188,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			"[🖼 Image #1] [❝ Quote #2 · 2 lines] [❝ Quote #3 · 1 line]",
 		);
 
-		/* Откроем /quotes Modal Card (без await, т.к. openModalCard ждёт закрытия модалки) */
 		let modalClosed = false;
 		const modalPromise = harness.runCommand("quotes", "").then(() => {
 			modalClosed = true;
@@ -203,7 +195,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		await Promise.resolve();
 		expect(harness.activeCustomModal).toBeDefined();
 
-		/* Проверим рендер инспектора: обе цитаты и превью первой цитаты видны, ширина строк точная */
 		const modalComp = harness.activeCustomModal!.component;
 		const inspectLines = modalComp.render(76);
 		for (const line of inspectLines) {
@@ -214,7 +205,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		expect(plainInspect).toContain("Quote #3 · 1 line");
 		expect(plainInspect).toContain("Original quote A");
 
-		/* Нажмём Enter (или 'e') для редактирования Quote #2, добавим третью строку через Alt+Enter и сохраним по Enter */
 		await harness.sendTerminalInput("\r");
 		await harness.sendTerminalInput("\x1b\rAdded third line");
 		await harness.sendTerminalInput("\r");
@@ -223,18 +213,15 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			"[🖼 Image #1] [❝ Quote #2 · 3 lines] [❝ Quote #3 · 1 line]",
 		);
 
-		/* Перейдём стрелкой вниз на Quote #3 и удалим её клавишей 'd' */
 		await harness.sendTerminalInput("\x1b[B");
 		await harness.sendTerminalInput("d");
 		expect(editor.getText()).toBe("[🖼 Image #1] [❝ Quote #2 · 3 lines]");
 
-		/* Закроем модалку по Esc */
 		await harness.sendTerminalInput("\x1b");
 		await modalPromise;
 		expect(modalClosed).toBe(true);
 		expect(harness.activeCustomModal).toBeUndefined();
 
-		/* Проверим очистку всех цитат через /quotes Modal Card ('c') при сохранении [🖼 Image #1] и текста */
 		await harness.sendTerminalInput(" keep this text");
 		const clearModalPromise = harness.runCommand("quotes", "");
 		await Promise.resolve();
@@ -244,15 +231,24 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 
 		expect(editor.getText()).toBe("[🖼 Image #1] keep this text");
 
-		/* Undo (Ctrl+Z) в композере восстанавливает удалённую цитату вместе с её обновлённым 3-строчным текстом */
-		await harness.sendTerminalInput("\x1a");
+		await harness.sendTerminalInput("\x1f");
 		expect(editor.getText()).toBe("[🖼 Image #1] [❝ Quote #2 · 3 lines] keep this text");
 
-		/* Подкоманда /quotes clear также очищает только цитаты */
+		const palettePromise = harness.triggerShortcut("ctrl+k");
+		await Promise.resolve();
+		expect(harness.activeCustomModal).toBeDefined();
+		await harness.sendTerminalInput("цитат");
+		const palettePlain = stripTerminalSequences(
+			harness.activeCustomModal!.component.render(90).join("\n"),
+		);
+		expect(palettePlain).not.toContain("Процитировать последний ответ");
+		expect(palettePlain).not.toContain("Управление цитатами черновика");
+		harness.activeCustomModal!.done(undefined);
+		await palettePromise;
+
 		await harness.runCommand("quotes", "clear");
 		expect(editor.getText()).toBe("[🖼 Image #1] keep this text");
 
-		/* Проверим подкоманды /quotes edit и /quotes remove qN, а также клик мышью по кнопкам Modal Card */
 		clipTxt = "Mouse editable quote";
 		await harness.sendTerminalInput(" ");
 		await harness.sendTerminalInput("\x1b[113;3u");
@@ -261,12 +257,11 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			"[🖼 Image #1] keep this text [❝ Quote #2 · 1 line]",
 		);
 
-		/* Правка цитаты без изменения числа строк (1 line -> 1 line) должна записывать Undo-шаг, не удаляя чип по Ctrl+Z */
 		await harness.runCommand("quotes", "edit q2 Same-line replacement");
 		expect(editor.getText()).toBe(
 			"[🖼 Image #1] keep this text [❝ Quote #2 · 1 line]",
 		);
-		await harness.sendTerminalInput("\x1a");
+		await harness.sendTerminalInput("\x1f");
 		expect(editor.getText()).toBe(
 			"[🖼 Image #1] keep this text [❝ Quote #2 · 1 line]",
 		);
@@ -276,7 +271,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			.join("\n");
 		expect(revertedPreview).toContain("Mouse editable quote");
 
-		/* Вставка многострочного bracketed paste по чанкам в режиме редактирования Modal Card не завершает правку раньше времени */
 		const pasteEditPromise = harness.runCommand("quotes", "edit 2");
 		await Promise.resolve();
 		expect(harness.activeCustomModal).toBeDefined();
@@ -355,7 +349,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			});
 		};
 
-		/* A. Проверка настоящего ExtensionRunner при обоих порядках загрузки: до и после @conarti/pi-ui */
 		const buildRunnerRecord = (path: string, init: (pi: ExtensionAPI) => void) => {
 			const record: any = {
 				path,
@@ -463,7 +456,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			expect(externalCalls).toEqual([]);
 		}
 
-		/* B. Проверка сосуществования на одном ExtensionHarness (включая стороннее расширение сразу после pi-quote-blocks) */
 		for (const order of ["before", "after"] as const) {
 			externalCalls.length = 0;
 			const thirdPartyCalls: string[] = [];
@@ -545,7 +537,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 
 		const editor = harness.editor as PiUiComposerEditor;
 
-		/* 1. Соберём черновик: текст + [🖼 Image #1] + [📋 Pasted #2 · 4 lines] + [❝ Quote #3 · 3 lines] (с пустой строкой внутри!) */
 		await harness.sendTerminalInput("Review ");
 		await harness.sendTerminalInput("\x16");
 		await flushAsyncQuote();
@@ -565,7 +556,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			"Review [🖼 Image #1] code [📋 Pasted #2 · 4 lines] against [❝ Quote #3 · 3 lines] carefully",
 		);
 
-		/* Имитируем реальный submitValue композера (сначала очистка черновика, затем input event) */
 		harness.ctx.ui.setEditorText("");
 		const inputResults = await harness.emit("input", {
 			type: "input",
@@ -606,7 +596,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		const persisted = harness.appendedEntries.find((e) => e.customType === "conarti-prompt-chips");
 		expect(persisted).toBeDefined();
 
-		/* Добавим запись сообщения в ветку и смонтируем карточку промпта + длинный ответ, затем проверим /reload */
 		const branchEntries = [
 			{
 				type: "custom",
@@ -645,7 +634,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		harness.tui.chatContainer.addChild(userCard);
 		harness.tui.chatContainer.addChild(new Spacer(40));
 
-		/* В обычном положении (scrollTop = 0 после первичного layout) видна сама карточка UserMessageComponent с пилюлей [❝ Quote #3 · 3 lines] */
 		harness.tui.renderViewport(100, 26);
 		(harness.tui.scroll as any).scrollTo(0, { disableFollow: true });
 		const topFrame = harness.tui.renderViewport(100, 26).map((l) => stripTerminalSequences(l));
@@ -653,7 +641,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		expect(quoteCardRow).toBeGreaterThanOrEqual(0);
 		expect(topFrame.join("\n")).not.toContain("> Quoted first line");
 
-		/* Клик по пилюле [❝ Quote #3 · 3 lines] в User Prompt открывает Hover Popup превью с текстом цитаты */
 		const quoteCardCol = topFrame[quoteCardRow]!.indexOf("[❝ Quote #3 · 3 lines]");
 		harness.tui.clickMouse(quoteCardCol + 3, quoteCardRow, "left");
 		const withTranscriptPreview = harness.tui
@@ -664,7 +651,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		expect(withTranscriptPreview).toContain("│   Quoted first line");
 		expect(withTranscriptPreview).toContain("│     Quoted third line");
 
-		/* Прокрутка через scrollBy также закрывает открытое превью sent-pill */
 		harness.tui.scroll.scrollBy(12);
 		expect(
 			harness.tui
@@ -715,7 +701,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			harness.tui.chatContainer.addChild(new Spacer(35));
 			harness.tui.scroll.scrollTo(0);
 
-			/* До выделения (и при выделении пустых строк Spacer внизу) оверлей не монтируется */
 			harness.tui.renderViewport(100, 26);
 			harness.tui.pressMouse(0, 10, "left");
 			harness.tui.dragMouse(15, 11, "left");
@@ -725,17 +710,14 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			);
 			expect(initialVisibleNonCapturing).toHaveLength(0);
 
-			/* Прокрутим к началу транскрипта, где находятся строки с текстом */
 			(harness.tui.scroll as any).scrollTo(0, { disableFollow: true });
 			harness.tui.renderViewport(100, 26);
 
-			/* 1. Выделение перетаскиванием мыши (drag) монтирует ╭ ❝ Цитировать ╮ около конца выделения и сохраняет copyOnSelect */
 			harness.tui.terminal.writes.length = 0;
 			harness.tui.pressMouse(0, 1, "left");
 			harness.tui.dragMouse(33, 2, "left");
 			harness.tui.releaseMouse(33, 2, "left");
 
-			/* Нативный copyOnSelect записал OSC 52 в терминал */
 			const osc52Write = harness.tui.terminal.writes.find((w) => w.startsWith("\x1b]52;c;"));
 			expect(osc52Write).toBeDefined();
 
@@ -753,7 +735,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			const popupCol = plainDragScreen[popupRow]!.indexOf("╭ ❝ Цитировать ╮");
 			expect(popupCol).toBeGreaterThanOrEqual(1);
 
-			/* Проверка отсутствия фиолетовых оттенков (r > g && b > g) в строке попапа */
 			for (const m of rawDragScreen[popupRow]!.matchAll(/\x1b\[(?:38|48);2;(\d+);(\d+);(\d+)m/g)) {
 				const r = Number(m[1]);
 				const g = Number(m[2]);
@@ -761,7 +742,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 				expect(r > g && b > g, `purple rgb(${r},${g},${b}) in ${themeMode}`).toBe(false);
 			}
 
-			/* Клик по ╭ ❝ Цитировать ╮ вставляет чип цитаты (несмотря на clearTextSelection на press!), очищает выделение, скрывает попап и фокусирует композер */
 			harness.tui.setFocus(null);
 			harness.tui.clickMouse(popupCol + 4, popupRow, "left");
 
@@ -776,10 +756,8 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 				.map((l) => stripTerminalSequences(l))
 				.join("\n");
 			expect(afterQuoteClickScreen).not.toContain("╭ ❝ Цитировать ╮");
-			/* Так как композер получил фокус и курсор стоит у [❝ Quote #1 · 2 lines], показывается caret-превью этого чипа */
 			expect(afterQuoteClickScreen).toContain("❝ Quote #1 · 2 lines");
 
-			/* 2. Двойной клик (multi-click word selection) монтирует попап, а Esc мгновенно скрывает его без кражи фокуса */
 			harness.ctx.ui.setEditorText("");
 			harness.tui.renderViewport(100, 26);
 			harness.tui.clickMouse(12, 1, "left");
@@ -801,7 +779,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 					.join("\n"),
 			).not.toContain("╭ ❝ Цитировать ╮");
 
-			/* 3. Прокрутка колесом скрывает попап мгновенно без кражи фокуса */
 			harness.tui.pressMouse(0, 1, "left");
 			harness.tui.dragMouse(16, 1, "left");
 			harness.tui.releaseMouse(16, 1, "left");
@@ -821,7 +798,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 					.join("\n"),
 			).not.toContain("╭ ❝ Цитировать ╮");
 
-			/* 4. Клик вне попапа скрывает его мгновенно без кражи фокуса */
 			harness.tui.scroll.scrollTo(0);
 			harness.tui.renderViewport(100, 26);
 			harness.tui.pressMouse(0, 1, "left");
@@ -843,7 +819,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 					.join("\n"),
 			).not.toContain("╭ ❝ Цитировать ╮");
 
-			/* 5. Тройной клик (triple-click line selection) и лёгкий сдвиг мыши внутри ╭ ❝ Цитировать ╮ работают надёжно */
 			harness.ctx.ui.setEditorText("");
 			harness.tui.clickMouse(12, 1, "left");
 			harness.tui.clickMouse(12, 1, "left");
@@ -856,13 +831,11 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			expect(triplePopupRow).toBeGreaterThanOrEqual(0);
 			const triplePopupCol = tripleScreen[triplePopupRow]!.indexOf("╭ ❝ Цитировать ╮");
 
-			/* Небольшой горизонтальный сдвиг внутри кнопки между press и release не теряет клик и не дублирует вставку */
 			harness.tui.pressMouse(triplePopupCol + 2, triplePopupRow, "left");
 			harness.tui.dragMouse(triplePopupCol + 7, triplePopupRow, "left");
 			harness.tui.releaseMouse(triplePopupCol + 7, triplePopupRow, "left");
 			expect(editor.getText()).toBe("[❝ Quote #1 · 1 line]");
 
-			/* 6. Клавиатурная и программная прокрутка (scrollBy / scrollToStart / scrollToEnd / scrollTo) скрывает попап */
 			for (const { startTop, scrollAction } of [
 				{ startTop: 0, scrollAction: () => harness!.tui.scroll.scrollBy(3) },
 				{ startTop: 0, scrollAction: () => harness!.tui.scroll.scrollToEnd() },
@@ -890,7 +863,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 				).not.toContain("╭ ❝ Цитировать ╮");
 			}
 
-			/* 7. При открытом блокирующем Modal Card (tui.getTopmostVisibleOverlay()) попап НЕ монтируется */
 			(harness.tui.scroll as any).scrollTo(0, { disableFollow: true });
 			harness.tui.renderViewport(100, 26);
 			const blockingHandle = harness.tui.showOverlay(
@@ -978,12 +950,10 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		);
 		harness.tui.chatContainer.addChild(new Spacer(30));
 
-		/* Прокрутим так, чтобы Sticky Prompt (3 строки сверху) и Outline Rail (колонки 97..98) были одновременно активны */
 		harness.tui.renderViewport(100, 26);
 		(harness.tui.scroll as any).scrollTo(4, { disableFollow: true });
 		harness.tui.renderViewport(100, 26);
 
-		/* 1. Первое цитирование оставляет в композере [❝ Quote #1 · 1 line] и видимый nonCapturing composer-caret Hover Popup */
 		harness.tui.pressMouse(0, 6, "left");
 		harness.tui.dragMouse(20, 6, "left");
 		harness.tui.releaseMouse(20, 6, "left");
@@ -994,22 +964,18 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		harness.tui.clickMouse(firstPopCol + 3, firstPopRow, "left");
 		expect(editor.getText()).toBe("[❝ Quote #1 · 1 line]");
 
-		/* Убедимся, что nonCapturing composer-caret превью действительно смонтировано поверх вьюпорта */
 		harness.tui.renderViewport(100, 26);
 		expect((harness.tui as any).hasOverlay()).toBe(true);
 		expect(harness.tui.getTopmostVisibleOverlay()).toBeUndefined();
 
-		/* Нативный скроллбар остаётся доступным несмотря на nonCapturing Hover Popup */
 		expect((harness.tui as any).getScrollbarTargetAt(99, 6, true)).toBeDefined();
 
-		/* 2. НЕ очищая композер, выделяем вторую строку тройным кликом -> привязка строго к ScrollView без захвата Outline Rail (`──` / `─`) */
 		harness.tui.clickMouse(8, 7, "left");
 		harness.tui.clickMouse(8, 7, "left");
 		harness.tui.clickMouse(8, 7, "left");
 		expect((harness.tui as any).getSelectionBounds()?.start?.scrollView).toBe(harness.tui.scroll);
 		expect(harness.tui.getActiveSelectionText()).toBe("Body turn one row 8 clean text");
 
-		/* 3. Перетаскивание выделения из транскрипта вверх внутрь Sticky Prompt (y = 0) включает auto-scroll и корректно завершает release без залипания */
 		harness.tui.terminal.writes.length = 0;
 		harness.tui.pressMouse(0, 8, "left");
 		harness.tui.dragMouse(18, 0, "left");
@@ -1026,7 +992,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		);
 		expect(stickySafePopupRow).toBeGreaterThanOrEqual(3);
 
-		/* 4. Перетаскивание, начатое на рамке композера (dock, вне ScrollView), НЕ открывает ╭ ❝ Цитировать ╮ */
 		await harness.sendTerminalInput("\x1b");
 		harness.tui.renderViewport(100, 26);
 		harness.tui.pressMouse(2, 24, "left");

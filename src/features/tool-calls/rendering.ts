@@ -48,10 +48,6 @@ if (typeof createCodemodeExtension === "function") {
 	}
 }
 
-export function loadNativeTimerRenderers(): Promise<void> {
-	return Promise.resolve();
-}
-
 /** Conservative fallback on legacy hosts without source metadata. */
 export function hasAuthorRenderers(name: string, definition: ToolDefinition<any, any, any> | undefined): boolean {
 	if (!definition) return false;

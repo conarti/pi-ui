@@ -187,7 +187,6 @@ describe("Quotes pure domain & geometry seams", () => {
 			sourceLabel: "selection",
 		});
 
-		/* Undo после редактирования цитаты восстанавливает прежний текст цитаты в реестре */
 		registry.restoreUndoSnapshot(undoSnapBeforeEdit);
 		expect(registry.syncDraft(draftBeforeEdit)).toBe(draftBeforeEdit);
 		expect(registry.resolveChip("quote", 2)).toMatchObject({
@@ -196,7 +195,6 @@ describe("Quotes pure domain & geometry seams", () => {
 			lineCount: 2,
 		});
 
-		/* Повторно применим правку, затем очистим цитату #2 пустой строкой -> она удалится, а чипы #3,#4 перенумеруются в #2,#3 */
 		draft = editDraftQuote(registry, draftBeforeEdit, 2, "single edited line").draftText;
 		expect(draft).toBe(
 			"Compare [🖼 Image #1] with [❝ Quote #2 · 1 line] and [📋 Pasted #3 · 4 lines] plus [❝ Quote #4 · 1 line] end",
@@ -210,7 +208,6 @@ describe("Quotes pure domain & geometry seams", () => {
 			"Compare [🖼 Image #1] with and [📋 Pasted #2 · 4 lines] plus [❝ Quote #3 · 1 line] end",
 		);
 
-		/* Добавим ещё одну цитату и проверим removeDraftQuote + clearAllDraftQuotes */
 		const qExtra = registry.registerQuote("extra line 1\nextra line 2");
 		draft = `${draft} ${qExtra.token}`;
 		expect(listActiveDraftQuotes(registry, draft).map((q) => q.number)).toEqual([3, 4]);
@@ -228,7 +225,6 @@ describe("Quotes pure domain & geometry seams", () => {
 		);
 		expect(listActiveDraftQuotes(registry, afterClearAll.draftText)).toEqual([]);
 
-		/* Геометрия позиционирования ╭ ❝ Цитировать ╮ около конца выделения */
 		const downMid = computeSelectionQuotePopupAnchor({
 			popupWidth: 16,
 			popupHeight: 1,
@@ -281,7 +277,6 @@ describe("Quotes pure domain & geometry seams", () => {
 		const q1 = registry.registerQuote("first quote");
 		const q2 = registry.registerQuote("second line A\nsecond line B");
 
-		/* Если токен #1 удалён из строки до syncDraft, операции над цитатой #1 должны работать по синхронизированному тексту */
 		const unsyncedAfterDeletingFirst = `Prefix ${q2.token} suffix`;
 		const listed = listActiveDraftQuotes(registry, unsyncedAfterDeletingFirst);
 		expect(listed.map((q) => ({ number: q.number, token: q.token }))).toEqual([
@@ -303,7 +298,6 @@ describe("Quotes pure domain & geometry seams", () => {
 			text: "replaced line 1\nreplaced line 2",
 		});
 
-		/* Сохранение без изменений не пересоздаёт чип в реестре */
 		const idBeforeNoop = registry.resolveChip("quote", 1)?.id;
 		const noopEdit = editDraftQuote(
 			registry,
@@ -314,7 +308,6 @@ describe("Quotes pure domain & geometry seams", () => {
 		expect(noopEdit.unchanged).toBe(true);
 		expect(registry.resolveChip("quote", 1)?.id).toBe(idBeforeNoop);
 
-		/* Удаление из несинхронизированного черновика действительно убирает токен */
 		const q3 = registry.registerQuote("third quote");
 		const unsyncedForRemove = `Keep ${q3.token}`;
 		const removed = removeDraftQuote(registry, unsyncedForRemove, 1);
@@ -324,7 +317,6 @@ describe("Quotes pure domain & geometry seams", () => {
 		const cleared = clearAllDraftQuotes(registry, `Start ${q4.token} end`);
 		expect(cleared).toEqual({ removedCount: 1, draftText: "Start end" });
 
-		/* Реконструкция отправленной карточки, когда renderUserPromptCardLines заменил табы на два пробела */
 		const tabQuote = registry.registerQuote("\tif err != nil {\n\t\treturn err\n\t}", "selection");
 		const submitDraft = `Inspect:\n${tabQuote.token}`;
 		const expanded = registry.expandDraftForSubmit(submitDraft);

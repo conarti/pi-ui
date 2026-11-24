@@ -172,7 +172,6 @@ describe("Viewport chrome & refined user prompt cards", () => {
 			expect(copiedLines[0]).toContain("Copied");
 			expect(copiedLines[1]).toBe(plainIdle[1]);
 
-			/* Таймер сброса ✓ Copied не утекает после завершения сессии */
 			vi.useFakeTimers();
 			(card as unknown as { handleMouse?: (e: TuiMouseEvent) => unknown }).handleMouse?.({
 				type: "click",
@@ -219,7 +218,6 @@ describe("Viewport chrome & refined user prompt cards", () => {
 			return { text, pills };
 		});
 
-		/* Обычный текст с той же подстрокой "🖼 Image #1" перед реальной пилюлей НЕ перехватывает хитбокс пилюли */
 		const card = new UserMessageComponent("Plain 🖼 Image #1 then [🖼 Image #1] and [📋 Pasted #2 · 8 lines]");
 		harness.tui.chatContainer.addChild(card);
 
@@ -231,7 +229,6 @@ describe("Viewport chrome & refined user prompt cards", () => {
 		expect(firstPlainCol).toBeGreaterThan(2);
 		expect(secondPillCol).toBeGreaterThan(firstPlainCol + 10);
 
-		/* Клик по обычному тексту НЕ срабатывает как клик по пилюле */
 		(card as unknown as { handleMouse?: (e: TuiMouseEvent) => unknown }).handleMouse?.({
 			type: "click",
 			button: "left",
@@ -244,7 +241,6 @@ describe("Viewport chrome & refined user prompt cards", () => {
 		} as TuiMouseEvent);
 		expect(clickedIds).toEqual([]);
 
-		/* Клик по настоящей стилизованной пилюле срабатывает */
 		(card as unknown as { handleMouse?: (e: TuiMouseEvent) => unknown }).handleMouse?.({
 			type: "click",
 			button: "left",
@@ -257,7 +253,6 @@ describe("Viewport chrome & refined user prompt cards", () => {
 		} as TuiMouseEvent);
 		expect(clickedIds).toEqual(["chip-1"]);
 
-		/* Даже если первая пилюля перенеслась по словам на узком экране, вторая пилюля ниже остается кликабельной */
 		const narrowCard = new UserMessageComponent("[📋 Pasted #2 · 8 lines]\n[🖼 Image #1]");
 		disposePillFormatter();
 		disposePillFormatter = registerPromptPillFormatter((rawText, context) => ({
@@ -290,7 +285,7 @@ describe("Viewport chrome & refined user prompt cards", () => {
 	});
 
 	it.each(["dark", "light"] as const)(
-		"renders monochrome adaptive Outline Rail glyphs and Grok-style Hover Popup with 24h timestamp above a neutral-bordered box in %s theme",
+		"renders monochrome adaptive Outline Rail glyphs and Hover Popup with 24h timestamp above a neutral-bordered box in %s theme",
 		async (themeMode) => {
 			const t1 = new Date(2026, 3, 19, 9, 5).getTime();
 			const t2 = new Date(2026, 3, 19, 15, 14).getTime();
@@ -340,13 +335,12 @@ describe("Viewport chrome & refined user prompt cards", () => {
 				getBranch: () => harness!.ctx.sessionManager.getBranch(),
 				getTranscriptWidth: () => 97,
 			});
-			const rail = createOutlineRailSlot(harness.ctx, shell, turnIndex, () => 0);
+			const rail = createOutlineRailSlot(harness.ctx, shell, turnIndex);
 
 			const idleRail = rail.render(2);
 			expect(idleRail.length).toBe(12);
 			const plainIdleRail = idleRail.map(stripTerminalSequences);
 
-			/* В высоте 12 при 3 репликах: upY = 3, ticksY = 4..6, downY = 7 */
 			expect(plainIdleRail[3]).toBe(" ▲");
 			expect(plainIdleRail[4]).toBe(" ─");
 			expect(plainIdleRail[5]).toBe("──");
@@ -440,7 +434,6 @@ describe("Viewport chrome & refined user prompt cards", () => {
 			harness.mount(conartiPiUi);
 			await harness.startSession();
 
-			/* Первичный layoutRoot не оборачивается во внешний VStack/HStack */
 			expect(harness.tui.layoutRoot).toBe(originalRoot);
 
 			harness.tui.chatContainer.addChild(
@@ -458,23 +451,19 @@ describe("Viewport chrome & refined user prompt cards", () => {
 				invalidate() {},
 			});
 
-			/* Начальный рендер на scrollTop = 0 */
 			harness.tui.renderViewport(100, 16);
 			harness.tui.scroll.scrollTo(0, { disableFollow: true });
 			const atTopFrame = harness.tui.renderViewport(100, 16);
 			const initialViewportHeight = harness.tui.scroll.viewportHeight;
 			expect(initialViewportHeight).toBe(16);
 
-			/* На scrollTop = 0 карточка Turn 1 показывает все 5 строк контента в транскрипте (не свернута Sticky Prompt) */
 			const plainTop = atTopFrame.map(stripTerminalSequences);
 			expect(plainTop.join("\n")).toContain("Line four hidden while collapsed");
 
-			/* Скроллим на scrollTop = 8 (внутри ответа Turn 1): Sticky Prompt закрепляется свернутым до 3 строк + vpad = 5 строк */
 			harness.tui.scroll.scrollTo(8, { disableFollow: true });
 			const midFrame = harness.tui.renderViewport(100, 16);
 			expect(harness.tui.scroll.viewportHeight).toBe(initialViewportHeight);
 
-			/* Правая колонка (99) рендерит нативный скроллбар, а колонки 97..98 - Outline Rail */
 			const scrollbarCells = midFrame.map((line) => stripTerminalSequences(sliceByColumn(line, 99, 1, true)));
 			expect(scrollbarCells.some((ch) => ch === "┃" || ch === "│" || ch === "█")).toBe(true);
 
@@ -486,7 +475,6 @@ describe("Viewport chrome & refined user prompt cards", () => {
 			expect(railCellsVisibleScrollbar.some((cell) => cell === " ─")).toBe(true);
 			expect(railCellsVisibleScrollbar.some((cell) => cell === " ▼")).toBe(true);
 
-			/* Когда auto-скроллбар скрывается по таймауту, Outline Rail остается ровно в колонках 97..98 без сдвига */
 			(harness.tui.scroll as any).hideTransientScrollbar();
 			expect(harness.tui.scroll.isScrollbarVisible).toBe(false);
 			const hiddenScrollbarFrame = harness.tui.renderViewport(100, 16);
@@ -495,14 +483,12 @@ describe("Viewport chrome & refined user prompt cards", () => {
 			);
 			expect(railCellsHiddenScrollbar).toEqual(railCellsVisibleScrollbar);
 
-			/* Перетаскивание нативного скроллбара в правой колонке 99 меняет scrollTop */
 			harness.tui.moveMouse(99, 1);
 			harness.tui.pressMouse(99, 1, "left");
 			harness.tui.dragMouse(99, 12, "left");
 			harness.tui.releaseMouse(99, 12, "left");
 			expect(harness.tui.scroll.scrollTop).toBeGreaterThan(10);
 
-			/* Возвращаемся на scrollTop = 8 и проверяем свернутый Sticky Prompt (3 строки текста + … без #N/M и ↑ ↓) */
 			harness.tui.scroll.scrollTo(8, { disableFollow: true });
 			const stickyCollapsedFrame = harness.tui.renderViewport(100, 16);
 			const stickyTopFive = stickyCollapsedFrame
@@ -519,7 +505,6 @@ describe("Viewport chrome & refined user prompt cards", () => {
 			expect(stickyTopFive.join("\n")).not.toContain("↑");
 			expect(stickyTopFive.join("\n")).not.toContain("Line four hidden while collapsed");
 
-			/* Клик по Sticky Prompt разворачивает полный текст, повторный клик или хоткей сворачивает обратно */
 			harness.tui.clickMouse(12, 2, "left");
 			const expandedFrame = harness.tui.renderViewport(100, 16);
 			expect(harness.tui.scroll.viewportHeight).toBe(initialViewportHeight);
@@ -543,12 +528,6 @@ describe("Viewport chrome & refined user prompt cards", () => {
 					.join("\n"),
 			).not.toContain("Line four hidden while collapsed");
 
-			/* Построчное вытеснение (pushOffset): карточка Turn 1 занимает 7 строк (0..6) + 12 строк ответа = Turn 2 начинается на строке 19.
-			   При stickyHeight = 5:
-			   scrollTop = 14 -> distance = 5 -> pushOffset = 0 (видимы все 5 строк Sticky)
-			   scrollTop = 16 -> distance = 3 -> pushOffset = 2 (верхние 2 строки вытеснены, строка 3 контента теперь на экранной строке 1, а карточка Turn 2 начинается ровно на строке 3!)
-			   scrollTop = 19 -> distance = 0 -> pushOffset = 5 (Sticky полностью вытеснен, карточка Turn 2 на строке 0)
-			   scrollTop = 20 -> закрепляется уже один Turn 2! */
 			harness.tui.scroll.scrollTo(16, { disableFollow: true });
 			const pushedFrame = harness.tui.renderViewport(100, 16);
 			const plainPushed = pushedFrame.map((line) => stripTerminalSequences(sliceByColumn(line, 0, 97, true)));
@@ -610,16 +589,12 @@ describe("Viewport chrome & refined user prompt cards", () => {
 			invalidate() {},
 		});
 
-		/* Карточка Turn 1 занимает строки 0..2, intro 3..4, Kitty-изображение на строке 5.
-		   При scrollTop = 1: Sticky Prompt закрывает экранные строки 0..2, а изображение остается открытым на экранной строке 4! */
 		harness.tui.renderViewport(100, 14);
 		harness.tui.scroll.scrollTo(1, { disableFollow: true });
 		const uncoveredImageFrame = harness.tui.renderViewport(100, 14);
 		expect(uncoveredImageFrame[4]).toContain("\x1b_G");
 		expect(uncoveredImageFrame.slice(0, 3).some((line) => line.includes("\x1b_G"))).toBe(false);
 
-		/* При scrollTop = 4 строка 5 с Kitty-изображением попадает на экранную строку 1 под Sticky Prompt (0..2):
-		   верхние 2 строки изображения перекрыты Sticky Prompt, но нижняя строка (r=1) переносится на экранную строку 3! */
 		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 		const pngHeader = Buffer.alloc(32);
 		pngHeader.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
@@ -662,8 +637,6 @@ describe("Viewport chrome & refined user prompt cards", () => {
 			invalidate() {},
 		});
 
-		/* На scrollTop = 4 6-строчное изображение (док. 5..10) занимает экранные строки 1..6:
-		   строки 0..2 заняты Sticky Prompt без \x1b_G, а на строке 3 рендерится подрезанный остаток r=4 (строки 3..6)! */
 		harness.tui.renderViewport(100, 14);
 		harness.tui.scroll.scrollTo(4, { disableFollow: true });
 		const partiallyCoveredAt4 = harness.tui.renderViewport(100, 14);
@@ -674,8 +647,6 @@ describe("Viewport chrome & refined user prompt cards", () => {
 		expect(partiallyCoveredAt4[3]).toContain("y=36");
 		expect(partiallyCoveredAt4[3]).toContain("h=72");
 
-		/* На scrollTop = 6 верх изображения уже выше scrollTop (док. 5 < 6), layout.js кладет r=5 на экранную строку 0,
-		   а композитор Sticky Prompt (0..2) переносит видимый нижний срез r=2 на экранную строку 3! */
 		harness.tui.scroll.scrollTo(6, { disableFollow: true });
 		const partiallyCoveredAt6 = harness.tui.renderViewport(100, 14);
 		expect(partiallyCoveredAt6.slice(0, 3).some((line) => line.includes("\x1b_G"))).toBe(false);
@@ -684,8 +655,6 @@ describe("Viewport chrome & refined user prompt cards", () => {
 		expect(partiallyCoveredAt6[3]).toContain("y=72");
 		expect(partiallyCoveredAt6[3]).toContain("h=36");
 
-		/* На scrollTop = 8 iTerm2-строка (док. 11) оказывается на экранной строке 3 с \x1b[4A (прыжок вверх в Sticky Prompt):
-		   последовательность очищается, чтобы не затереть Sticky Prompt */
 		harness.tui.scroll.scrollTo(8, { disableFollow: true });
 		const itermBleedFrame = harness.tui.renderViewport(100, 14);
 		expect(itermBleedFrame[3]).not.toContain("\x1b]1337;File=");
@@ -725,7 +694,6 @@ describe("Viewport chrome & refined user prompt cards", () => {
 			invalidate() {},
 		});
 
-		/* На scrollTop = 2 выделяем мышью строки 4..8 широким диапазоном до правого края */
 		harness.tui.renderViewport(100, 14);
 		harness.tui.scroll.scrollTo(2, { disableFollow: true });
 		harness.tui.renderViewport(100, 14);
@@ -735,11 +703,9 @@ describe("Viewport chrome & refined user prompt cards", () => {
 		harness.tui.releaseMouse(96, 8, "left");
 		expect(harness.tui.hasActiveSelection()).toBe(true);
 
-		/* Прокручиваем вниз до scrollTop = 6, чтобы выделенные строки транскрипта (документные 6..10) оказались прямо под Sticky Prompt (экранные 0..2) и на открытых строках 3..4 */
 		harness.tui.scroll.scrollTo(6, { disableFollow: true });
 		const selectedFrame = harness.tui.renderViewport(100, 14);
 
-		/* Открытая выделенная строка 3 содержит инвертированные ячейки, но ни Sticky Prompt (0..2), ни Outline Rail + скроллбар (97..99) не инвертированы */
 		expect(hasInvertedVisibleCell(sliceByColumn(selectedFrame[3]!, 0, 97, true))).toBe(true);
 		for (let row = 0; row < 3; row++) {
 			expect(selectedFrame[row]).not.toContain("\x1b[7m");
@@ -749,7 +715,6 @@ describe("Viewport chrome & refined user prompt cards", () => {
 			expect(hasInvertedVisibleCell(sliceByColumn(selectedFrame[row]!, 97, 3, true))).toBe(false);
 		}
 
-		/* При открытии Hover Popup (OutlinePreviewPopup) поверх активного выделения транскрипта сам попап не инвертируется, а текст слева от попапа остается выделенным */
 		harness.tui.moveMouse(97, 6);
 		const popupWithSelectionFrame = harness.tui.renderViewport(100, 14);
 		const popupOverlay = harness.tui.overlayStack.find((o) => o.component instanceof OutlinePreviewPopup);
@@ -819,13 +784,10 @@ describe("Viewport chrome & refined user prompt cards", () => {
 			invalidate() {},
 		});
 
-		/* Карточка Turn 1 занимает строки 0..5 (6 строк), interactiveTranscriptBlock занимает 6..21, Turn 2 начинается на 22.
-		   На scrollTop = 8 экранные строки 0..4 заняты Sticky Prompt поверх interactiveTranscriptBlock! */
 		harness.tui.renderViewport(100, 14);
 		harness.tui.scroll.scrollTo(8, { disableFollow: true });
 		harness.tui.renderViewport(100, 14);
 
-		/* Наведение и клик по Sticky Prompt (экранная строка 2) НЕ попадают в нижележащий interactiveTranscriptBlock */
 		harness.tui.moveMouse(15, 2);
 		harness.tui.clickMouse(15, 2, "left");
 		expect(underlyingEvents).toEqual([]);
@@ -834,11 +796,9 @@ describe("Viewport chrome & refined user prompt cards", () => {
 		const afterStickyClick = harness.tui.renderViewport(100, 14);
 		expect(afterStickyClick.slice(0, 6).map(stripTerminalSequences).join("\n")).toContain("Alpha line 4");
 
-		/* Сворачиваем обратно */
 		harness.tui.clickMouse(15, 2, "left");
 		harness.tui.renderViewport(100, 14);
 
-		/* Колесо мыши по Sticky Prompt и по Outline Rail прокручивает ScrollView через кэшированный requestViewRender без повторного рендера chatContainer */
 		const chatRenderSpy = vi.spyOn(harness.tui.chatContainer, "render");
 		const beforeStickyWheel = harness.tui.scroll.scrollTop;
 		harness.tui.wheelMouse(15, 2, "down");
@@ -854,8 +814,6 @@ describe("Viewport chrome & refined user prompt cards", () => {
 		expect(underlyingEvents.length).toBe(1);
 		underlyingEvents.length = 0;
 
-		/* Наведение на тик Turn 2 в Outline Rail (x = 97, y = 7 при высоте 14 и 2 репликах: totalRows=4, top=5, ticksY=6, tick1=7)
-		   монтирует Hover Popup с 14:20 над рамкой и не трогает транскрипт */
 		harness.tui.moveMouse(97, 7);
 		expect(underlyingEvents).toEqual([]);
 		const withPopupFrame = harness.tui.renderViewport(100, 14).map(stripTerminalSequences).join("\n");
@@ -867,17 +825,14 @@ describe("Viewport chrome & refined user prompt cards", () => {
 		expect(harness.tui.scroll.scrollTop).toBeGreaterThan(beforeWheel);
 		expect(underlyingEvents).toEqual([]);
 
-		/* Клик по тику Turn 1 (x = 97, y = 6) прыгает к началу Turn 1 (scrollTop = 0) */
 		harness.tui.renderViewport(100, 14);
 		harness.tui.clickMouse(97, 6, "left");
 		expect(harness.tui.scroll.scrollTop).toBe(0);
 
-		/* Уход курсора с Outline Rail на обычный транскрипт скрывает Hover Popup */
 		harness.tui.renderViewport(100, 14);
 		harness.tui.moveMouse(20, 10);
 		expect(harness.tui.overlayStack.some((o) => o.component instanceof OutlinePreviewPopup)).toBe(false);
 
-		/* Наведение на стрелку ▼ (y = 8) на scrollTop = 0 показывает превью Turn 2, а прокрутка колесом до низа без сдвига мыши скрывает старый попап */
 		harness.tui.scroll.scrollTo(0, { disableFollow: true });
 		harness.tui.renderViewport(100, 14);
 		harness.tui.moveMouse(97, 8);
@@ -889,7 +844,6 @@ describe("Viewport chrome & refined user prompt cards", () => {
 		expect(atBottomAfterWheel).not.toContain("╭─");
 		expect(harness.tui.overlayStack.some((o) => o.component instanceof OutlinePreviewPopup)).toBe(false);
 
-		/* Зажатие кнопки на Sticky Prompt с отпусканием вне окна терминала не блокирует последующий hover на Outline Rail */
 		harness.tui.scroll.scrollTo(8, { disableFollow: true });
 		harness.tui.renderViewport(100, 14);
 		harness.tui.pressMouse(15, 1, "left");
@@ -898,7 +852,6 @@ describe("Viewport chrome & refined user prompt cards", () => {
 		harness.tui.moveMouse(20, 10);
 		expect(harness.tui.overlayStack.some((o) => o.component instanceof OutlinePreviewPopup)).toBe(false);
 
-		/* При уже открытом блокирующем Modal Card наведение на Outline Rail не монтирует Hover Popup */
 		const blockingModal = harness.tui.showOverlay({ render: () => ["modal"], invalidate() {} }, {});
 		harness.tui.moveMouse(97, 6);
 		expect(harness.tui.overlayStack.some((o) => o.component instanceof OutlinePreviewPopup)).toBe(false);
@@ -962,21 +915,17 @@ describe("Viewport chrome & refined user prompt cards", () => {
 			invalidate() {},
 		});
 
-		/* Карточка Turn 1 занимает 6 строк (0..5) + 6 строк ответа (6..11), Turn 2 начинается на 12.
-		   При свернутом Sticky (5 строк) на scrollTop = 9: distance = 3 -> pushOffset = 2, видимы 3 строки Sticky (0..2), а на строке 3 начинается Turn 2! */
 		harness.tui.renderViewport(80, 12);
 		harness.tui.scroll.scrollTo(9, { disableFollow: true });
 		const midPushFrame = harness.tui.renderViewport(80, 12);
 		expect(stripTerminalSequences(sliceByColumn(midPushFrame[0]!, 0, 77, true))).toContain("Кириллица строка 2");
 		expect(stripTerminalSequences(sliceByColumn(midPushFrame[4]!, 0, 77, true))).toContain("23:59");
 
-		/* Клик по частично вытесненному Sticky (строка 1) корректно переводит localY с учетом pushOffset и разворачивает карточку */
 		harness.tui.clickMouse(10, 1, "left");
 		harness.tui.scroll.scrollTo(2, { disableFollow: true });
 		const expandedAfterMidPushClick = harness.tui.renderViewport(80, 12);
 		expect(expandedAfterMidPushClick.slice(0, 6).map(stripTerminalSequences).join("\n")).toContain("Hidden line 4");
 
-		/* Выключение /outline убирает правую панель из колонок 77..78 и расширяет контент без поломки правого скроллбара в колонке 79 */
 		await harness.runCommand("outline");
 		const railOffFrame = harness.tui.renderViewport(80, 12);
 		const railOffCols = railOffFrame.map((l) => stripTerminalSequences(sliceByColumn(l, 77, 2, true)));
@@ -984,7 +933,6 @@ describe("Viewport chrome & refined user prompt cards", () => {
 		const scrollbarColOff = railOffFrame.map((l) => stripTerminalSequences(sliceByColumn(l, 79, 1, true)));
 		expect(scrollbarColOff.some((ch) => ch === "┃" || ch === "│" || ch === "█")).toBe(true);
 
-		/* При скрытом Outline Rail затухание auto-скроллбара НЕ сдвигает таймстемп и текст Sticky Prompt на 1 колонку */
 		const tsColWhileScrollbarVisible = stripTerminalSequences(railOffFrame[1]!).indexOf("00:00");
 		expect(tsColWhileScrollbarVisible).toBeGreaterThan(60);
 		(harness.tui.scroll as any).hideTransientScrollbar();
@@ -993,12 +941,10 @@ describe("Viewport chrome & refined user prompt cards", () => {
 		const tsColAfterScrollbarFade = stripTerminalSequences(railOffScrollbarHiddenFrame[1]!).indexOf("00:00");
 		expect(tsColAfterScrollbarFade).toBe(tsColWhileScrollbarVisible);
 
-		/* Когда контент помещается во viewport (скроллбара в колонке 79 нет) и включен /sticky always, клик по крайней правой колонке 79 попадает в Sticky Prompt */
 		harness.setEntries([branch[0]!], [branch[0]!]);
 		harness.tui.chatContainer.clear();
 		harness.tui.chatContainer.addChild(cjkCard);
 		await harness.runCommand("sticky", "always");
-		/* Ранее u1 был развернут кликом, поэтому первый клик по (79, 1) сворачивает его до 3 строк с "…", а второй клик по (79, 1) снова разворачивает */
 		harness.tui.renderViewport(80, 12);
 		harness.tui.clickMouse(79, 1, "left");
 		const shortCollapsed = harness.tui.renderViewport(80, 12);

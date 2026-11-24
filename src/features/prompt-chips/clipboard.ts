@@ -3,16 +3,16 @@ import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { convertToPng } from "@earendil-works/pi-coding-agent";
 import { getImageDimensions } from "@earendil-works/pi-tui";
 import {
+	normalizeClipboardImageBytes,
 	sniffSupportedImageMimeType,
+	SUPPORTED_DIRECT_IMAGE_MIMES,
 	type ClipboardImagePayload,
 } from "../../shared/host-runtime.ts";
 import { decodeBracketedPasteControlSequences, type RegisterImageChipInput } from "./registry.ts";
 
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"]);
-const DIRECT_SUPPORTED_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 
 export function extensionForImageMime(mimeType: string): string {
 	switch (mimeType.split(";")[0]?.trim().toLowerCase()) {
@@ -97,7 +97,7 @@ export function tryReadImageFileSync(
 		const mimeType = sniffSupportedImageMimeType(bytes);
 		if (!mimeType) return undefined;
 		const base64Data = bytes.toString("base64");
-		const dims = DIRECT_SUPPORTED_IMAGE_MIMES.has(mimeType)
+		const dims = SUPPORTED_DIRECT_IMAGE_MIMES.has(mimeType)
 			? getImageDimensions(base64Data, mimeType)
 			: mimeType === "image/bmp"
 				? readBmpDimensions(bytes)
@@ -150,23 +150,9 @@ export async function materializeClipboardImagePayload(
 ): Promise<RegisterImageChipInput | null> {
 	if (!payload.bytes || payload.bytes.length === 0) return null;
 
-	let bytes = payload.bytes;
-	let mimeType =
-		sniffSupportedImageMimeType(bytes) ??
-		payload.mimeType.split(";")[0]?.trim().toLowerCase() ??
-		"image/png";
-
-	if (!DIRECT_SUPPORTED_IMAGE_MIMES.has(mimeType)) {
-		try {
-			const b64 = Buffer.from(bytes).toString("base64");
-			const converted = await convertToPng(b64, mimeType);
-			if (!converted?.data) return null;
-			bytes = new Uint8Array(Buffer.from(converted.data, "base64"));
-			mimeType = "image/png";
-		} catch {
-			return null;
-		}
-	}
+	const normalized = await normalizeClipboardImageBytes(payload.bytes, payload.mimeType, "image/png");
+	if (!normalized) return null;
+	const { bytes, mimeType } = normalized;
 
 	const ext = extensionForImageMime(mimeType);
 	const fileName = payload.fileName || (payload.filePath ? basename(payload.filePath) : `pi-clipboard-${randomUUID()}.${ext}`);

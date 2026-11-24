@@ -10,6 +10,7 @@ import {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
+import { hasBlockingModalOverlay } from "./modal-card.ts";
 
 export interface FullscreenShellContext {
 	tui: TUI;
@@ -138,7 +139,6 @@ export function stripInlineImageSequences(line: string): string {
 	return line.replace(KITTY_IMAGE_SEQ_RE, "").replace(ITERM2_IMAGE_SEQ_RE, "");
 }
 
-/* Подрезает верхние перекрытые строки многострочного Kitty-изображения и возвращает остаток для строки сразу под Sticky Prompt */
 export function cropKittyLineBelowSticky(
 	line: string,
 	coveredRows: number,
@@ -253,7 +253,7 @@ function createChromeMouseEvent(
 	};
 }
 
-function isCoveredByRenderedOverlay(self: any, screenX: number, screenY: number): boolean {
+export function isCoveredByRenderedOverlay(self: any, screenX: number, screenY: number): boolean {
 	const layouts = self?.renderedOverlayLayouts;
 	if (!Array.isArray(layouts)) return false;
 	for (let i = layouts.length - 1; i >= 0; i--) {
@@ -450,7 +450,6 @@ export class ViewportChromeCompositor {
 		return result ?? screen;
 	}
 
-	/* Ограничивает колонки выделения транскрипта до правого края контента и скрывает выделение под Sticky Prompt */
 	clampSelectionColumns(
 		row: number,
 		columns: { start: number; end: number },
@@ -476,7 +475,7 @@ export class ViewportChromeCompositor {
 
 	isChromeHit(self: any, screenX: number, screenY: number): boolean {
 		if (this.disposed || !this.lastGeometry) return false;
-		if (self.getTopmostVisibleOverlay?.() || isCoveredByRenderedOverlay(self, screenX, screenY)) {
+		if (hasBlockingModalOverlay(self) || isCoveredByRenderedOverlay(self, screenX, screenY)) {
 			return false;
 		}
 		const { stickyRect, railRect } = this.lastGeometry;
@@ -501,7 +500,6 @@ export class ViewportChromeCompositor {
 		return false;
 	}
 
-	/* Восстанавливает ячейки оверлеев, Sticky Prompt, Outline Rail и скроллбара поверх выделения транскрипта */
 	maskSelection(
 		self: any,
 		preSelection: string[],
@@ -619,7 +617,7 @@ export class ViewportChromeCompositor {
 	handleMouseEvent(self: any, raw: RawSgrMouse): boolean {
 		if (this.disposed || !this.lastGeometry) return false;
 
-		if (self.getTopmostVisibleOverlay?.()) {
+		if (hasBlockingModalOverlay(self)) {
 			this.activePress = undefined;
 			return false;
 		}

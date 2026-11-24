@@ -103,7 +103,6 @@ describe("Prompt Chip pure registry & paste threshold seams", () => {
 		expect(created[0]!.token).toBe("[🖼 Image #1]");
 		expect(created[9]!.token).toBe("[🖼 Image #10]");
 
-		/* Если токен продублирован в черновике, удаление одной копии не сбрасывает привязку и не перенумеровывает остальные */
 		const withDup = registry.syncDraft("[🖼 Image #1] [🖼 Image #1] [🖼 Image #2]");
 		expect(withDup).toBe("[🖼 Image #1] [🖼 Image #1] [🖼 Image #2]");
 		expect(registry.resolveChip("image", 1)?.id).toBe(created[0]!.entry.id);
@@ -112,7 +111,6 @@ describe("Prompt Chip pure registry & paste threshold seams", () => {
 		const oneCopyLeft = registry.syncDraft("[🖼 Image #1] [🖼 Image #2]");
 		expect(oneCopyLeft).toBe("[🖼 Image #1] [🖼 Image #2]");
 
-		/* Восстановим полный список #1..#10, снимем undo-слепок перед удалением #1 и проверим сдвиг #10 -> #9 и курсора */
 		const fullTenRegistry = new PromptChipRegistry();
 		const tenChips = Array.from({ length: 10 }, (_, idx) =>
 			fullTenRegistry.registerImage({
@@ -125,7 +123,6 @@ describe("Prompt Chip pure registry & paste threshold seams", () => {
 		);
 		const snapBeforeDelete = fullTenRegistry.captureUndoSnapshot();
 
-		/* Представим, что #10 стоит перед удалённым #1: "[🖼 Image #10] tail" и курсор в конце строки */
 		const otherTokens = tenChips.slice(1, 9).map((c) => c.token).join(" ");
 		const linesAfterDeleting1 = [otherTokens, "[🖼 Image #10] tail"];
 		const cursorBeforeSync = linesAfterDeleting1[1]!.length;
@@ -138,11 +135,9 @@ describe("Prompt Chip pure registry & paste threshold seams", () => {
 		expect(fullTenRegistry.resolveChip("image", 9)?.id).toBe(tenChips[9]!.entry.id);
 		expect(fullTenRegistry.resolveChip("image", 10)).toBeUndefined();
 
-		/* Следующий вставленный чип получает #10 */
 		const eleventh = fullTenRegistry.registerPaste("1\n2\n3\n4");
 		expect(eleventh.token).toBe("[📋 Pasted #10 · 4 lines]");
 
-		/* Undo возвращает старую карту привязок: #1 снова указывает на img-1, #2 на img-2, #10 на img-10 */
 		fullTenRegistry.restoreUndoSnapshot(snapBeforeDelete);
 		const restoredLine = tenChips.map((c) => c.token).join(" ");
 		expect(fullTenRegistry.syncDraft(restoredLine)).toBe(restoredLine);
@@ -150,7 +145,6 @@ describe("Prompt Chip pure registry & paste threshold seams", () => {
 		expect(fullTenRegistry.resolveChip("image", 2)?.id).toBe(tenChips[1]!.entry.id);
 		expect(fullTenRegistry.resolveChip("image", 10)?.id).toBe(tenChips[9]!.entry.id);
 
-		/* Даже если текст чипа был вырезан и вставлен обратно без undo-слепка, кэш сессии перепривязывает его */
 		fullTenRegistry.syncDraft("plain text only");
 		expect(fullTenRegistry.resolveChip("image", 1)).toBeUndefined();
 		const relinked = fullTenRegistry.syncDraft("plain text [🖼 Image #1]");
@@ -200,7 +194,6 @@ describe("Prompt Chip pure registry & paste threshold seams", () => {
 			].join("\n"),
 		);
 
-		/* Привязка timestamp на message_start и извлечение записи для appendEntry на message_end */
 		const ts = 1713530040000;
 		registry.bindSubmittedMessageTimestamp(expanded.text, ts);
 		const persistPayload = registry.consumePersistPayload(expanded.text, ts);
@@ -209,7 +202,6 @@ describe("Prompt Chip pure registry & paste threshold seams", () => {
 		expect(persistPayload?.displayText).toBe(rawDraft);
 		expect(persistPayload?.chips).toHaveLength(3);
 
-		/* Реконструкция работает и для UserMessageComponent (expandedText), и для StickyPromptBar (+ \n\n[изображение]), и после /reload */
 		const reloadedRegistry = new PromptChipRegistry();
 		reloadedRegistry.restorePersistedEntries([
 			{ type: "custom", customType: "conarti-prompt-chips", data: persistPayload },
@@ -229,7 +221,6 @@ describe("Prompt Chip pure registry & paste threshold seams", () => {
 		);
 		expect(fromStickyWithImageSuffix.displayText).toBe(rawDraft);
 
-		/* Fallback для старых сессий без custom entry: [Image #1: /var/tmp/old.webp] превращается в компактную пилюлю */
 		const fallback = reloadedRegistry.reconstructSubmittedPrompt(
 			"Legacy [Image #1: /var/tmp/old-screen.webp] check\n\n[изображение]",
 			undefined,
@@ -260,12 +251,10 @@ describe("Prompt Chip pure registry & paste threshold seams", () => {
 		expect(findPromptChipSpans("plain text without brackets")).toEqual([]);
 
 		const registry = new PromptChipRegistry();
-		/* Непривязанный токен в произвольном тексте не ломает expandDraftForSubmit */
 		const untouched = registry.expandDraftForSubmit("Literal [🖼 Image #99] text");
 		expect(untouched.transformed).toBe(false);
 		expect(untouched.text).toBe("Literal [🖼 Image #99] text");
 
-		/* Промпт только из одного изображения оставляет непустой маркер пути для монтирования UserMessageComponent */
 		const imgOnly = registry.registerImage({
 			filePath: "/tmp/solo.png",
 			fileName: "solo.png",
@@ -278,7 +267,6 @@ describe("Prompt Chip pure registry & paste threshold seams", () => {
 		expect(soloSubmit.text).toBe("[Image #1: /tmp/solo.png]");
 		expect(soloSubmit.images).toEqual([{ type: "image", data: "SOLO_B64", mimeType: "image/png" }]);
 
-		/* Одновременная очередь steer + followUp сохраняет независимые записи */
 		const steerChip = registry.registerPaste("s1\ns2\ns3\ns4");
 		const steerExpanded = registry.expandDraftForSubmit(`Steer: ${steerChip.token}`);
 
@@ -303,7 +291,6 @@ describe("Prompt Chip pure registry & paste threshold seams", () => {
 	it("expands the latest chip after clearing a prior draft, keeps renumbered #2->#1 attachment across cut/yank or history browse, and disambiguates identical expanded prompts on /reload via messageId and ISO entry timestamps", () => {
 		const registry = new PromptChipRegistry();
 
-		/* 1. Удалённый черновик с [🖼 Image #1] не должен подменять новый [🖼 Image #1] при отправке */
 		const abandonedImg = registry.registerImage({
 			filePath: "/tmp/wrong-shot.png",
 			fileName: "wrong-shot.png",
@@ -331,7 +318,6 @@ describe("Prompt Chip pure registry & paste threshold seams", () => {
 			{ type: "image", data: "RIGHT_B64", mimeType: "image/png" },
 		]);
 
-		/* 2. После удаления #1 перенумерованный #2 -> #1 сохраняет свою привязку при вырезании/вставке или просмотре истории */
 		const yankRegistry = new PromptChipRegistry();
 		yankRegistry.registerImage({
 			filePath: "/tmp/deleted-first.png",
@@ -350,12 +336,10 @@ describe("Prompt Chip pure registry & paste threshold seams", () => {
 		expect(yankRegistry.syncDraft(secondImg.token)).toBe("[🖼 Image #1]");
 		expect(yankRegistry.resolveChip("image", 1)?.id).toBe(secondImg.entry.id);
 
-		/* Пользователь листает историю (черновик временно без чипов) и возвращается к "[🖼 Image #1]" */
 		yankRegistry.syncDraft("previous plain prompt");
 		yankRegistry.syncDraft("[🖼 Image #1]");
 		expect(yankRegistry.resolveChip("image", 1)?.id).toBe(secondImg.entry.id);
 
-		/* 3. Два хода с одинаковым путём файла имеют разный размер/разрешение и ISO timestamp записи SessionMessageEntry */
 		const turn1Img = yankRegistry.registerImage({
 			filePath: "/tmp/mockup.png",
 			fileName: "mockup.png",
@@ -440,7 +424,6 @@ describe("Prompt Chip pure registry & paste threshold seams", () => {
 		expect(rec1ByIso.chips[0]).toMatchObject({ byteLength: 1024, widthPx: 320, heightPx: 240 });
 		expect(rec2ByIso.chips[0]).toMatchObject({ byteLength: 8192, widthPx: 1280, heightPx: 720 });
 
-		/* Даже без messageId (только по ISO timestamp записи из renderSessionEntries) оба хода различаются */
 		const rec1IsoOnly = reloaded.reconstructSubmittedPrompt(exp1.text, "2026-05-10T11:25:00.501Z");
 		expect(rec1IsoOnly.chips[0]).toMatchObject({ byteLength: 1024, widthPx: 320, heightPx: 240 });
 	});

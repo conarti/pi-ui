@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { CURSOR_MARKER, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { UserMessageComponent } from "@earendil-works/pi-coding-agent";
+import { CURSOR_MARKER, Text, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import conartiPiUi from "../src/index.ts";
 import { getSessionWorkflow } from "../src/shared/session-workflow.ts";
 import { createExtensionHarness, type ExtensionHarness } from "./harness/index.ts";
@@ -333,7 +334,19 @@ describe("Modal Card dialogs and adaptive theme surfaces", () => {
 		harness.activeCustomModal!.done("close");
 		await contextPromise;
 
-		// 2. Open ask_user_question when no modal is open -> preserves multi-tab split-preview layout
+		harness.tui.chatContainer.addChild(new UserMessageComponent("First prompt"));
+		harness.tui.chatContainer.addChild(new Text("r1\nr2\nr3\nr4\nr5\nr6\nr7\nr8", 0, 0));
+		harness.tui.chatContainer.addChild(new UserMessageComponent("Second prompt"));
+		harness.tui.chatContainer.addChild(new Text("r1\nr2\nr3\nr4\nr5\nr6\nr7\nr8", 0, 0));
+		harness.setEntries(
+			[
+				{ type: "message", id: "u1", message: { role: "user", content: "First prompt", timestamp: 1000 } },
+				{ type: "message", id: "u2", message: { role: "user", content: "Second prompt", timestamp: 2000 } },
+			],
+		);
+		await harness.sendTerminalInput("\x1b[200~p1\np2\np3\np4\x1b[201~");
+		harness.tui.renderViewport(120, 12);
+
 		const questionnairePromise = askTool!.execute(
 			"call-2",
 			sampleParams as never,
@@ -348,7 +361,24 @@ describe("Modal Card dialogs and adaptive theme surfaces", () => {
 		expect(qRendered).toContain("☐ Cache");
 		expect(qRendered).toContain("✔ Submit");
 		expect(qRendered).toContain("CREATE TABLE items");
-		expect(qRendered).not.toContain("╭─"); // preserves its own layout, not Modal Card frame
+		expect(qRendered).not.toContain("╭─");
+
+		harness.tui.moveMouse(117, 5);
+		(harness.editor as any).handleMouse({
+			type: "move",
+			button: "none",
+			x: 6,
+			y: 1,
+			screenX: 6,
+			screenY: 10,
+			width: 120,
+			height: 3,
+		});
+		expect(
+			harness.tui.overlayStack.filter(
+				(e) => e.options?.nonCapturing === true && harness!.tui.isOverlayVisible(e),
+			),
+		).toHaveLength(0);
 
 		// 3. Triggering a Modal Card while ask_user_question is visible performs a quiet no-op without stacking
 		await harness.triggerShortcut("ctrl+k");

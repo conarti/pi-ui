@@ -7,15 +7,15 @@ import { Text, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-t
 import conartiPiUi from "../src/index.ts";
 import { DEFAULT_CONFIG } from "../src/features/tool-calls/config.ts";
 import {
-	classifyGrokExploration,
+	classifyExploration,
 	extractCommandOutput,
-	formatGrokExploredSummary,
+	formatExploredSummary,
 	sliceHeadTailPreview,
-} from "../src/features/tool-calls/grok.ts";
+} from "../src/features/tool-calls/density.ts";
 import { stopAllAnimations } from "../src/shared/animation-scheduler.ts";
 import { createExtensionHarness, type ExtensionHarness } from "./harness/index.ts";
 
-describe("Grok tool-calls: command & codemode output slicing (pure seam)", () => {
+describe("Tool Density: command & codemode output slicing (pure seam)", () => {
 	it("slices outputs above 5 lines into 2 head + … + 3 tail and strips shell exit trailers and codemode headers", () => {
 		expect(sliceHeadTailPreview([])).toEqual({
 			head: [],
@@ -71,24 +71,24 @@ describe("Grok tool-calls: command & codemode output slicing (pure seam)", () =>
 	});
 
 	it("classifies strictly read-only inspection calls via Shell Effect, rejects mutating commands, and formats Explored N files, M searches", () => {
-		expect(classifyGrokExploration("read", { path: "src/index.ts" })).toBe("read");
-		expect(classifyGrokExploration("grep", { pattern: "TODO", path: "src" })).toBe("search");
-		expect(classifyGrokExploration("find", { pattern: "*.ts", path: "src" })).toBe("search");
-		expect(classifyGrokExploration("ls", { path: "src" })).toBe("list");
+		expect(classifyExploration("read", { path: "src/index.ts" })).toBe("read");
+		expect(classifyExploration("grep", { pattern: "TODO", path: "src" })).toBe("search");
+		expect(classifyExploration("find", { pattern: "*.ts", path: "src" })).toBe("search");
+		expect(classifyExploration("ls", { path: "src" })).toBe("list");
 
-		expect(classifyGrokExploration("bash", { command: "cd src && rg 'ShellEffect' 2>/dev/null | head -n 20" })).toBe(
+		expect(classifyExploration("bash", { command: "cd src && rg 'ShellEffect' 2>/dev/null | head -n 20" })).toBe(
 			"search",
 		);
-		expect(classifyGrokExploration("bash", { command: "env LC_ALL=C sed -n '1,30p' src/index.ts" })).toBe("read");
-		expect(classifyGrokExploration("bash", { command: "git grep 'ToolDensity'" })).toBe("search");
-		expect(classifyGrokExploration("bash", { command: "git ls-files src" })).toBe("list");
-		expect(classifyGrokExploration("bash", { command: "git branch --show-current" })).toBe("read");
-		expect(classifyGrokExploration("bash", { command: "shasum package.json" })).toBe("read");
-		expect(classifyGrokExploration("bash", { command: "pwd" })).toBe("list");
-		expect(classifyGrokExploration("bash", { command: "ls -la src | grep grok" })).toBe("search");
-		expect(classifyGrokExploration("powershell", { command: "Get-Content src/index.ts" })).toBe("read");
-		expect(classifyGrokExploration("powershell", { command: "Resolve-Path src" })).toBe("read");
-		expect(classifyGrokExploration("powershell", { command: "Select-String -Pattern foo src/a.ts" })).toBe("search");
+		expect(classifyExploration("bash", { command: "env LC_ALL=C sed -n '1,30p' src/index.ts" })).toBe("read");
+		expect(classifyExploration("bash", { command: "git grep 'ToolDensity'" })).toBe("search");
+		expect(classifyExploration("bash", { command: "git ls-files src" })).toBe("list");
+		expect(classifyExploration("bash", { command: "git branch --show-current" })).toBe("read");
+		expect(classifyExploration("bash", { command: "shasum package.json" })).toBe("read");
+		expect(classifyExploration("bash", { command: "pwd" })).toBe("list");
+		expect(classifyExploration("bash", { command: "ls -la src | grep density" })).toBe("search");
+		expect(classifyExploration("powershell", { command: "Get-Content src/index.ts" })).toBe("read");
+		expect(classifyExploration("powershell", { command: "Resolve-Path src" })).toBe("read");
+		expect(classifyExploration("powershell", { command: "Select-String -Pattern foo src/a.ts" })).toBe("search");
 
 		for (const mutating of [
 			"rm -rf dist",
@@ -102,11 +102,11 @@ describe("Grok tool-calls: command & codemode output slicing (pure seam)", () =>
 			"git checkout -b other",
 			"echo $(whoami)",
 		]) {
-			expect(classifyGrokExploration("bash", { command: mutating })).toBeUndefined();
+			expect(classifyExploration("bash", { command: mutating })).toBeUndefined();
 		}
-		expect(classifyGrokExploration("edit", { path: "src/a.ts" })).toBeUndefined();
-		expect(classifyGrokExploration("write", { path: "src/a.ts", content: "x" })).toBeUndefined();
-		expect(classifyGrokExploration("codemode", { code: "return 1;" })).toBeUndefined();
+		expect(classifyExploration("edit", { path: "src/a.ts" })).toBeUndefined();
+		expect(classifyExploration("write", { path: "src/a.ts", content: "x" })).toBeUndefined();
+		expect(classifyExploration("codemode", { code: "return 1;" })).toBeUndefined();
 
 		const doneRows = [
 			{ toolName: "read", toolCallId: "r1", args: { path: "src/a.ts" }, result: { content: [] }, isPartial: false },
@@ -114,13 +114,13 @@ describe("Grok tool-calls: command & codemode output slicing (pure seam)", () =>
 			{ toolName: "grep", toolCallId: "g1", args: { pattern: "foo" }, result: { content: [] }, isPartial: false },
 			{ toolName: "bash", toolCallId: "b1", args: { command: "rg bar src" }, result: { content: [] }, isPartial: false },
 		];
-		expect(formatGrokExploredSummary(doneRows as any)).toBe("Explored 2 files, 2 searches");
+		expect(formatExploredSummary(doneRows as any)).toBe("Explored 2 files, 2 searches");
 
 		const runningRows = [
 			...doneRows,
 			{ toolName: "ls", toolCallId: "l1", args: { path: "src" }, result: undefined, isPartial: true },
 		];
-		expect(formatGrokExploredSummary(runningRows as any)).toBe("Exploring 2 files, 2 searches, 1 directory");
+		expect(formatExploredSummary(runningRows as any)).toBe("Exploring 2 files, 2 searches, 1 directory");
 	});
 });
 
@@ -132,7 +132,7 @@ function extractRgbTriples(ansi: string): Array<[number, number, number]> {
 	]);
 }
 
-describe("Grok tool-calls: ExtensionHarness integration", () => {
+describe("Tool Density: ExtensionHarness integration", () => {
 	let harness: ExtensionHarness | undefined;
 	let agentDir = "";
 	let prevAgentDir: string | undefined;
@@ -362,6 +362,17 @@ describe("Grok tool-calls: ExtensionHarness integration", () => {
 				harness.ctx.cwd,
 			);
 			(row as any).markExecutionStarted();
+
+			const preChunkAnsi0 = row.render(96);
+			const preChunkPlain0 = preChunkAnsi0.map(stripTerminalSequences).filter((l) => l.trim().length > 0);
+			expect(preChunkPlain0[0]).toContain("◆ Running");
+			expect(preChunkPlain0.slice(1).map((l) => l.trim())).toEqual(["▎ Running…"]);
+			const preBarBefore = preChunkAnsi0.find((l) => stripTerminalSequences(l).includes("▎ Running…"))!;
+			vi.advanceTimersByTime(33 * 6);
+			const preChunkAnsi1 = row.render(96);
+			const preBarAfter = preChunkAnsi1.find((l) => stripTerminalSequences(l).includes("▎ Running…"))!;
+			expect(preBarAfter).not.toBe(preBarBefore);
+
 			const partialLines = Array.from({ length: 8 }, (_, i) => `${cmdTool}-out-${i + 1}`).join("\n");
 			(row as any).updateResult(
 				{
@@ -1023,7 +1034,6 @@ describe("Grok tool-calls: ExtensionHarness integration", () => {
 			expect(settledBeforeLate).toContain("res-7");
 			expect(settledBeforeLate).not.toContain("res-4");
 
-			/* Поздняя доставка вложенной сводки через message_end сразу обновляет заголовок (Child 0) */
 			await harness.emit("message_end", {
 				message: {
 					role: "toolResult",
@@ -1038,7 +1048,6 @@ describe("Grok tool-calls: ExtensionHarness integration", () => {
 			const settledAfterLate = cmRow.render(96).map(stripTerminalSequences).join("\n");
 			expect(settledAfterLate).toContain("read 1");
 
-			/* Раскрытие реального codemode показывает исходный JS-скрипт, вложенные вызовы и полный вывод без нативного Took */
 			(cmRow as any).setExpanded(true);
 			const expandedCm = cmRow.render(96).map(stripTerminalSequences).join("\n");
 			expect(expandedCm).toContain("const total = 42;");
@@ -1047,7 +1056,6 @@ describe("Grok tool-calls: ExtensionHarness integration", () => {
 			expect(expandedCm).not.toContain("Took ");
 			(cmRow as any).setExpanded(false);
 
-			/* Быстрое переключение /density прямо во время стриминга параллельных инструментов */
 			await harness.emit("tool_execution_start", {
 				toolCallId: "pub-bash-stream",
 				toolName: "bash",
@@ -1149,7 +1157,6 @@ describe("Grok tool-calls: ExtensionHarness integration", () => {
 				toolName: "write",
 				args: { path: "src/existing.ts", content: afterContent },
 			});
-			/* Имитируем запись файла на диск инструментом write до завершения вызова */
 			writeFileSync(targetFile, afterContent, "utf8");
 
 			const writeRow = new ToolExecutionComponent(
@@ -1187,7 +1194,59 @@ describe("Grok tool-calls: ExtensionHarness integration", () => {
 			const expandedWrite = writeRow.render(96).map(stripTerminalSequences).join("\n");
 			expect(expandedWrite).toContain("LINE_3 = 3");
 
-			/* Длинные строки диффа, превышающие 12 визуальных строк при переносе, показывают индикатор … */
+			const streamedFile = join(projDir, "src", "file.ts");
+			const initialFileContent = "export const MODE = 'legacy';\nexport const RETRIES = 1;\n";
+			const updatedFileContent = "export const MODE = 'modern';\nexport const RETRIES = 3;\nexport const TIMEOUT = 500;\n";
+			writeFileSync(streamedFile, initialFileContent, "utf8");
+
+			await harness.emit("agent_start", {});
+			await harness.emit("message_update", {
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "write-stream-1", name: "write", arguments: { path: "src/f" } }],
+				},
+			});
+			const streamedWriteRow = new ToolExecutionComponent(
+				"write",
+				"write-stream-1",
+				{ path: "src/f" },
+				undefined,
+				harness.resolveToolDefinition("write"),
+				harness.tui.asTui(),
+				projDir,
+			);
+			expect(streamedWriteRow.render(96).map(stripTerminalSequences).join("\n")).toContain("Writing src/f");
+
+			(streamedWriteRow as any).updateArgs({ path: "src/file.ts", content: updatedFileContent });
+			streamedWriteRow.render(96);
+			(streamedWriteRow as any).setArgsComplete();
+
+			await harness.emit("tool_execution_start", {
+				toolCallId: "write-stream-1",
+				toolName: "write",
+				args: { path: "src/file.ts", content: updatedFileContent },
+			});
+			writeFileSync(streamedFile, updatedFileContent, "utf8");
+			await harness.emit("tool_execution_end", {
+				toolCallId: "write-stream-1",
+				toolName: "write",
+				durationMs: 25,
+			});
+			(streamedWriteRow as any).updateResult(
+				{
+					content: [{ type: "text", text: "Successfully wrote to src/file.ts" }],
+					details: undefined,
+					durationMs: 25,
+				},
+				false,
+			);
+			await harness.emit("agent_end", { messages: [] });
+
+			const streamedWritePlain = streamedWriteRow.render(96).map(stripTerminalSequences).join("\n");
+			expect(streamedWritePlain).toContain("◆ Wrote src/file.ts (+3 -2 · 25ms)");
+			expect(streamedWritePlain).toContain("-export const MODE = 'legacy';");
+			expect(streamedWritePlain).toContain("+export const MODE = 'modern';");
+
 			const wrappedEdit = new ToolExecutionComponent(
 				"edit",
 				"edit-wrap-1",
@@ -1217,7 +1276,6 @@ describe("Grok tool-calls: ExtensionHarness integration", () => {
 			const narrowEditLines = wrappedEdit.render(34).map(stripTerminalSequences);
 			expect(narrowEditLines.at(-1)?.trim()).toBe("│ …");
 
-			/* Сгенерированный хостом футер усечения bash не вытесняет реальные хвостовые строки из 3 tail */
 			const truncBash = new ToolExecutionComponent(
 				"bash",
 				"bash-trunc-1",
@@ -1299,7 +1357,6 @@ describe("Grok tool-calls: ExtensionHarness integration", () => {
 					projDir,
 				);
 
-			/* Проектный density: diff-focus перекрывает глобальный style: claude (активирует Grok diff-focus) */
 			const doneCmd = mk("cfg-bash", "bash", { command: "npm run lint" });
 			(doneCmd as any).updateResult(
 				{ content: [{ type: "text", text: "l1\nl2\nl3\nl4\nl5\nl6" }], durationMs: 50 },
@@ -1308,7 +1365,6 @@ describe("Grok tool-calls: ExtensionHarness integration", () => {
 			expect(stripTerminalSequences(doneCmd.render(90).join("\n"))).toContain("◆ Ran npm run lint");
 			expect(doneCmd.render(90).filter((l) => l.trim().length > 0)).toHaveLength(1);
 
-			/* Мутация объекта args на месте во время стриминга не оставляет устаревший read в кэше группы */
 			const r1 = mk("mut-r1", "read", { path: "src/a.ts" });
 			(r1 as any).updateResult({ content: [{ type: "text", text: "a" }], durationMs: 5 }, false);
 
@@ -1322,7 +1378,6 @@ describe("Grok tool-calls: ExtensionHarness integration", () => {
 			const beforeMutate = harness.tui.chatContainer.render(90);
 			expect(beforeMutate.map(stripTerminalSequences).join("\n")).toContain("◆ Explored 2 files");
 
-			/* Клик по пустой строке-спейсеру (y = 0) над ◆ Explored не должен раскрывать группу */
 			const spacerClick = harness.tui.chatContainer.handleMouse({
 				type: "click",
 				button: "left",
@@ -1341,7 +1396,6 @@ describe("Grok tool-calls: ExtensionHarness integration", () => {
 				"◆ Read src/a.ts",
 			);
 
-			/* Теперь тот же объект mutableArgs дописывается редиректом в файл: строка обязана выйти из группы */
 			mutableArgs.command = "cat src/b.ts > src/out.ts";
 			(rStream as any).updateArgs(mutableArgs);
 			const afterMutate = harness.tui.chatContainer.render(90).map(stripTerminalSequences).join("\n");
@@ -1349,7 +1403,6 @@ describe("Grok tool-calls: ExtensionHarness integration", () => {
 			expect(afterMutate).toContain("◆ Read src/a.ts");
 			expect(afterMutate).toContain("◆ Ran cat src/b.ts > src/out.ts");
 
-			/* Поддержка 256color-терминалов без 24-bit truecolor последовательностей */
 			const baseDark = harness.ctx.ui.theme;
 			const theme256 = {
 				...baseDark,

@@ -11,7 +11,7 @@ import type { Component } from "@earendil-works/pi-tui";
 import { acquireHostRuntime, getActiveHostRuntime, type HostRuntimeHandle } from "../../shared/host-runtime.ts";
 import { classifyCallStatus, formatDurationMs, normalizeLineEndings, type RowStatus } from "./core.ts";
 import { paletteOf } from "./color.ts";
-import { hasAuthorRenderers, loadNativeTimerRenderers, syncNativeToolTimer } from "./rendering.ts";
+import { hasAuthorRenderers, syncNativeToolTimer } from "./rendering.ts";
 import {
 	loadEffectiveConfig,
 	registerCompactToolsCommand,
@@ -56,7 +56,7 @@ import { CLAUDE_DIFF_CONTEXT_LINES, CLAUDE_INDENT, CLAUDE_OUTPUT_ROWS, CLAUDE_RE
 import { CODEX_BULLET, CODEX_INDENT } from "./codex.ts";
 import { NestedCallSummaries } from "./nested.ts";
 import { renderCodexCall, renderCodexResult } from "./codex-rows.ts";
-import { renderGrokCall, renderGrokResult } from "./grok.ts";
+import { renderDensityCall, renderDensityResult } from "./density.ts";
 import { ToolGroupController } from "./grouping.ts";
 import { chromePainter, completionPainter, paintIndicator } from "./palette.ts";
 import { ProgressController } from "./progress.ts";
@@ -107,8 +107,8 @@ function rowKind(name: string): RowKind {
 	return name === "bash" || name === "powershell" ? "shell" : SUPPORTED_TOOL_SET.has(name) ? "file" : "custom";
 }
 
-function isGrok(): boolean {
-	return runtime.config.style === "grok";
+function isDensity(): boolean {
+	return runtime.config.style === "density";
 }
 
 function isClaude(): boolean {
@@ -230,13 +230,13 @@ function renderRowCall(name: string, args: ToolArgs, theme: Theme, ctx: RenderCo
 }
 
 function renderRowCallContent(name: string, args: ToolArgs, theme: Theme, ctx: RenderContext): Component {
-	if (name === "write" && runtime.canRun(ctx.toolCallId)) {
+	if (name === "write" && ctx.argsComplete && runtime.canRun(ctx.toolCallId)) {
 		runtime.captureWriteBaseline(ctx.toolCallId, args, ctx.cwd);
 	}
 	const state = runtime.syncRow(ctx);
 	runtime.syncExpansion(state, ctx.expanded, name);
-	if (isGrok()) {
-		return renderGrokCall({
+	if (isDensity()) {
+		return renderDensityCall({
 			name,
 			args,
 			theme,
@@ -471,8 +471,8 @@ function renderRowResult(
 		state.resultLineSummaryComputed = true;
 	}
 	let component: Component;
-	if (isGrok()) {
-		component = renderGrokResult({
+	if (isDensity()) {
+		component = renderDensityResult({
 			name,
 			args: ctx.args,
 			result,
@@ -565,7 +565,7 @@ function createCustomRenderers(name: string, author: ToolDefinition<any, any, an
 	return {
 		renderCall: (args, theme, ctx) => renderRowCall(name, asToolArgs(args), theme, own(ctx)),
 		renderResult: (result, options, theme, ctx) => {
-			/* Встроенный codemode рендерится напрямую через Grok, чтобы при раскрытии не терять исходный JS-скрипт. */
+			/* Встроенный codemode рендерится напрямую через наш рендерер плотности, чтобы при раскрытии не терять исходный JS-скрипт. */
 			const authorRenderer = hasAuthorRenderers(name, author) ? author?.renderResult : undefined;
 			const renderAuthorResult = authorRenderer
 				? (expanded: boolean) => {
@@ -854,7 +854,6 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 	const cwd = process.cwd();
 	const lastTrust = (globalThis as TrustSlot)[TRUST_KEY];
 	configure(pi, cwd, lastTrust?.cwd === realDirectory(cwd) && lastTrust.trusted);
-	pi.on("session_start", () => loadNativeTimerRenderers());
 	pi.on("session_start", async (event, ctx) => {
 		const failures: UIFailure[] = [];
 		detachUI({ restoreNative: true }, failures);

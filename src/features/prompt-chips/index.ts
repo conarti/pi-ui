@@ -9,9 +9,7 @@ import {
 	getImageDimensions,
 	isKeyRelease,
 	matchesKey,
-	ScrollView,
 	TuiAltScreen,
-	visibleWidth,
 	type TUI,
 } from "@earendil-works/pi-tui";
 import { bgRgb, fgRgb, getActiveGlobalTheme, isLightTheme, type RgbTuple } from "../../shared/ansi.ts";
@@ -29,11 +27,12 @@ import {
 	type PromptPillFormatter,
 } from "../transcript/user-prompt.ts";
 import {
-	defaultHostClipboardProvider,
 	getActiveHostRuntime,
-	getHostClipboardProvider,
+	installViewportScrollDismissHooks,
+	resolveActiveClipboardProvider,
 } from "../../shared/host-runtime.ts";
 import { matchesLayoutChord } from "../../shared/keyboard-layout.ts";
+import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import { hookMethod } from "../../shared/runtime-hooks.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
 import {
@@ -41,15 +40,14 @@ import {
 	materializeClipboardImagePayload,
 	tryReadImageFileSync,
 } from "./clipboard.ts";
-import {
-	entryToSerializedChip,
-	PromptChipOverlayController,
-} from "./preview-popup.ts";
+import { PromptChipOverlayController } from "./preview-popup.ts";
 import {
 	classifyTextPaste,
 	findPromptChipSpans,
+	getActivePromptChipRegistry,
 	PROMPT_CHIPS_CUSTOM_ENTRY_TYPE,
 	PromptChipRegistry,
+	serializePromptChip,
 	type PromptChipKind,
 	type PromptChipUndoSnapshot,
 	type QuotePromptChipData,
@@ -61,7 +59,6 @@ export * from "./registry.ts";
 export * from "./clipboard.ts";
 export * from "./preview-popup.ts";
 
-const REGISTRY_KEY = Symbol.for("conarti.pi-ui.prompt-chip-registry.v1");
 const EMPTY_BRACKETED_PASTE = "\x1b[200~\x1b[201~";
 const FAKE_CURSOR_START = "\x1b_pi:fc\x07";
 const FAKE_CURSOR_END = "\x1b_pi:/fc\x07";
@@ -135,14 +132,6 @@ export function decorateComposerLineWithChips(line: string, theme: Theme): strin
 	);
 }
 
-export function getActivePromptChipRegistry(): PromptChipRegistry {
-	const g = globalThis as Record<symbol, PromptChipRegistry | undefined>;
-	if (!g[REGISTRY_KEY]) {
-		g[REGISTRY_KEY] = new PromptChipRegistry();
-	}
-	return g[REGISTRY_KEY]!;
-}
-
 export function insertQuoteChipInComposer(
 	editor: PiUiComposerEditor,
 	quoteText: string,
@@ -191,41 +180,6 @@ function findComponentScreenY(root: any, target: object): number | undefined {
 	return undefined;
 }
 
-interface ComposerEditorLookupInternals {
-	tui?: TUI;
-	lastWidth?: number;
-	state: { lines: string[]; cursorLine: number; cursorCol: number };
-	scrollOffset: number;
-	renderedVisibleLineCount: number;
-	setCursorCol(col: number): void;
-	buildVisualLineMap?(width: number): Array<{ logicalLine: number; startCol: number; length: number }>;
-}
-
-function resolveComposerVisualLayout(
-	editor: PiUiComposerEditor,
-	totalWidth: number,
-): {
-	readonly compact: boolean;
-	readonly leftOffset: number;
-	readonly innerWidth: number;
-	readonly visualLines: Array<{ logicalLine: number; startCol: number; length: number }>;
-} {
-	const internal = editor as unknown as ComposerEditorLookupInternals;
-	const compact = totalWidth < 9;
-	const leftOffset = compact ? 1 : 4;
-	const innerWidth = Math.max(1, compact ? totalWidth - 2 : totalWidth - 6);
-	const fallbackWrapWidth = Math.max(1, (compact ? Math.max(3, innerWidth) : innerWidth) - 1);
-	const wrapWidth = internal.lastWidth && internal.lastWidth > 0 ? internal.lastWidth : fallbackWrapWidth;
-	const visualLines =
-		internal.buildVisualLineMap?.(wrapWidth) ??
-		internal.state.lines.map((line, idx) => ({
-			logicalLine: idx,
-			startCol: 0,
-			length: line.length,
-		}));
-	return { compact, leftOffset, innerWidth, visualLines };
-}
-
 function decorateComposerVisualLine(
 	rawInner: string,
 	visualLineIndex: number,
@@ -233,14 +187,11 @@ function decorateComposerVisualLine(
 	registry: PromptChipRegistry,
 	theme: Theme,
 ): string {
-	const internal = editor as unknown as ComposerEditorLookupInternals;
-	const totalWidth = internal.tui?.terminal?.columns ?? 80;
-	const { visualLines } = resolveComposerVisualLayout(editor, totalWidth);
-	const vl = visualLines[visualLineIndex];
+	const vl = editor.getVisualSlice(visualLineIndex);
 	if (!vl) {
 		return decorateComposerLineWithChips(rawInner, theme);
 	}
-	const logicalLine = internal.state.lines[vl.logicalLine] ?? "";
+	const { logicalLine } = vl;
 	const vlEnd = vl.startCol + vl.length;
 	if (!logicalLine || vl.length <= 0 || !logicalLine.includes("[")) {
 		return rawInner;
@@ -263,8 +214,8 @@ function decorateComposerVisualLine(
 	const flushStyledRun = () => {
 		if (!styledRun || !styledSpan) return;
 		const isCursorOnChip =
-			internal.state.cursorLine === vl.logicalLine &&
-			internal.state.cursorCol === styledSpan.start;
+			vl.cursorLine === vl.logicalLineIndex &&
+			vl.cursorCol === styledSpan.start;
 		out += styleInlinePromptChip(styledRun, {
 			kind: styledSpan.kind,
 			theme,
@@ -336,9 +287,8 @@ function resolveComposerTopRow(
 	if (pointer?.screenY !== undefined && pointer?.mouseY !== undefined) {
 		return Math.max(0, pointer.screenY - pointer.mouseY);
 	}
-	const internal = editor as unknown as ComposerEditorLookupInternals;
 	const termRows = tui?.terminal?.rows ?? 30;
-	const boxHeight = (internal.renderedVisibleLineCount ?? 1) + 2;
+	const boxHeight = editor.getRenderedBoxHeight();
 	return Math.max(0, termRows - boxHeight - 1);
 }
 
@@ -351,38 +301,15 @@ function findHoveredComposerChip(
 	if (!pointer.hovered || pointer.mouseX === undefined || pointer.mouseY === undefined) {
 		return undefined;
 	}
-	const internal = editor as unknown as ComposerEditorLookupInternals;
 	const totalWidth = pointer.width ?? tui?.terminal?.columns ?? 80;
-	const { leftOffset, visualLines } = resolveComposerVisualLayout(editor, totalWidth);
-	const visibleRows = internal.renderedVisibleLineCount ?? Math.max(1, internal.state.lines.length);
-
-	if (pointer.mouseY < 1 || pointer.mouseY > visibleRows) {
-		return undefined;
-	}
-
-	const visualIdx = (internal.scrollOffset ?? 0) + (pointer.mouseY - 1);
-	const vl = visualLines[visualIdx];
-	if (!vl) return undefined;
-
-	const logicalLine = internal.state.lines[vl.logicalLine] ?? "";
-	const vlEnd = vl.startCol + vl.length;
-	for (const span of findPromptChipSpans(logicalLine)) {
-		if (span.end <= vl.startCol || span.start >= vlEnd) continue;
-		const sliceStart = Math.max(vl.startCol, span.start);
-		const sliceEnd = Math.min(vlEnd, span.end);
-		const colStart = leftOffset + visibleWidth(logicalLine.slice(vl.startCol, sliceStart));
-		const colEnd = colStart + visibleWidth(logicalLine.slice(sliceStart, sliceEnd));
-		if (pointer.mouseX >= colStart && pointer.mouseX < colEnd) {
-			const entry = registry.resolveChip(span.kind, span.number);
-			if (entry) {
-				return {
-					chip: entryToSerializedChip(entry, span.number),
-					col: colStart,
-				};
-			}
-		}
-	}
-	return undefined;
+	const hit = editor.findSpanColumnAtMouse(pointer.mouseX, pointer.mouseY, totalWidth, findPromptChipSpans);
+	if (!hit) return undefined;
+	const entry = registry.resolveChip(hit.span.kind, hit.span.number);
+	if (!entry) return undefined;
+	return {
+		chip: serializePromptChip(entry, hit.span.number),
+		col: hit.col,
+	};
 }
 
 function findCaretComposerChip(
@@ -390,35 +317,14 @@ function findCaretComposerChip(
 	registry: PromptChipRegistry,
 	tui: TUI | undefined,
 ): { chip: SerializedPromptChip; col: number } | undefined {
-	if (!editor.focused) return undefined;
-	const internal = editor as unknown as ComposerEditorLookupInternals;
-	const line = internal.state.lines[internal.state.cursorLine] ?? "";
-	if (!line) return undefined;
-	const col = internal.state.cursorCol;
-	const spans = findPromptChipSpans(line);
-	if (spans.length === 0) return undefined;
-
-	const matched =
-		spans.find((s) => s.start <= col && col < s.end) ??
-		spans.find((s) => s.end === col);
-	if (!matched) return undefined;
-
-	const entry = registry.resolveChip(matched.kind, matched.number);
-	if (!entry) return undefined;
-
 	const totalWidth = tui?.terminal?.columns ?? 80;
-	const { leftOffset, visualLines } = resolveComposerVisualLayout(editor, totalWidth);
-	const targetVl = visualLines.find(
-		(vl) =>
-			vl.logicalLine === internal.state.cursorLine &&
-			matched.start >= vl.startCol &&
-			matched.start < vl.startCol + Math.max(1, vl.length),
-	);
-	const sliceFrom = targetVl ? targetVl.startCol : 0;
-
+	const hit = editor.findSpanColumnAtCursor(totalWidth, findPromptChipSpans);
+	if (!hit) return undefined;
+	const entry = registry.resolveChip(hit.span.kind, hit.span.number);
+	if (!entry) return undefined;
 	return {
-		chip: entryToSerializedChip(entry, matched.number),
-		col: leftOffset + visibleWidth(line.slice(sliceFrom, matched.start)),
+		chip: serializePromptChip(entry, hit.span.number),
+		col: hit.col,
 	};
 }
 
@@ -434,8 +340,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 	const overlayController = new PromptChipOverlayController(getTheme);
 
 	const resolveEditorTui = (editor?: PiUiComposerEditor): TUI | undefined =>
-		((editor as unknown as ComposerEditorLookupInternals | undefined)?.tui) ??
-		getActiveHostRuntime()?.tui;
+		editor?.getTui() ?? getActiveHostRuntime()?.tui;
 
 	const syncComposerPreview = (editor: PiUiComposerEditor, pointerOverride?: ComposerPointerInfo): void => {
 		lastEditor = editor;
@@ -443,7 +348,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 			lastPointer = pointerOverride.hovered ? pointerOverride : undefined;
 		}
 		const tui = resolveEditorTui(editor);
-		if (!tui || (tui as any).getTopmostVisibleOverlay?.()) {
+		if (!tui || hasBlockingModalOverlay(tui)) {
 			overlayController.hide();
 			return;
 		}
@@ -474,11 +379,6 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 		overlayController.hide(["composer-hover", "composer-caret"]);
 	};
 
-	const resolveClipboard = () =>
-		getActiveHostRuntime()?.clipboard ??
-		getHostClipboardProvider() ??
-		defaultHostClipboardProvider;
-
 	const resolveCwd = () => activeCtx?.cwd ?? getActiveHostRuntime()?.ctx.cwd ?? process.cwd();
 
 	const handleClipboardPasteAction = async (
@@ -486,7 +386,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 		options: { emptyBracketedPaste: boolean },
 	): Promise<void> => {
 		const registry = getActivePromptChipRegistry();
-		const clipboard = resolveClipboard();
+		const clipboard = resolveActiveClipboardProvider();
 		const cwd = resolveCwd();
 
 		try {
@@ -595,21 +495,6 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 				return true;
 			}
 
-			const isSuspendBoundCtrlZ =
-				matchesLayoutChord(data, "ctrl+z") &&
-				editor.actionHandlers.has("app.suspend") &&
-				editor.matchesKeybinding(data, "app.suspend");
-			const isUndoChord =
-				matchesLayoutChord(data, "super+z") ||
-				matchesLayoutChord(data, "ctrl+-") ||
-				(matchesLayoutChord(data, "ctrl+z") && !isSuspendBoundCtrlZ);
-			if (isUndoChord) {
-				(editor as unknown as { undo(): void }).undo();
-				syncComposerPreview(editor);
-				requestRender();
-				return true;
-			}
-
 			return false;
 		},
 
@@ -630,10 +515,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 			/* Короткие вставки обходят Editor.handlePaste напрямую, чтобы табы >1000 колонок не рождали legacy [paste #N] */
 			let inlineText = classified.normalizedText;
 			if (/^[/~.]/.test(inlineText)) {
-				const internal = editor as unknown as ComposerEditorLookupInternals;
-				const currentLine = internal.state.lines[internal.state.cursorLine] ?? "";
-				const beforeChar =
-					internal.state.cursorCol > 0 ? currentLine[internal.state.cursorCol - 1] : "";
+				const beforeChar = editor.getCharBeforeCursor();
 				if (beforeChar && /\w/.test(beforeChar)) {
 					inlineText = ` ${inlineText}`;
 				}
@@ -658,28 +540,16 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 			if (text === "" && lastDraftText.length > 0) {
 				registry.stageDraftBeforeClear(lastDraftText);
 			}
-			const internal = editor as unknown as {
-				state: { lines: string[]; cursorLine: number; cursorCol: number };
-				setCursorCol(col: number): void;
-			};
-			const synced = registry.syncDraftLines(
-				internal.state.lines,
-				internal.state.cursorLine,
-				internal.state.cursorCol,
-			);
-			if (synced.changed) {
-				syncingEditorLines = true;
-				try {
-					internal.state.lines = synced.lines;
-					internal.setCursorCol(synced.cursorCol);
-				} finally {
-					syncingEditorLines = false;
-				}
-				lastDraftText = synced.lines.join("\n");
-				syncComposerPreview(editor);
-				return;
+			syncingEditorLines = true;
+			let updatedText: string | undefined;
+			try {
+				updatedText = editor.syncDraftLinesWithCursor((lines, cursorLine, cursorCol) =>
+					registry.syncDraftLines(lines, cursorLine, cursorCol),
+				);
+			} finally {
+				syncingEditorLines = false;
 			}
-			lastDraftText = text;
+			lastDraftText = updatedText ?? text;
 			syncComposerPreview(editor);
 		},
 
@@ -793,17 +663,14 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 	};
 
 	const installAltScreenDismissHooks = (): void => {
+		installViewportScrollDismissHooks(
+			"promptChips",
+			() => overlayController.source === "sent-pill",
+			() => overlayController.hide(["sent-pill"]),
+		);
+
 		const altProto = (TuiAltScreen as unknown as { prototype?: object } | undefined)?.prototype;
 		if (!altProto) return;
-
-		hookMethod(altProto, "parseWheelEvent", "promptChips.wheelDismiss", (self, args, original) => {
-			const parsed = original.apply(self, args);
-			if (parsed && overlayController.source === "sent-pill") {
-				overlayController.hide(["sent-pill"]);
-				self.requestRender?.();
-			}
-			return parsed;
-		});
 
 		hookMethod(altProto, "handleMouseEvent", "promptChips.outsideReleaseDismiss", (self, args, original) => {
 			const raw = args[0] as { button: number; release: boolean } | undefined;
@@ -819,30 +686,6 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 			}
 			return res;
 		});
-
-		const scrollProto = (ScrollView as unknown as { prototype?: object } | undefined)?.prototype;
-		if (scrollProto) {
-			for (const methodName of ["scrollTo", "scrollBy", "scrollToStart", "scrollToEnd"] as const) {
-				hookMethod(
-					scrollProto,
-					methodName,
-					`promptChips.scrollDismiss.${methodName}`,
-					(self, args, original) => {
-						const prevTop = self.scrollTop;
-						const result = original.apply(self, args);
-						if (
-							overlayController.source === "sent-pill" &&
-							self.scrollTop !== prevTop &&
-							self === getActiveHostRuntime()?.scroll
-						) {
-							overlayController.hide(["sent-pill"]);
-							getActiveHostRuntime()?.requestRender();
-						}
-						return result;
-					},
-				);
-			}
-		}
 	};
 
 	ensureHooksInstalled();
@@ -876,7 +719,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 				}
 				queueMicrotask(() => {
 					const tui = resolveEditorTui(lastEditor);
-					if (tui && (tui as any).getTopmostVisibleOverlay?.()) {
+					if (tui && hasBlockingModalOverlay(tui)) {
 						overlayController.hide();
 					} else if (lastEditor && overlayController.source !== "sent-pill") {
 						syncComposerPreview(lastEditor);

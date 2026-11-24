@@ -71,7 +71,6 @@ describe("Host Runtime seam", () => {
 		expect(runtime!.scroll?.scrollbar).toBe("auto");
 		expect(runtime!.chatContainer).toBe(harness.tui.chatContainer);
 
-		/* Первичный layoutRoot сохраняется без HStack-обертки, а композитные слоты активны */
 		expect(harness.tui.layoutRoot).toBeInstanceOf(VStack);
 		const entries = (harness.tui.layoutRoot as unknown as { entries?: Array<{ component: unknown }> }).entries ?? [];
 		expect(entries.some((entry) => entry.component instanceof HStack)).toBe(false);

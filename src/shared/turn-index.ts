@@ -1,5 +1,6 @@
 import { UserMessageComponent, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Container, stripTerminalSequences, type Component } from "@earendil-works/pi-tui";
+import { reconstructTurnPromptText } from "../features/prompt-chips/registry.ts";
 import type { FullscreenShellContext } from "./fullscreen-layout.ts";
 
 export type StickyDisplayMode = "auto" | "always";
@@ -58,18 +59,39 @@ export function formatTurnTime(timestamp: number | string | undefined): string {
 	return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
+const EXISTING_IMAGE_TOKEN_RE = /\[(?:Image #(\d+):[^\]]+|🖼 Image #(\d+))\]/gu;
+
 function extractPromptVisibleText(content: unknown): string {
 	if (typeof content === "string") return sanitizeTurnText(content);
 	if (!Array.isArray(content)) return "";
-	return content
-		.flatMap((block: any) =>
-			block?.type === "text" && typeof block.text === "string"
-				? [sanitizeTurnText(block.text)]
-				: block?.type === "image"
-					? ["[изображение]"]
-					: [],
-		)
-		.join("\n\n");
+	const textParts: string[] = [];
+	let imageBlockCount = 0;
+	for (const block of content) {
+		if (block?.type === "text" && typeof block.text === "string") {
+			textParts.push(sanitizeTurnText(block.text));
+		} else if (block?.type === "image") {
+			imageBlockCount += 1;
+		}
+	}
+	const joinedText = textParts.join("\n\n");
+	if (imageBlockCount === 0) return joinedText;
+
+	let existingImageMarkers = 0;
+	let maxImageNumber = 0;
+	for (const m of joinedText.matchAll(EXISTING_IMAGE_TOKEN_RE)) {
+		existingImageMarkers += 1;
+		const parsed = Number.parseInt(m[1] ?? m[2] ?? "0", 10);
+		if (parsed > maxImageNumber) maxImageNumber = parsed;
+	}
+	const remainingImages = imageBlockCount - existingImageMarkers;
+	if (remainingImages <= 0) return joinedText;
+
+	const pills = Array.from(
+		{ length: remainingImages },
+		(_, idx) => `[🖼 Image #${maxImageNumber + idx + 1}]`,
+	).join(" ");
+	const trimmedText = joinedText.trim();
+	return trimmedText ? `${trimmedText} ${pills}` : pills;
 }
 
 function appendBranchTurns(turns: BranchTurn[], entries: readonly any[]): BranchTurn[] {
@@ -78,11 +100,17 @@ function appendBranchTurns(turns: BranchTurn[], entries: readonly any[]): Branch
 		const prompt = extractPromptVisibleText(entry.message.content).trim();
 		if (!prompt) continue;
 		const ordinal = turns.length + 1;
+		const id = String(entry.id ?? ordinal);
 		const timestamp: number | string | undefined = entry.message?.timestamp ?? entry.timestamp;
+		const displayPrompt = reconstructTurnPromptText(prompt, {
+			timestamp,
+			messageId: id,
+			entries,
+		});
 		turns.push({
-			id: String(entry.id ?? ordinal),
+			id,
 			ordinal,
-			title: summarizeTurnTitle(prompt, ordinal),
+			title: summarizeTurnTitle(displayPrompt || prompt, ordinal),
 			prompt,
 			timestamp,
 			formattedTime: formatTurnTime(timestamp),
@@ -276,13 +304,19 @@ export class TranscriptTurnIndex {
 			const prompt = sanitizeTurnText(typeof rawText === "string" ? rawText : "").trim();
 			const ordinal = idx + 1;
 			const rawId: unknown = Reflect.get(metric.component, "messageId");
+			const id = String(rawId ?? ordinal);
 			const rawTs: unknown = Reflect.get(metric.component, "timestamp");
 			const timestamp = typeof rawTs === "number" || typeof rawTs === "string" ? rawTs : undefined;
+			const displayPrompt = reconstructTurnPromptText(prompt, {
+				timestamp,
+				messageId: id,
+				entries: this.getBranch() ?? [],
+			});
 			return {
-				id: String(rawId ?? ordinal),
+				id,
 				index: idx,
 				ordinal,
-				title: summarizeTurnTitle(prompt, ordinal),
+				title: summarizeTurnTitle(displayPrompt || prompt, ordinal),
 				prompt,
 				timestamp,
 				formattedTime: formatTurnTime(timestamp),

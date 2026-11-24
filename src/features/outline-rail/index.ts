@@ -2,7 +2,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { visibleWidth, type OverlayHandle, type OverlayOptions } from "@earendil-works/pi-tui";
 import type { FullscreenShellContext } from "../../shared/fullscreen-layout.ts";
 import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
+import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import type { IndexedTurn, TranscriptTurnIndex } from "../../shared/turn-index.ts";
+import { reconstructTurnPromptText } from "../prompt-chips/registry.ts";
 import {
 	OutlinePreviewPopup,
 	OutlineRailComponent,
@@ -26,10 +28,9 @@ export function getOutlineSettings(): OutlineSettings {
 }
 
 export function createOutlineRailSlot(
-	_ctx: ExtensionContext,
+	ctx: ExtensionContext,
 	shell: FullscreenShellContext,
 	turnIndex: TranscriptTurnIndex,
-	_getTopOffset?: () => number,
 ): OutlineRailComponent & { dispose(): void } {
 	const settings = getOutlineSettings();
 	const popup = new OutlinePreviewPopup(shell.theme);
@@ -41,7 +42,7 @@ export function createOutlineRailSlot(
 		width: 24,
 		row: 0,
 		col: 0,
-		visible: () => popupVisible && !(shell.tui as any).getTopmostVisibleOverlay?.(),
+		visible: () => popupVisible && !hasBlockingModalOverlay(shell.tui),
 	};
 
 	const hidePopup = (fromRender = false) => {
@@ -67,7 +68,7 @@ export function createOutlineRailSlot(
 		fromRender = false,
 	) => {
 		const geo = rail.geometry;
-		if (!hit || !turn || !geo || (shell.tui as any).getTopmostVisibleOverlay?.()) {
+		if (!hit || !turn || !geo || hasBlockingModalOverlay(shell.tui)) {
 			hidePopup(fromRender);
 			return;
 		}
@@ -76,7 +77,13 @@ export function createOutlineRailSlot(
 		const viewportRows = shell.scroll.viewportHeight || termRows;
 		const maxText = Math.max(16, Math.min(40, Math.floor((termCols - RAIL_WIDTH - 2) * 0.48)));
 
-		const previewSource = turn.title || turn.prompt;
+		const entries = ctx.sessionManager?.getEntries?.() ?? ctx.sessionManager?.getBranch?.();
+		const reconstructed = reconstructTurnPromptText(turn.prompt, {
+			timestamp: turn.timestamp,
+			messageId: turn.id,
+			entries,
+		});
+		const previewSource = reconstructed || turn.title || turn.prompt;
 		const bodyLines = wrapPreviewLines(previewSource, maxText);
 		const timeText = turn.formattedTime ?? "";
 		const contentW = Math.max(
