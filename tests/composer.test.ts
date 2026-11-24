@@ -1,5 +1,12 @@
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences, visibleWidth, type Component, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import {
+	isKittyProtocolActive,
+	setKittyProtocolActive,
+	stripTerminalSequences,
+	visibleWidth,
+	type Component,
+	type TuiMouseEvent,
+} from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PiUiComposerEditor, registerComposerHooks } from "../src/features/chrome/composer.ts";
 import { getOutlineSettings } from "../src/features/outline-rail/index.ts";
@@ -27,9 +34,11 @@ function extractFirstFgRgb(ansi: string): [number, number, number] | undefined {
 }
 
 describe("Composer & multi-layout shortcuts via ExtensionHarness", () => {
+	const initialKitty = isKittyProtocolActive();
 	let harness: ExtensionHarness | undefined;
 
 	afterEach(async () => {
+		setKittyProtocolActive(initialKitty);
 		registerComposerHooks(undefined);
 		getOutlineSettings().enabled = true;
 		if (harness) {
@@ -84,12 +93,28 @@ describe("Composer & multi-layout shortcuts via ExtensionHarness", () => {
 		expect(wf.mode).toBe("plan");
 		await harness.sendTerminalInput("\x1b[27;7;1079~");
 		expect(wf.mode).toBe("code");
+		await harness.sendTerminalInput("\x1b[960;5u");
+		expect(wf.mode).toBe("plan");
+		setKittyProtocolActive(true);
+		await harness.sendTerminalInput("\x1b\x10");
+		expect(wf.mode).toBe("code");
+		await harness.sendTerminalInput("\x1bm");
+		expect(wf.mode).toBe("plan");
+		await harness.sendTerminalInput("\x1bь");
+		expect(wf.mode).toBe("safe");
+		await harness.sendTerminalInput("\x1bm");
+		expect(wf.mode).toBe("code");
 
 		expect(getOutlineSettings().enabled).toBe(true);
 		await harness.sendTerminalInput("\x1b[1097;7u");
 		expect(getOutlineSettings().enabled).toBe(false);
 		await harness.sendTerminalInput("\x1b[27;7;1097~");
 		expect(getOutlineSettings().enabled).toBe(true);
+		await harness.sendTerminalInput("\x1b[248;5u");
+		expect(getOutlineSettings().enabled).toBe(false);
+		await harness.sendTerminalInput("\x1b\x0f");
+		expect(getOutlineSettings().enabled).toBe(true);
+		setKittyProtocolActive(initialKitty);
 
 		/* Ctrl+Л открывает и закрывает Command Palette идентично Ctrl+K */
 		await harness.sendTerminalInput("\x1b[1083;5u");
@@ -176,6 +201,22 @@ describe("Composer & multi-layout shortcuts via ExtensionHarness", () => {
 			}
 		}
 
+		/* Двухколоночные эмодзи/CJK на узких ширинах 1..20 не ломают правую границу │ и высоту рамки */
+		for (const sample of ["🚀", "a🚀", "中文🚀"]) {
+			harness.ctx.ui.setEditorText(sample);
+			for (let w = 1; w <= 20; w++) {
+				const linesAtWidth = editor.render(w);
+				expect(linesAtWidth.length).toBeGreaterThanOrEqual(3);
+				for (const line of linesAtWidth) {
+					expect(visibleWidth(line), `sample=${sample} width=${w}`).toBe(w);
+				}
+			}
+		}
+
+		/* Пробел или перевод строки сразу скрывают плейсхолдер пустого черновика */
+		harness.ctx.ui.setEditorText(" ");
+		expect(stripTerminalSequences(editor.render(80)[1]!)).not.toContain("Спроси или опиши задачу");
+
 		harness.ctx.ui.setEditorText("");
 		const clearedPlain = stripTerminalSequences(editor.render(80)[1]!);
 		expect(clearedPlain.startsWith("│ › Спроси или опиши задачу…")).toBe(true);
@@ -250,6 +291,20 @@ describe("Composer & multi-layout shortcuts via ExtensionHarness", () => {
 		editor.handleMouse(mouseEvent("click", modePillX + 1, 0, 90));
 		expect(wf.mode).toBe("code");
 
+		/* Светлая тема + режим Auto-Safe: пилюля режима без эмодзи 🛡 и кликабельна */
+		harness.setTheme("light");
+		await harness.runCommand("mode", "safe");
+		const lightTopWithPills = editor.render(90)[0]!;
+		expect(visibleWidth(lightTopWithPills)).toBe(90);
+		const plainLightTop = stripTerminalSequences(lightTopWithPills);
+		expect(plainLightTop).toContain(" Auto-Safe ");
+		expect(plainLightTop).toContain(" План (1) ");
+		expect(/\p{Extended_Pictographic}/u.test(plainLightTop)).toBe(false);
+		const safePillX = plainLightTop.indexOf("Auto-Safe");
+		editor.handleMouse(mouseEvent("click", safePillX + 1, 0, 90));
+		expect(wf.mode).toBe("code");
+		harness.setTheme("dark");
+
 		editor.setWorkingStatusIndicator({
 			renderInBorder: () => "● Working…",
 			renderSpinnerInBorder: () => "●",
@@ -290,6 +345,172 @@ describe("Composer & multi-layout shortcuts via ExtensionHarness", () => {
 		await harness.sendTerminalInput("\x1b[1;3C");
 		await harness.sendTerminalInput("\x7f");
 		expect(editor.getText()).toBe("");
+	});
+
+	it("handles slash-command autocomplete mouse bounds, narrow-width cursor clicks, and unfocused hover border reset", async () => {
+		harness = createExtensionHarness({ theme: "dark", width: 16, height: 32 });
+		harness.mount(conartiPiUi);
+		await harness.startSession();
+
+		const editor = harness.editor as PiUiComposerEditor;
+		const wf = getSessionWorkflow();
+		wf.setMode("code", harness.pi);
+		wf.endAgentTurn();
+
+		const idleRgb = extractFirstFgRgb(editor.render(16)[0]!)!;
+		editor.handleMouse(mouseEvent("move", 6, 1, 16));
+		const hoverRgb = extractFirstFgRgb(editor.render(16)[0]!)!;
+		expect(hoverRgb).not.toEqual(idleRgb);
+
+		/* При потере фокуса (открыта модалка) рамка возвращается к спокойному тону */
+		editor.focused = false;
+		expect(extractFirstFgRgb(editor.render(16)[0]!)).toEqual(idleRgb);
+		editor.focused = true;
+		beginHoverMovePass();
+		finishHoverMovePass();
+
+		editor.setAutocompleteProvider({
+			getSuggestions: async () => ({
+				prefix: "/",
+				items: [
+					{ value: "/plan", label: "/plan", description: "Plan mode" },
+					{ value: "/mode", label: "/mode", description: "Switch mode" },
+				],
+			}),
+			applyCompletion: (_lines, _cursorLine, _cursorCol, item) => ({
+				lines: [`${item.value} `],
+				cursorLine: 0,
+				cursorCol: item.value.length + 1,
+			}),
+		});
+
+		await harness.sendTerminalInput("/");
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		const acLines = editor.render(16);
+		expect(acLines.length).toBe(5);
+		for (const line of acLines) {
+			expect(visibleWidth(line)).toBe(16);
+		}
+
+		/* Наведение ниже нижней границы рамки (на список автодополнения) не подсвечивает саму рамку */
+		editor.handleMouse(mouseEvent("move", 6, 3, 16));
+		expect(extractFirstFgRgb(editor.render(16)[0]!)).toEqual(idleRgb);
+
+		/* Клик по пустым полям слева/справа от меню автодополнения не применяет команду */
+		editor.handleMouse(mouseEvent("click", 1, 4, 16));
+		expect(editor.getText()).toBe("/");
+		editor.handleMouse(mouseEvent("click", 15, 4, 16));
+		expect(editor.getText()).toBe("/");
+
+		/* Клик внутри строки автодополнения на узкой ширине (< 20 колонок) выбирает нужный пункт */
+		editor.handleMouse(mouseEvent("click", 5, 4, 16));
+		expect(editor.getText()).toBe("/mode ");
+
+		/* На сверхмалой ширине (< 9 колонок, компактная рамка │...│) клик позиционирует курсор со сдвигом x - 1 */
+		editor.setText("abcd");
+		editor.render(7);
+		editor.handleMouse(mouseEvent("click", 1 + 2, 1, 7));
+		await harness.sendTerminalInput("Z");
+		expect(editor.getText()).toBe("abZcd");
+	});
+
+	it("guards multi-chunk bracketed paste in handleInput, syncs undoSnapshots across submissions with onDraftChanged, and coexists cleanly with downstream editor wrappers across session restarts", async () => {
+		harness = createExtensionHarness({ theme: "dark", width: 80, height: 32 });
+		harness.mount(conartiPiUi);
+
+		/* Имитируем внешние расширения embed-working-status и pi-next-prompt, монтируемые после pi-ui */
+		let ghostSuggestion = "проверь тесты";
+		let wrapperRenderCalls = 0;
+		harness.mount((pi) => {
+			pi.on("session_start", async (_event, ctx) => {
+				const prev = ctx.ui.getEditorComponent();
+				ctx.ui.setEditorComponent((tui, theme, kb) => {
+					const ed = prev!(tui, theme, kb);
+					const origRender = ed.render.bind(ed);
+					ed.render = (w: number) => {
+						wrapperRenderCalls += 1;
+						const lines = [...origRender(w)];
+						const blank = ghostSuggestion && ed.getText() === "" ? lines[1]?.match(/ {3,}$/)?.[0] : undefined;
+						if (blank) {
+							lines[1] = lines[1]!.slice(0, -blank.length) + ghostSuggestion.slice(0, blank.length).padEnd(blank.length, " ");
+						}
+						return lines;
+					};
+					return ed;
+				});
+			});
+		});
+
+		await harness.startSession();
+		/* Повторный session_start (например /new или /resume) не должен накапливать вложенные обёртки */
+		await harness.startSession();
+
+		const editor = harness.editor as PiUiComposerEditor;
+		expect(editor).toBeInstanceOf(PiUiComposerEditor);
+
+		wrapperRenderCalls = 0;
+		const linesAfterRestart = editor.render(80);
+		expect(wrapperRenderCalls).toBe(1);
+		for (const line of linesAfterRestart) {
+			expect(visibleWidth(line)).toBe(80);
+		}
+		expect(stripTerminalSequences(linesAfterRestart[1]!).endsWith(" │")).toBe(true);
+
+		const wf = getSessionWorkflow();
+		expect(wf.mode).toBe("code");
+
+		/* Внутри многочанковой bracketed paste последовательности хоткеев не должны срабатывать как шорткаты */
+		editor.handleInput("\x1b[200~начало ");
+		editor.handleInput("\x1b[109;3u");
+		editor.handleInput("конец\x1b[201~");
+		expect(wf.mode).toBe("code");
+		expect(editor.getText()).toContain("начало ");
+		expect(editor.getText()).toContain("конец");
+
+		/* Хоткей сразу после закрывающего \x1b[201~ в том же чанке НЕ должен теряться */
+		editor.setText("");
+		editor.handleInput("\x1b[200~вставка\x1b[201~\x1b[109;3u");
+		expect(editor.getText()).toBe("вставка");
+		expect(wf.mode).toBe("plan");
+		wf.setMode("code", harness.pi);
+
+		/* onDraftChanged и синхронизация стека undoSnapshots при отправке сообщения */
+		const observedDrafts: string[] = [];
+		let chipCounterState = 0;
+		const restoredStates: number[] = [];
+		registerComposerHooks({
+			onDraftChanged(text) {
+				observedDrafts.push(text);
+			},
+			captureUndoState() {
+				return chipCounterState;
+			},
+			restoreUndoState(snap) {
+				restoredStates.push(snap as number);
+			},
+		});
+
+		editor.setText("");
+		chipCounterState = 111;
+		await harness.sendTerminalInput("a");
+		/* Отправка очищает стек undo редактора */
+		let submittedText = "";
+		editor.onSubmit = (val: string) => {
+			submittedText = val;
+		};
+		await harness.sendTerminalInput("\r");
+		expect(submittedText).toBe("a");
+		expect(observedDrafts).toContain("a");
+		expect(observedDrafts.at(-1)).toBe("");
+
+		/* Новый черновик сохраняет собственный снимок 222, а не старый 111 из прошлого сообщения */
+		chipCounterState = 222;
+		await harness.sendTerminalInput("b");
+		chipCounterState = 333;
+		(editor as unknown as { undo(): void }).undo();
+		expect(editor.getText()).toBe("");
+		expect(restoredStates).toEqual([222]);
 	});
 
 	it("removes the instructional micro-hint from the inline Plan banner while keeping click-to-open Plan Studio intact", async () => {

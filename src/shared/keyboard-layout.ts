@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { matchesKey, type KeyId } from "@earendil-works/pi-tui";
+import { isKittyProtocolActive, matchesKey, type KeyId } from "@earendil-works/pi-tui";
 
 const MOD_SHIFT = 1;
 const MOD_ALT = 2;
@@ -92,6 +92,9 @@ const MACOS_OPTION_TO_QWERTY: ReadonlyArray<readonly [string, string, boolean?]>
 	["љ", "k"],
 	["њ", "y"],
 	["ѓ", "u"],
+	["і", "b"],
+	["ќ", "r"],
+	["ў", "e"],
 	["Œ", "q", true],
 	["Â", "m", true],
 	["◊", "v", true],
@@ -124,8 +127,10 @@ for (const [composed, lat, shift] of MACOS_OPTION_TO_QWERTY) {
 	});
 }
 
+const LEGACY_READLINE_ALT_LETTERS = new Set(["b", "f", "p", "n"]);
 const KITTY_CSI_U_RE = /^\x1b\[(\d+)(?::(\d*))?(?::(\d+))?(?:;(\d+))?(?::(\d+))?u$/;
 const MODIFY_OTHER_KEYS_RE = /^\x1b\[27;(\d+);(\d+)~$/;
+const CSI_PREFIX_RE = /^\x1b\[[0-9;:?<>]*[@-~]/;
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
 
@@ -139,33 +144,86 @@ function normalizeAsciiBaseCodepoint(codepoint: number): number | undefined {
 	return undefined;
 }
 
-function isOptionChordEnabled(entry: OptionChordEntry, options?: KeyboardLayoutNormalizeOptions): boolean {
+function resolveEnabledChordSet(options?: KeyboardLayoutNormalizeOptions): ReadonlySet<string> | undefined {
 	const source = options?.enabledOptionChords;
-	if (!source) return true;
-	const set = typeof source === "function" ? source() : source;
-	return set.has(entry.chordId);
+	if (!source) return undefined;
+	return typeof source === "function" ? source() : source;
 }
 
-function normalizeSingleSequence(data: string, options?: KeyboardLayoutNormalizeOptions): string {
-	if (!data) return data;
+function isChordEnabled(chordId: string, options?: KeyboardLayoutNormalizeOptions): boolean {
+	const set = resolveEnabledChordSet(options);
+	return set ? set.has(chordId) : true;
+}
 
-	if (data.charCodeAt(0) !== 0x1b) {
-		const cp = data.codePointAt(0);
-		if (cp !== undefined && cp > 127 && data.length === (cp > 0xffff ? 2 : 1)) {
-			const optEntry = OPTION_CODEPOINT_MAP.get(cp);
-			if (optEntry && isOptionChordEnabled(optEntry, options)) {
-				const modValue = (MOD_ALT | (optEntry.shift ? MOD_SHIFT : 0)) + 1;
-				return `\x1b[${optEntry.latinCodepoint};${modValue}u`;
-			}
+function isChordExplicitlyEnabled(chordId: string, options?: KeyboardLayoutNormalizeOptions): boolean {
+	const set = resolveEnabledChordSet(options);
+	return Boolean(set?.has(chordId));
+}
+
+function normalizeNonEscapeText(text: string, options?: KeyboardLayoutNormalizeOptions): string {
+	if (!text) return text;
+	const cp = text.codePointAt(0);
+	if (cp !== undefined && cp > 127 && text.length === (cp > 0xffff ? 2 : 1)) {
+		const optEntry = OPTION_CODEPOINT_MAP.get(cp);
+		if (optEntry && isChordEnabled(optEntry.chordId, options)) {
+			const modValue = (MOD_ALT | (optEntry.shift ? MOD_SHIFT : 0)) + 1;
+			return `\x1b[${optEntry.latinCodepoint};${modValue}u`;
 		}
-		return data;
 	}
+	return text;
+}
 
-	if (data.length === 2) {
-		const mapped = CYRILLIC_CODEPOINT_MAP.get(data.charCodeAt(1));
+function normalizeSingleEscapeSequence(data: string, options?: KeyboardLayoutNormalizeOptions): string {
+	if (!data || data.charCodeAt(0) !== 0x1b) return data;
+
+	const secondCp = data.codePointAt(1);
+	if (secondCp !== undefined && data.length === 1 + (secondCp > 0xffff ? 2 : 1)) {
+		const mapped = CYRILLIC_CODEPOINT_MAP.get(secondCp);
 		if (mapped) {
 			const modValue = (MOD_ALT | (mapped.uppercase ? MOD_SHIFT : 0)) + 1;
 			return `\x1b[${mapped.latinCodepoint};${modValue}u`;
+		}
+		if (secondCp > 127) {
+			const optEntry = OPTION_CODEPOINT_MAP.get(secondCp);
+			if (optEntry && isChordEnabled(optEntry.chordId, options)) {
+				const modValue = (MOD_ALT | (optEntry.shift ? MOD_SHIFT : 0)) + 1;
+				return `\x1b[${optEntry.latinCodepoint};${modValue}u`;
+			}
+			return data;
+		}
+		/* При активном Kitty-протоколе хост отключает разбор legacy ESC+<ascii> и ESC+<ctrl> */
+		if (isKittyProtocolActive()) {
+			if (
+				secondCp >= 0x01 &&
+				secondCp <= 0x1a &&
+				secondCp !== 0x08 &&
+				secondCp !== 0x09 &&
+				secondCp !== 0x0a &&
+				secondCp !== 0x0d
+			) {
+				const latinCp = secondCp + 96;
+				const chordId = `ctrl+alt+${String.fromCharCode(latinCp)}`;
+				if (isChordEnabled(chordId, options)) {
+					return `\x1b[${latinCp};7u`;
+				}
+			}
+			if (secondCp >= 0x61 && secondCp <= 0x7a) {
+				const ch = String.fromCharCode(secondCp);
+				const chordId = `alt+${ch}`;
+				const allowed = LEGACY_READLINE_ALT_LETTERS.has(ch)
+					? isChordExplicitlyEnabled(chordId, options)
+					: isChordEnabled(chordId, options);
+				if (allowed) {
+					return `\x1b[${secondCp};3u`;
+				}
+			}
+			if (secondCp >= 0x41 && secondCp <= 0x5a && secondCp !== 0x4f && secondCp !== 0x50) {
+				const lowerCp = secondCp + 32;
+				const chordId = `shift+alt+${String.fromCharCode(lowerCp)}`;
+				if (isChordEnabled(chordId, options)) {
+					return `\x1b[${lowerCp};4u`;
+				}
+			}
 		}
 		return data;
 	}
@@ -174,15 +232,30 @@ function normalizeSingleSequence(data: string, options?: KeyboardLayoutNormalize
 	if (mokMatch) {
 		const modValue = Number.parseInt(mokMatch[1]!, 10);
 		const codepoint = Number.parseInt(mokMatch[2]!, 10);
-		const modifier = modValue - 1;
-		if ((modifier & SHORTCUT_MODIFIER_MASK) !== 0 && codepoint > 127) {
-			const mapped = CYRILLIC_CODEPOINT_MAP.get(codepoint);
-			if (mapped) {
-				return `\x1b[27;${modValue};${mapped.latinCodepoint}~`;
+		const rawModifier = modValue - 1;
+		/* matchesPrintableModifyOtherKeys в pi-tui не сбрасывает биты CapsLock/NumLock */
+		const modifier = rawModifier & ~LOCK_MASK;
+		const cleanModValue = modifier + 1;
+
+		if ((modifier & SHORTCUT_MODIFIER_MASK) !== 0) {
+			if (codepoint > 127) {
+				const mapped = CYRILLIC_CODEPOINT_MAP.get(codepoint);
+				if (mapped) {
+					return `\x1b[27;${cleanModValue};${mapped.latinCodepoint}~`;
+				}
+				if ((modifier & MOD_ALT) === 0) {
+					const optEntry = OPTION_CODEPOINT_MAP.get(codepoint);
+					if (optEntry) {
+						const nextMod = (modifier | MOD_ALT | (optEntry.shift ? MOD_SHIFT : 0)) + 1;
+						return `\x1b[27;${nextMod};${optEntry.latinCodepoint}~`;
+					}
+				}
+			} else if (rawModifier !== modifier) {
+				return `\x1b[27;${cleanModValue};${codepoint}~`;
 			}
-		} else if ((modifier & ~LOCK_MASK) === 0 || (modifier & ~LOCK_MASK) === MOD_SHIFT) {
+		} else if (modifier === 0 || modifier === MOD_SHIFT) {
 			const optEntry = OPTION_CODEPOINT_MAP.get(codepoint);
-			if (optEntry && isOptionChordEnabled(optEntry, options)) {
+			if (optEntry && isChordEnabled(optEntry.chordId, options)) {
 				const nextMod = (modifier | MOD_ALT | (optEntry.shift ? MOD_SHIFT : 0)) + 1;
 				return `\x1b[27;${nextMod};${optEntry.latinCodepoint}~`;
 			}
@@ -205,7 +278,7 @@ function normalizeSingleSequence(data: string, options?: KeyboardLayoutNormalize
 		const effectiveMod = modifier & ~LOCK_MASK;
 		if ((effectiveMod === 0 || effectiveMod === MOD_SHIFT) && codepoint > 127) {
 			const optEntry = OPTION_CODEPOINT_MAP.get(codepoint);
-			if (optEntry && isOptionChordEnabled(optEntry, options)) {
+			if (optEntry && isChordEnabled(optEntry.chordId, options)) {
 				const nextMod = (modifier | MOD_ALT | (optEntry.shift ? MOD_SHIFT : 0)) + 1;
 				return `\x1b[${optEntry.latinCodepoint};${nextMod}${eventSuffix}u`;
 			}
@@ -229,50 +302,148 @@ function normalizeSingleSequence(data: string, options?: KeyboardLayoutNormalize
 		return `\x1b[${mapped.latinCodepoint};${modValue}${eventSuffix}u`;
 	}
 
+	if ((modifier & MOD_ALT) === 0) {
+		const optEntry = OPTION_CODEPOINT_MAP.get(codepoint);
+		if (optEntry) {
+			const nextMod = (modifier | MOD_ALT | (optEntry.shift ? MOD_SHIFT : 0)) + 1;
+			return `\x1b[${optEntry.latinCodepoint};${nextMod}${eventSuffix}u`;
+		}
+	}
+
 	return data;
+}
+
+function normalizeOutsidePaste(data: string, options?: KeyboardLayoutNormalizeOptions): string {
+	if (!data) return data;
+	const firstEsc = data.indexOf("\x1b");
+	if (firstEsc === -1) {
+		return normalizeNonEscapeText(data, options);
+	}
+	if (firstEsc === 0 && data.indexOf("\x1b", 1) === -1) {
+		const csiMatch = CSI_PREFIX_RE.exec(data);
+		if (csiMatch && csiMatch[0].length < data.length) {
+			return (
+				normalizeSingleEscapeSequence(csiMatch[0], options) +
+				normalizeNonEscapeText(data.slice(csiMatch[0].length), options)
+			);
+		}
+		return normalizeSingleEscapeSequence(data, options);
+	}
+
+	let out = "";
+	let pos = 0;
+	while (pos < data.length) {
+		const escIdx = data.indexOf("\x1b", pos);
+		if (escIdx === -1) {
+			out += normalizeNonEscapeText(data.slice(pos), options);
+			break;
+		}
+		if (escIdx > pos) {
+			out += normalizeNonEscapeText(data.slice(pos, escIdx), options);
+			pos = escIdx;
+		}
+		const rest = data.slice(pos);
+		const csiMatch = CSI_PREFIX_RE.exec(rest);
+		if (csiMatch) {
+			out += normalizeSingleEscapeSequence(csiMatch[0], options);
+			pos += csiMatch[0].length;
+			continue;
+		}
+		const secondCp = rest.codePointAt(1);
+		if (
+			secondCp !== undefined &&
+			secondCp !== 0x1b &&
+			secondCp !== 0x5b &&
+			secondCp !== 0x5d &&
+			secondCp !== 0x4f &&
+			secondCp !== 0x50 &&
+			secondCp !== 0x5f
+		) {
+			const step = 1 + (secondCp > 0xffff ? 2 : 1);
+			out += normalizeSingleEscapeSequence(rest.slice(0, step), options);
+			pos += step;
+			continue;
+		}
+		const nextEsc = data.indexOf("\x1b", pos + 1);
+		if (nextEsc === -1) {
+			out += rest;
+			break;
+		}
+		out += data.slice(pos, nextEsc);
+		pos = nextEsc;
+	}
+	return out;
+}
+
+function nextMarkerPrefixLen(currentLen: number, marker: string, ch: string): number {
+	if (ch === marker[currentLen]) {
+		return currentLen + 1;
+	}
+	return ch === marker[0] ? 1 : 0;
 }
 
 export function createKeyboardLayoutNormalizer(options?: KeyboardLayoutNormalizeOptions): KeyboardLayoutNormalizer {
 	let inBracketedPaste = false;
+	let startMatch = 0;
+	let endMatch = 0;
 
 	return {
 		normalize(data: string): string {
 			if (!data) return data;
-			if (!inBracketedPaste && !data.includes(BRACKETED_PASTE_START)) {
-				return normalizeSingleSequence(data, options);
+			if (!inBracketedPaste && startMatch === 0 && !data.includes("\x1b")) {
+				return normalizeNonEscapeText(data, options);
 			}
 
 			let out = "";
-			let cursor = 0;
-			while (cursor < data.length) {
+			let segStart = 0;
+			for (let i = 0; i < data.length; i++) {
+				const ch = data[i]!;
 				if (inBracketedPaste) {
-					const endIdx = data.indexOf(BRACKETED_PASTE_END, cursor);
-					if (endIdx === -1) {
-						out += data.slice(cursor);
-						break;
+					endMatch = nextMarkerPrefixLen(endMatch, BRACKETED_PASTE_END, ch);
+					if (endMatch === BRACKETED_PASTE_END.length) {
+						out += data.slice(segStart, i + 1);
+						inBracketedPaste = false;
+						endMatch = 0;
+						segStart = i + 1;
 					}
-					const afterEnd = endIdx + BRACKETED_PASTE_END.length;
-					out += data.slice(cursor, afterEnd);
-					inBracketedPaste = false;
-					cursor = afterEnd;
 				} else {
-					const startIdx = data.indexOf(BRACKETED_PASTE_START, cursor);
-					if (startIdx === -1) {
-						out += normalizeSingleSequence(data.slice(cursor), options);
-						break;
+					startMatch = nextMarkerPrefixLen(startMatch, BRACKETED_PASTE_START, ch);
+					if (startMatch === BRACKETED_PASTE_START.length) {
+						const markerStart = i + 1 - BRACKETED_PASTE_START.length;
+						if (markerStart >= segStart) {
+							if (markerStart > segStart) {
+								out += normalizeOutsidePaste(data.slice(segStart, markerStart), options);
+							}
+							out += data.slice(markerStart, i + 1);
+						} else {
+							out += data.slice(segStart, i + 1);
+						}
+						inBracketedPaste = true;
+						startMatch = 0;
+						segStart = i + 1;
 					}
-					if (startIdx > cursor) {
-						out += normalizeSingleSequence(data.slice(cursor, startIdx), options);
+				}
+			}
+
+			if (segStart < data.length) {
+				if (inBracketedPaste) {
+					out += data.slice(segStart);
+				} else {
+					const safeEnd = Math.max(segStart, data.length - startMatch);
+					if (safeEnd > segStart) {
+						out += normalizeOutsidePaste(data.slice(segStart, safeEnd), options);
 					}
-					out += BRACKETED_PASTE_START;
-					inBracketedPaste = true;
-					cursor = startIdx + BRACKETED_PASTE_START.length;
+					if (safeEnd < data.length) {
+						out += data.slice(safeEnd);
+					}
 				}
 			}
 			return out;
 		},
 		reset(): void {
 			inBracketedPaste = false;
+			startMatch = 0;
+			endMatch = 0;
 		},
 	};
 }
@@ -280,44 +451,63 @@ export function createKeyboardLayoutNormalizer(options?: KeyboardLayoutNormalize
 export function normalizeKeyboardLayoutInput(data: string, options?: KeyboardLayoutNormalizeOptions): string {
 	if (!data) return data;
 	if (!data.includes(BRACKETED_PASTE_START)) {
-		return normalizeSingleSequence(data, options);
+		return normalizeOutsidePaste(data, options);
 	}
 	return createKeyboardLayoutNormalizer(options).normalize(data);
 }
 
+const MODIFIER_ALIASES: Readonly<Record<string, "shift" | "ctrl" | "alt" | "super">> = {
+	shift: "shift",
+	ctrl: "ctrl",
+	control: "ctrl",
+	alt: "alt",
+	opt: "alt",
+	option: "alt",
+	meta: "alt",
+	super: "super",
+	cmd: "super",
+	command: "super",
+};
+
+const MODIFIER_PREFIXES = Object.keys(MODIFIER_ALIASES).sort((a, b) => b.length - a.length);
+
 export function canonicalizeShortcutChord(keyId: string): string {
-	const parts = keyId
-		.trim()
-		.toLowerCase()
-		.split("+")
-		.filter(Boolean);
-	if (parts.length === 0) return "";
-	const key = parts[parts.length - 1]!;
-	const modSet = new Set(parts.slice(0, -1));
+	let rest = keyId.trim().toLowerCase();
+	if (!rest) return "";
+	const modSet = new Set<"shift" | "ctrl" | "alt" | "super">();
+	while (true) {
+		const matchedPrefix = MODIFIER_PREFIXES.find(
+			(prefix) => rest.startsWith(`${prefix}+`) && rest.length > prefix.length + 1,
+		);
+		if (!matchedPrefix) break;
+		modSet.add(MODIFIER_ALIASES[matchedPrefix]!);
+		rest = rest.slice(matchedPrefix.length + 1);
+	}
+	if (!rest) return "";
 	const orderedMods: string[] = [];
-	for (const mod of ["shift", "ctrl", "alt", "super"]) {
+	for (const mod of ["shift", "ctrl", "alt", "super"] as const) {
 		if (modSet.has(mod)) orderedMods.push(mod);
 	}
-	return orderedMods.length > 0 ? `${orderedMods.join("+")}+${key}` : key;
+	return orderedMods.length > 0 ? `${orderedMods.join("+")}+${rest}` : rest;
 }
 
 export function matchesLayoutChord(data: string, keyId: KeyId | string): boolean {
-	if (!data || data.includes("\x1b[200~")) return false;
+	if (!data || data.includes(BRACKETED_PASTE_START)) return false;
 	const canonical = canonicalizeShortcutChord(String(keyId));
+	if (!canonical) return false;
 	const normalized = normalizeKeyboardLayoutInput(data, {
 		enabledOptionChords: new Set([canonical]),
 	});
-	if (matchesKey(normalized, keyId as KeyId)) {
+	if (matchesKey(normalized, canonical as KeyId)) {
 		return true;
 	}
-	/* Legacy ESC+<ascii> в терминалах с активным Kitty-протоколом (например через tmux) */
 	if (normalized.length === 2 && normalized.charCodeAt(0) === 0x1b) {
 		const second = normalized.charCodeAt(1);
 		if (second >= 0x61 && second <= 0x7a) {
-			return matchesKey(`\x1b[${second};3u`, keyId as KeyId);
+			return matchesKey(`\x1b[${second};3u`, canonical as KeyId);
 		}
 		if (second >= 0x41 && second <= 0x5a) {
-			return matchesKey(`\x1b[${second + 32};4u`, keyId as KeyId);
+			return matchesKey(`\x1b[${second + 32};4u`, canonical as KeyId);
 		}
 	}
 	return false;

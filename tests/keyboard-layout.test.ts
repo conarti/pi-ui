@@ -169,4 +169,60 @@ describe("keyboard-layout normalizer", () => {
 		expect(streamNormalizer.normalize(" конец\x1b[201~\x1bь")).toBe(" конец\x1b[201~\x1b[109;3u");
 		expect(matchesKey(streamNormalizer.normalize("µ"), "alt+m")).toBe(true);
 	});
+
+	it("handles mid-escape split bracketed-paste markers, batched escape sequences, Lock-masked modifyOtherKeys, Ctrl+Option compositions, and Kitty-mode legacy ESC parity", () => {
+		/* Маркеры \x1b[200~ и \x1b[201~, разрезанные посередине между чанками */
+		const splitPaste = createKeyboardLayoutNormalizer();
+		const chunk1 = splitPaste.normalize("\x1b[20");
+		const chunk2 = splitPaste.normalize("0~µ");
+		const chunk3 = splitPaste.normalize("œ\x1b[2");
+		const chunk4 = splitPaste.normalize("01~");
+		expect(chunk1 + chunk2 + chunk3 + chunk4).toBe("\x1b[200~µœ\x1b[201~");
+		/* После закрытия разрезанного \x1b[201~ нормализатор не должен застрять в режиме вставки */
+		expect(matchesKey(splitPaste.normalize("µ"), "alt+m")).toBe(true);
+
+		/* Побайтовая подача маркеров вставки */
+		const byteStream = createKeyboardLayoutNormalizer();
+		const fullPaste = "\x1b[200~µœ√\x1b[201~";
+		let reassembled = "";
+		for (const ch of fullPaste) {
+			reassembled += byteStream.normalize(ch);
+		}
+		expect(reassembled).toBe(fullPaste);
+		expect(matchesKey(byteStream.normalize("\x1bь"), "alt+m")).toBe(true);
+
+		/* Склеенные press+release последовательности в одном чанке и многосимвольный обычный текст */
+		const batched = normalizeKeyboardLayoutInput("\x1b[1081;3u\x1b[1081;3:3u");
+		expect(batched).toBe("\x1b[113;3u\x1b[113;3:3u");
+		expect(normalizeKeyboardLayoutInput("интервал 5µs")).toBe("интервал 5µs");
+
+		/* modifyOtherKeys с включённым CapsLock (64) / NumLock (128) */
+		expect(matchesKey(normalizeKeyboardLayoutInput("\x1b[27;67;1100~"), "alt+m")).toBe(true);
+		expect(matchesKey(normalizeKeyboardLayoutInput("\x1b[27;131;109~"), "alt+m")).toBe(true);
+
+		/* Ctrl + macOS Option-композиция (π = Option+P, ø = Option+O) */
+		expect(matchesKey(normalizeKeyboardLayoutInput("\x1b[960;5u"), "ctrl+alt+p")).toBe(true);
+		expect(matchesKey(normalizeKeyboardLayoutInput("\x1b[248;5u"), "ctrl+alt+o")).toBe(true);
+		expect(matchesKey(normalizeKeyboardLayoutInput("\x1b[27;5;960~"), "ctrl+alt+p")).toBe(true);
+		expect(matchesKey(normalizeKeyboardLayoutInput("\x1b[27;5;248~"), "ctrl+alt+o")).toBe(true);
+
+		/* Legacy ESC-префикс в латинице и кириллице при активном Kitty-протоколе */
+		setKittyProtocolActive(true);
+		const enabled = { enabledOptionChords: new Set(["alt+m", "alt+q", "ctrl+alt+p", "ctrl+alt+o"]) };
+		expect(matchesKey(normalizeKeyboardLayoutInput("\x1bm", enabled), "alt+m")).toBe(true);
+		expect(matchesKey(normalizeKeyboardLayoutInput("\x1bь", enabled), "alt+m")).toBe(true);
+		expect(matchesKey(normalizeKeyboardLayoutInput("\x1bq", enabled), "alt+q")).toBe(true);
+		expect(matchesKey(normalizeKeyboardLayoutInput("\x1bй", enabled), "alt+q")).toBe(true);
+		expect(matchesKey(normalizeKeyboardLayoutInput("\x1b\x10", enabled), "ctrl+alt+p")).toBe(true);
+		expect(matchesKey(normalizeKeyboardLayoutInput("\x1b\x0f", enabled), "ctrl+alt+o")).toBe(true);
+		/* Навигационные ESC-последовательности и Enter не перехватываются */
+		expect(normalizeKeyboardLayoutInput("\x1bb", enabled)).toBe("\x1bb");
+		expect(normalizeKeyboardLayoutInput("\x1bf", enabled)).toBe("\x1bf");
+		expect(normalizeKeyboardLayoutInput("\x1b\r", enabled)).toBe("\x1b\r");
+
+		/* Алиасы модификаторов и клавиша '+' в matchesLayoutChord */
+		expect(matchesLayoutChord("\x1b[1084;9u", "cmd+v")).toBe(true);
+		expect(matchesLayoutChord("œ", "option+q")).toBe(true);
+		expect(matchesLayoutChord("\x1b[43;5u", "ctrl++")).toBe(true);
+	});
 });
