@@ -1,14 +1,17 @@
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import {
-	getPackageDir, createBashToolDefinition, createEditToolDefinition, createFindToolDefinition,
-	createGrepToolDefinition, createLsToolDefinition, createPowerShellToolDefinition,
-	createReadToolDefinition, createWriteToolDefinition,
+	createBashToolDefinition,
+	createCodemodeExtension,
+	createEditToolDefinition,
+	createFindToolDefinition,
+	createGrepToolDefinition,
+	createLsToolDefinition,
+	createPowerShellToolDefinition,
+	createReadToolDefinition,
+	createWriteToolDefinition,
+	type ExtensionAPI,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 
-// Constructing definitions does not register/activate tools or run their execute
-// functions. Only renderer fingerprints are retained, never model-facing fields.
 const factories = {
 	read: createReadToolDefinition, write: createWriteToolDefinition, edit: createEditToolDefinition,
 	bash: createBashToolDefinition, powershell: createPowerShellToolDefinition,
@@ -20,22 +23,33 @@ for (const [name, factory] of Object.entries(factories)) {
 		const definition = factory(process.cwd());
 		builtinRenderers.set(name, { call: String(definition.renderCall), result: String(definition.renderResult) });
 	} catch {
-		// A missing/unsupported reference renderer must not prevent UI loading.
+		/* Отсутствующий эталонный рендерер не должен блокировать загрузку UI. */
 	}
 }
 
-let nativeTimerLoad: Promise<void> | undefined;
-/** Optional bundled renderer: absent on old hosts, and never executes a tool. */
+/* Снимаем отпечаток встроенного codemode синхронно через корневой экспорт пакета хоста, чтобы совпадать с бандлом cli.js. */
+if (typeof createCodemodeExtension === "function") {
+	try {
+		createCodemodeExtension()({
+			registerTool(definition: ToolDefinition<any, any, any>) {
+				if (typeof definition?.renderCall === "function" && typeof definition?.renderResult === "function") {
+					builtinRenderers.set("codemode", {
+						call: String(definition.renderCall),
+						result: String(definition.renderResult),
+					});
+				}
+			},
+			appendEntry() {},
+			getAllTools: () => [],
+			getSettings: () => ({}),
+		} as unknown as ExtensionAPI);
+	} catch {
+		/* На старых версиях хоста встроенный codemode может отсутствовать. */
+	}
+}
+
 export function loadNativeTimerRenderers(): Promise<void> {
-	return nativeTimerLoad ??= (async () => {
-		try {
-			const url = pathToFileURL(join(getPackageDir(), "dist/extensions/codemode/renderer.js"));
-			const { codemodeRenderers } = await import(url.href);
-			if (typeof codemodeRenderers?.renderCall === "function" && typeof codemodeRenderers?.renderResult === "function") {
-				builtinRenderers.set("codemode", { call: String(codemodeRenderers.renderCall), result: String(codemodeRenderers.renderResult) });
-			}
-		} catch { /* Optional host internals must not prevent UI loading. */ }
-	})();
+	return Promise.resolve();
 }
 
 /** Conservative fallback on legacy hosts without source metadata. */

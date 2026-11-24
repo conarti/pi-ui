@@ -5,7 +5,7 @@ import {
 	type ExtensionContext,
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Spacer, Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
+import { Container, Spacer, Text, stripTerminalSequences, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { CLAUDE_RESULT_PREFIX, claudeFailure, lookHint, lookKind, pathOf, type LookKind } from "./claude.ts";
 import {
 	CODEX_BULLET,
@@ -27,6 +27,12 @@ import {
 import { getActiveHostRuntime, type HostRuntimeHandle } from "../../shared/host-runtime.ts";
 import { hookMethod } from "../../shared/runtime-hooks.ts";
 import { formatDurationMs, type RowStatus } from "./core.ts";
+import {
+	classifyGrokExploration,
+	formatGrokDuration,
+	formatGrokExploredSummary,
+	grokPalette,
+} from "./grok.ts";
 import { getTextResult } from "./invocation.ts";
 import { outputPadLines } from "./layout.ts";
 import { chromePainter, paintIndicator } from "./palette.ts";
@@ -50,7 +56,7 @@ export interface ToolRowLike {
 	toolName: string;
 	toolCallId: string;
 	args: unknown;
-	result?: AgentToolResult<unknown> & { isError?: boolean };
+	result?: AgentToolResult<unknown> & { isError?: boolean; durationMs?: number };
 	isPartial: boolean;
 	expanded: boolean;
 	/** Present on Pi 1.1+ tool components, absent on legacy hosts. */
@@ -172,6 +178,7 @@ type HeaderCache = {
 	hostExpanded: boolean;
 	rows: readonly ToolRowLike[];
 	args: unknown[];
+	fingerprints: string[];
 	results: unknown[];
 	lines: string[];
 };
@@ -184,10 +191,18 @@ type Paint = { theme: Theme; chrome: (text: string) => string; key: string };
 /** Theme colors a group line uses; a theme that changes any of them draws the lines anew. */
 const PAINT_COLORS = ["toolTitle", "error", "success", "muted", "dim", "text", "borderMuted", "accent"] as const;
 
+function rowArgsFingerprint(row: ToolRowLike): string {
+	const a = argsOf(row);
+	const cmd = typeof a.command === "string" ? a.command : "";
+	const pat = typeof a.pattern === "string" ? a.pattern : "";
+	return `${pathOf(a)}\0${cmd}\0${pat}`;
+}
+
 function headerStill(cache: HeaderCache, rows: readonly ToolRowLike[], paint: string, width: number, expanded: boolean): boolean {
 	if (cache.paint !== paint || cache.width !== width || cache.expanded !== expanded
 		|| cache.hostExpanded !== rows[0]?.expanded || cache.rows.length !== rows.length) return false;
 	return rows.every((row, index) => row === cache.rows[index] && row.args === cache.args[index]
+		&& rowArgsFingerprint(row) === cache.fingerprints[index]
 		&& row.result === cache.results[index]);
 }
 
@@ -204,31 +219,65 @@ export class ToolGroupComponent extends Container {
 		footer?: (width: number) => string[],
 	) {
 		super();
-		// Ctrl+O expands every tool row in Pi; the group follows it both ways.
+		/* Сворачивание одной строки внутри раскрытой группы не должно закрывать всю группу целиком. */
 		const hostExpanded = rows[0]!.expanded;
-		if (state.lastHostExpanded !== hostExpanded) {
+		const uniformHostExpanded = rows.every((row) => row.expanded === hostExpanded);
+		if (uniformHostExpanded && state.lastHostExpanded !== hostExpanded) {
 			state.lastHostExpanded = hostExpanded;
 			state.expanded = hostExpanded;
 		}
-		const handleMouse = (event: { type?: string; button?: string }) => {
-			if (event.type !== "click" || event.button !== "left") return undefined;
+		let lastHeaderLines: string[] = [];
+		const toggleGroup = () => {
 			captureViewport();
 			this.state.expanded = !this.state.expanded;
 			this.onToggle(this.state.expanded);
 			return { handled: true };
 		};
-		this.addChild({ render: (width) => this.draw(this.rows, width, this.state.expanded), invalidate() {}, handleMouse } as Component);
+		const handleHeaderMouse = (event: { type?: string; button?: string; y?: number }) => {
+			if (event.type !== "click" || event.button !== "left") return undefined;
+			if (
+				event.y === 0 &&
+				lastHeaderLines.length > 1 &&
+				stripTerminalSequences(lastHeaderLines[0] ?? "").trim() === ""
+			) {
+				return undefined;
+			}
+			return toggleGroup();
+		};
+		const handleFooterMouse = (event: { type?: string; button?: string }) => {
+			if (event.type !== "click" || event.button !== "left") return undefined;
+			return toggleGroup();
+		};
+		this.addChild({
+			render: (width) => {
+				lastHeaderLines = this.draw(this.rows, width, this.state.expanded);
+				return lastHeaderLines;
+			},
+			invalidate() {},
+			handleMouse: handleHeaderMouse,
+		} as Component);
 		if (!state.expanded) return;
 		for (const member of members) this.addChild(member as Component);
-		if (footer) this.addChild({ render: footer, invalidate() {}, handleMouse } as Component);
+		if (footer) this.addChild({ render: footer, invalidate() {}, handleMouse: handleFooterMouse } as Component);
 	}
 }
 
-/** Which rows fold into a group: what Claude Code counts as looking around, or what Codex parses as exploring. */
-export type GroupStyle = "claude" | "codex";
+const grokKinds = new WeakMap<object, { args: unknown; fingerprint: string; kind: LookKind | undefined }>();
+
+function grokKindOf(row: ToolRowLike): LookKind | undefined {
+	const fingerprint = rowArgsFingerprint(row);
+	const cached = grokKinds.get(row);
+	if (cached && cached.args === row.args && cached.fingerprint === fingerprint) return cached.kind;
+	const kind = classifyGrokExploration(row.toolName, argsOf(row));
+	grokKinds.set(row, { args: row.args, fingerprint, kind });
+	return kind;
+}
+
+export type GroupStyle = "grok" | "claude" | "codex";
 
 function isGroupable(child: unknown, style: GroupStyle = "claude"): child is ToolRowLike {
 	if (!isKind(child, ToolExecutionComponent)) return false;
+	if (style === "grok") return grokKindOf(child as ToolRowLike) !== undefined;
 	return style === "codex" ? exploreOf(child as ToolRowLike) !== undefined : kindOf(child as ToolRowLike) !== undefined;
 }
 
@@ -264,7 +313,11 @@ export function groupChildren(
 	let members: unknown[] = [];
 	let pending: unknown[] = [];
 	const flush = () => {
-		if (rows.length > 0) grouped.push(makeGroup(rows, members));
+		if (style === "grok" && rows.length === 1) {
+			grouped.push(...members);
+		} else if (rows.length > 0) {
+			grouped.push(makeGroup(rows, members));
+		}
 		rows = [];
 		members = [];
 	};
@@ -305,9 +358,11 @@ export class ToolGroupController {
 		const resolvedHost = host ?? getActiveHostRuntime();
 		const chat = resolvedHost?.chatContainer ?? (resolvedHost ? findChat(resolvedHost.tui) : undefined);
 		if (chat && resolvedHost) {
+			const isGroupStyle = (style: string): style is GroupStyle =>
+				style === "grok" || style === "claude" || style === "codex";
 			hookMethod(chat, "render", "claude.groups", (self, args, original) => {
 				const style = this.runtime.config.style;
-				if (!this.context || isSilent() || (style !== "claude" && style !== "codex")) return original.apply(self, args);
+				if (!this.context || isSilent() || !isGroupStyle(style)) return original.apply(self, args);
 				const children = self.children as unknown[];
 				this.paint = this.resolvePaint();
 				openExplorations.clear();
@@ -318,6 +373,20 @@ export class ToolGroupController {
 					self.children = children;
 					this.paint = undefined;
 				}
+			});
+			hookMethod(chat, "handleMouse", "grok.groups.mouse", (self, args, original) => {
+				const style = this.runtime.config.style;
+				const event = args[0] as { width?: number } | undefined;
+				if (
+					this.context &&
+					!isSilent() &&
+					isGroupStyle(style) &&
+					typeof event?.width === "number" &&
+					(self as { childLines?: { width?: number } }).childLines?.width !== event.width
+				) {
+					self.render(event.width);
+				}
+				return original.apply(self, args);
 			});
 		}
 	}
@@ -366,8 +435,14 @@ export class ToolGroupController {
 		const theme = this.context?.ui.theme;
 		if (!theme) return undefined;
 		const chrome = chromePainter(theme);
+		const grokKey = this.runtime.config.style === "grok" ? grokPalette(theme).key : "";
 		// The style is part of the key: a group drawn in one style is never reused in another.
-		const key = this.runtime.config.style + PAINT_COLORS.map((color) => theme.fg(color, "x")).join("") + theme.bold("x") + chrome("x");
+		const key =
+			this.runtime.config.style +
+			grokKey +
+			PAINT_COLORS.map((color) => theme.fg(color, "x")).join("") +
+			theme.bold("x") +
+			chrome("x");
 		return { theme, chrome, key };
 	}
 
@@ -389,6 +464,7 @@ export class ToolGroupController {
 			hostExpanded: rows[0]!.expanded,
 			rows: [...rows],
 			args: rows.map((row) => row.args),
+			fingerprints: rows.map(rowArgsFingerprint),
 			results: rows.map((row) => row.result),
 			lines,
 		};
@@ -397,6 +473,7 @@ export class ToolGroupController {
 
 	/** Claude's quiet completed exploration; active and interrupted calls keep a status cue. */
 	private draw(rows: readonly ToolRowLike[], width: number, expanded: boolean, paint: Paint): string[] {
+		if (this.runtime.config.style === "grok") return this.drawGrok(rows, width, expanded, paint);
 		if (this.runtime.config.style === "codex") return this.drawCodex(rows, width, expanded, paint);
 		// Ctrl+O replaces the summary with individual calls, as Claude's transcript
 		// does. A locally clicked group retains its header as a collapse target.
@@ -477,5 +554,67 @@ export class ToolGroupController {
 		});
 		lines.push(fit(theme.fg("dim", codexDisclosure(width, false))));
 		return lines;
+	}
+
+	private drawGrok(rows: readonly ToolRowLike[], width: number, expanded: boolean, paint: Paint): string[] {
+		const pal = grokPalette(paint.theme);
+		const fit = (line: string) => truncateToWidth(line, Math.max(1, width), "…");
+		const running = lastRunning(rows, this.canRun);
+		const statuses = rows.map((row) => memberStatus(row, this.canRun));
+
+		for (const [idx, row] of rows.entries()) {
+			if (statuses[idx] === "running") {
+				this.runtime.syncIndicator(row.toolCallId, true, () => row.invalidate());
+			} else {
+				this.runtime.syncIndicator(row.toolCallId, false, () => {});
+			}
+		}
+
+		const status: RowStatus = running
+			? "running"
+			: statuses.includes("error")
+				? "error"
+				: statuses.includes("pending")
+					? "pending"
+					: "success";
+
+		const summary = formatGrokExploredSummary(rows, this.canRun);
+		const diamond = pal.diamond(status, expanded);
+		const styledSummary = pal.title(summary, status, expanded);
+
+		let meta = "";
+		if (running) {
+			const started = this.runtime.timing(running.toolCallId)?.startedAt;
+			const elapsed = started !== undefined ? Date.now() - started : 0;
+			const dur = elapsed >= 1000 ? formatGrokDuration(elapsed) : undefined;
+			if (dur) meta = ` ${pal.dim(`(${dur})`)}`;
+		} else {
+			const failedCount = statuses.filter((s) => s === "error").length;
+			let totalMs = 0;
+			let hasDuration = false;
+			for (const row of rows) {
+				const explicitMs = row.result?.durationMs;
+				const timing = this.runtime.timing(row.toolCallId);
+				const rowMs =
+					typeof explicitMs === "number" && Number.isFinite(explicitMs) && explicitMs >= 0
+						? explicitMs
+						: timing?.durationMs !== undefined
+							? timing.durationMs
+							: timing?.startedAt !== undefined && timing?.endedAt !== undefined
+								? timing.endedAt - timing.startedAt
+								: undefined;
+				if (rowMs !== undefined) {
+					totalMs += rowMs;
+					hasDuration = true;
+				}
+			}
+			const parts: string[] = [];
+			if (failedCount > 0) parts.push(`${failedCount} failed`);
+			const dur = hasDuration ? formatGrokDuration(totalMs) : undefined;
+			if (dur) parts.push(dur);
+			if (parts.length > 0) meta = ` ${pal.dim(`(${parts.join(" · ")})`)}`;
+		}
+
+		return ["", fit(` ${diamond} ${styledSummary}${meta}`)];
 	}
 }
