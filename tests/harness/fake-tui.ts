@@ -183,6 +183,12 @@ export class FakeTui extends BaseAltScreen {
 		return this.getScreenLines();
 	}
 
+	renderViewFrame(): string[] {
+		(this as any).altScreenActive = true;
+		(this as any).doRender();
+		return this.getScreenLines();
+	}
+
 	asTui(): TUI {
 		return this as unknown as TUI;
 	}

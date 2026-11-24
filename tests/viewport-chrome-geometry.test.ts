@@ -7,6 +7,7 @@ import {
 import {
 	computeStickyPushOffset,
 	computeTranscriptContentWidth,
+	cropKittyLineBelowSticky,
 	stripInlineImageSequences,
 } from "../src/shared/fullscreen-layout.ts";
 import { selectStickyTurn, type IndexedTurn } from "../src/shared/turn-index.ts";
@@ -109,6 +110,11 @@ describe("Viewport chrome pure geometry and push-offset math", () => {
 
 		const itermLine = "left \x1b[3A\x1b]1337;File=inline=1;width=40:AAAA\x07 right";
 		expect(stripInlineImageSequences(itermLine)).toBe("left  right");
+
+		const multiRowKitty = "\x1b_Ga=T,f=100,i=12,c=40,y=18,h=90,r=5;AAAA\x1b\\";
+		const cropped = cropKittyLineBelowSticky(multiRowKitty, 2, 10);
+		expect(cropped).toBe("\x1b_Ga=T,f=100,i=12,c=40,y=54,h=54,r=3;AAAA\x1b\\");
+		expect(cropKittyLineBelowSticky(multiRowKitty, 5, 10)).toBeUndefined();
 	});
 
 	it("centers Outline Rail ticks and arrows directly inside constant viewport height and wraps multi-line preview text cleanly", () => {

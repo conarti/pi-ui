@@ -190,9 +190,9 @@ function installViewportChromeHooks(): void {
 			compositor.applyingSelection = isPrimaryScrollSelection;
 			try {
 				const postSelection = original.apply(self, args) as string[];
-				if (postSelection === preSelection || isPrimaryScrollSelection) return postSelection;
+				if (postSelection === preSelection) return postSelection;
 				const width = Math.max(1, Number(self.terminal?.columns ?? 80));
-				return compositor.maskSelection(preSelection, postSelection, width);
+				return compositor.maskSelection(self, preSelection, postSelection, width, isPrimaryScrollSelection);
 			} finally {
 				compositor.applyingSelection = false;
 			}

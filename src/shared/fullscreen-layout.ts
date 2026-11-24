@@ -1,7 +1,9 @@
 import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import {
 	compositeTuiLine,
+	getPngDimensions,
 	sliceByColumn,
+	stripTerminalSequences,
 	type Component,
 	type ScrollView,
 	type TUI,
@@ -136,6 +138,68 @@ export function stripInlineImageSequences(line: string): string {
 	return line.replace(KITTY_IMAGE_SEQ_RE, "").replace(ITERM2_IMAGE_SEQ_RE, "");
 }
 
+/* Подрезает верхние перекрытые строки многострочного Kitty-изображения и возвращает остаток для строки сразу под Sticky Prompt */
+export function cropKittyLineBelowSticky(
+	line: string,
+	coveredRows: number,
+	maxVisibleRows: number,
+): string | undefined {
+	if (coveredRows <= 0 || maxVisibleRows <= 0 || !line.includes("\x1b_G")) {
+		return undefined;
+	}
+	const match = /\x1b_G([^;]*);/.exec(line);
+	if (!match) return undefined;
+
+	const controlsRaw = match[1] ?? "";
+	const rowsMatch = /(?:^|,)r=(\d+)(?:,|$)/.exec(controlsRaw);
+	const currentRows = rowsMatch ? Number.parseInt(rowsMatch[1]!, 10) : 0;
+	if (currentRows <= coveredRows) {
+		return undefined;
+	}
+
+	const uncoveredRows = Math.min(maxVisibleRows, currentRows - coveredRows);
+	if (uncoveredRows <= 0) {
+		return undefined;
+	}
+
+	const yMatch = /(?:^|,)y=(\d+)(?:,|$)/.exec(controlsRaw);
+	const hMatch = /(?:^|,)h=(\d+)(?:,|$)/.exec(controlsRaw);
+	let curY = yMatch ? Number.parseInt(yMatch[1]!, 10) : 0;
+	let curH = hMatch ? Number.parseInt(hMatch[1]!, 10) : undefined;
+
+	if (curH === undefined) {
+		const payloadStart = match.index + match[0].length;
+		const payloadEnd = line.indexOf("\x1b\\", payloadStart);
+		if (payloadEnd > payloadStart) {
+			const headerSlice = line.slice(payloadStart, Math.min(payloadEnd, payloadStart + 64));
+			const dims = getPngDimensions(headerSlice);
+			if (dims && dims.heightPx > 0) {
+				curY = 0;
+				curH = dims.heightPx;
+			}
+		}
+	}
+
+	const controls = controlsRaw.split(",").filter((c) => c.length > 0 && !/^[yhr]=/.test(c));
+	if (curH !== undefined && curH > 0) {
+		const nextY = curY + Math.floor((curH * coveredRows) / currentRows);
+		const nextEnd = curY + Math.ceil((curH * (coveredRows + uncoveredRows)) / currentRows);
+		const nextH = Math.max(1, Math.min(curY + curH, nextEnd) - nextY);
+		controls.push(`y=${nextY}`, `h=${nextH}`);
+	}
+	controls.push(`r=${uncoveredRows}`);
+
+	return `${line.slice(0, match.index)}\x1b_G${controls.join(",")};${line.slice(match.index + match[0].length)}`;
+}
+
+function stripItermUpwardBleed(line: string, rowOffsetFromStickyBottom: number): string {
+	const itermIdx = line.indexOf("\x1b]1337;File=");
+	if (itermIdx === -1) return line;
+	const moveUpMatch = /\x1b\[(\d+)A$/.exec(line.slice(0, itermIdx));
+	const moveUpRows = moveUpMatch ? Number.parseInt(moveUpMatch[1]!, 10) : 0;
+	return moveUpRows > rowOffsetFromStickyBottom ? stripInlineImageSequences(line) : line;
+}
+
 export function findScrollViewLayoutBox(
 	box: LayoutBoxNode | undefined,
 	scroll: ScrollView,
@@ -268,30 +332,48 @@ export class ViewportChromeCompositor {
 				boxRect.width >= RAIL_PLUS_SCROLLBAR_MARGIN + 1,
 		);
 
+		const stickyLayoutWidth = computeTranscriptContentWidth(
+			boxRect.width,
+			railVisible,
+			this.origGetContentWidth,
+		);
 		const stickyWidth = railVisible
-			? Math.max(1, boxRect.width - RAIL_PLUS_SCROLLBAR_MARGIN)
+			? stickyLayoutWidth
 			: this.scroll.isScrollbarVisible || this.scroll.scrollbar === "always"
 				? Math.max(1, boxRect.width - 1)
-				: boxRect.width;
+				: stickyLayoutWidth;
 
 		let result: string[] | undefined;
 		let stickyRect: CompositedFrameGeometry["stickyRect"];
 
 		if (this.slots.topSlot) {
 			const stickyRender: StickyOverlayRender = this.slots.topSlot.renderStickyOverlay
-				? this.slots.topSlot.renderStickyOverlay(stickyWidth, boxRect.width)
+				? this.slots.topSlot.renderStickyOverlay(stickyLayoutWidth, boxRect.width)
 				: (() => {
-						const raw = this.slots.topSlot!.render(stickyWidth);
+						const raw = this.slots.topSlot!.render(stickyLayoutWidth);
 						return { lines: raw, visibleLines: raw, fullHeight: raw.length, pushOffset: 0 };
 					})();
 
 			const visibleCount = Math.min(stickyRender.visibleLines.length, boxRect.height);
 			if (visibleCount > 0) {
 				result = [...screen];
+				const boxBottom = Math.min(result.length, boxRect.y + boxRect.height);
+				const stickyBottom = boxRect.y + visibleCount;
+				let relocatedKittyLine: string | undefined;
+
 				for (let i = 0; i < visibleCount; i++) {
 					const row = boxRect.y + i;
 					if (row < 0 || row >= result.length) continue;
-					const sanitized = stripInlineImageSequences(result[row] ?? "");
+					const origRow = result[row] ?? "";
+					if (stickyBottom < boxBottom && origRow.includes("\x1b_G")) {
+						const cropped = cropKittyLineBelowSticky(
+							origRow,
+							stickyBottom - row,
+							boxBottom - stickyBottom,
+						);
+						if (cropped) relocatedKittyLine = cropped;
+					}
+					const sanitized = stripInlineImageSequences(origRow);
 					result[row] = compositeTuiLine(
 						sanitized,
 						stickyRender.visibleLines[i]!,
@@ -299,6 +381,24 @@ export class ViewportChromeCompositor {
 						stickyWidth,
 						totalWidth,
 					);
+				}
+
+				if (relocatedKittyLine && stickyBottom >= 0 && stickyBottom < boxBottom) {
+					const targetLine = result[stickyBottom] ?? "";
+					if (
+						!targetLine.includes("\x1b_G") &&
+						!targetLine.includes("\x1b]1337;File=") &&
+						stripTerminalSequences(sliceByColumn(targetLine, boxRect.x, stickyWidth, true)).trim() === ""
+					) {
+						result[stickyBottom] = relocatedKittyLine;
+					}
+				}
+
+				for (let row = stickyBottom; row < boxBottom; row++) {
+					const line = result[row];
+					if (line && line.includes("\x1b]1337;File=")) {
+						result[row] = stripItermUpwardBleed(line, row - stickyBottom);
+					}
 				}
 				stickyRect = {
 					x: boxRect.x,
@@ -401,11 +501,13 @@ export class ViewportChromeCompositor {
 		return false;
 	}
 
-	/* Восстанавливает ячейки Sticky Prompt, Outline Rail и скроллбара при экранном выделении вне primary ScrollView */
+	/* Восстанавливает ячейки оверлеев, Sticky Prompt, Outline Rail и скроллбара поверх выделения транскрипта */
 	maskSelection(
+		self: any,
 		preSelection: string[],
 		postSelection: string[],
 		totalWidth: number,
+		isPrimaryScrollSelection = false,
 	): string[] {
 		if (
 			this.disposed ||
@@ -413,6 +515,44 @@ export class ViewportChromeCompositor {
 			!this.lastGeometry
 		) {
 			return postSelection;
+		}
+
+		const overlayLayouts: ReadonlyArray<{
+			row: number;
+			col: number;
+			width: number;
+			height: number;
+		}> = Array.isArray(self?.renderedOverlayLayouts) ? self.renderedOverlayLayouts : [];
+
+		if (isPrimaryScrollSelection) {
+			if (overlayLayouts.length === 0) return postSelection;
+			let out: string[] | undefined;
+			for (let row = 0; row < postSelection.length; row++) {
+				const preLine = preSelection[row];
+				const postLine = postSelection[row];
+				if (preLine === undefined || postLine === undefined || preLine === postLine) continue;
+				let line = postLine;
+				let patched = false;
+				for (const ov of overlayLayouts) {
+					if (!ov || ov.width <= 0 || row < ov.row || row >= ov.row + ov.height) continue;
+					const col = Math.max(0, ov.col);
+					const span = Math.min(ov.width, totalWidth - col);
+					if (span <= 0) continue;
+					line = compositeTuiLine(
+						line,
+						sliceByColumn(preLine, col, span, true),
+						col,
+						span,
+						totalWidth,
+					);
+					patched = true;
+				}
+				if (patched) {
+					if (!out) out = [...postSelection];
+					out[row] = line;
+				}
+			}
+			return out ?? postSelection;
 		}
 
 		const { boxRect, scrollbarCol, stickyRect, railRect } = this.lastGeometry;
@@ -498,10 +638,11 @@ export class ViewportChromeCompositor {
 				: "press";
 
 		if (this.activePress) {
-			if (type === "drag" || type === "move") {
+			if (type === "move") {
+				this.activePress = undefined;
+			} else if (type === "drag") {
 				return true;
-			}
-			if (type === "release") {
+			} else if (type === "release") {
 				const press = this.activePress;
 				this.activePress = undefined;
 				const { railRect, stickyRect } = this.lastGeometry;
@@ -554,15 +695,21 @@ export class ViewportChromeCompositor {
 			}
 		}
 
-		if (
-			raw.x === this.lastGeometry.scrollbarCol ||
-			isCoveredByRenderedOverlay(self, raw.x, raw.y) ||
-			isCoveredByScrollToEndIndicator(self, raw.x, raw.y)
-		) {
+		if (isCoveredByRenderedOverlay(self, raw.x, raw.y)) {
 			return false;
 		}
 
 		const { railRect, stickyRect } = this.lastGeometry;
+		const onScrollbar =
+			raw.x === this.lastGeometry.scrollbarCol &&
+			Boolean(self.getScrollbarTargetAt?.(raw.x, raw.y, true));
+		if (onScrollbar) {
+			if (type === "move") {
+				self.updateScrollbarHover?.(raw.x, raw.y);
+				return true;
+			}
+			return false;
+		}
 
 		if (
 			railRect &&
@@ -608,6 +755,10 @@ export class ViewportChromeCompositor {
 				return true;
 			}
 			return true;
+		}
+
+		if (isCoveredByScrollToEndIndicator(self, raw.x, raw.y)) {
+			return false;
 		}
 
 		if (

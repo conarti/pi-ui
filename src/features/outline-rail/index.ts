@@ -44,7 +44,7 @@ export function createOutlineRailSlot(
 		visible: () => popupVisible && !(shell.tui as any).getTopmostVisibleOverlay?.(),
 	};
 
-	const hidePopup = () => {
+	const hidePopup = (fromRender = false) => {
 		if (!popupVisible && !popupHandle) return;
 		popupVisible = false;
 		if (popupHandle) {
@@ -55,13 +55,20 @@ export function createOutlineRailSlot(
 			}
 			popupHandle = undefined;
 		}
-		shell.requestRender();
+		if (!fromRender) {
+			shell.requestRender();
+		}
 	};
 
-	const updatePopup = (hit: RailHit | undefined, turn: IndexedTurn | undefined, screenY: number) => {
+	const updatePopup = (
+		hit: RailHit | undefined,
+		turn: IndexedTurn | undefined,
+		screenY: number,
+		fromRender = false,
+	) => {
 		const geo = rail.geometry;
-		if (!hit || !turn || !geo) {
-			hidePopup();
+		if (!hit || !turn || !geo || (shell.tui as any).getTopmostVisibleOverlay?.()) {
+			hidePopup(fromRender);
 			return;
 		}
 		const termCols = shell.tui.terminal?.columns ?? 80;
@@ -89,7 +96,7 @@ export function createOutlineRailSlot(
 		popupVisible = true;
 		if (!popupHandle) {
 			popupHandle = shell.tui.showOverlay(popup, popupOptions);
-		} else {
+		} else if (!fromRender) {
 			shell.requestRender();
 		}
 	};

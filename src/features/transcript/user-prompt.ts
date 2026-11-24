@@ -18,6 +18,9 @@ const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 
 const PILL_FORMATTER_KEY = Symbol.for("conarti.pi-ui.prompt-pill-formatter.v1");
 const PENDING_USER_TS_KEY = Symbol.for("conarti.pi-ui.pending-user-ts.v1");
+const COPY_TIMERS_KEY = Symbol.for("conarti.pi-ui.user-prompt-copy-timers.v1");
+const PILL_OSC8_OPEN_PREFIX = "\x1b]8;;conarti-pill:";
+const PILL_OSC8_CLOSE = "\x1b]8;;\x07";
 
 export interface PromptPillDescriptor {
 	readonly id: string;
@@ -106,9 +109,34 @@ export function recordPendingUserMessageTimestamp(timestamp: number | string | u
 	g[PENDING_USER_TS_KEY] = { value: timestamp };
 }
 
+interface ActiveCopyTimer {
+	timer: ReturnType<typeof setTimeout>;
+	target: any;
+}
+
+function getCopyTimers(): Set<ActiveCopyTimer> {
+	const g = globalThis as Record<symbol, Set<ActiveCopyTimer> | undefined>;
+	if (!g[COPY_TIMERS_KEY]) {
+		g[COPY_TIMERS_KEY] = new Set();
+	}
+	return g[COPY_TIMERS_KEY]!;
+}
+
 export function clearPendingUserMessageTimestamps(): void {
 	const g = globalThis as Record<symbol, { value?: number | string } | undefined>;
 	g[PENDING_USER_TS_KEY] = undefined;
+}
+
+export function clearUserPromptCopyTimers(): void {
+	const timers = getCopyTimers();
+	for (const entry of timers) {
+		clearTimeout(entry.timer);
+		if (entry.target) {
+			entry.target.__conartiCopied = false;
+			entry.target.__conartiCopyTimer = undefined;
+		}
+	}
+	timers.clear();
 }
 
 function consumePendingUserMessageTimestamp(): number | string | undefined {
@@ -154,10 +182,148 @@ function resolveFallbackTimestampFromBranch(self: any): number | string | undefi
 	if (cardIdx === -1) return undefined;
 
 	const tailOffset = Math.max(0, userEntries.length - mountedCards.length);
-	const userOffset = Math.max(0, mountedCards.length - userEntries.length);
-	const entryIdx = cardIdx + tailOffset - userOffset;
+	const entryIdx = cardIdx + tailOffset;
 	const matched = entryIdx >= 0 && entryIdx < userEntries.length ? userEntries[entryIdx] : undefined;
 	return matched?.message?.timestamp ?? matched?.timestamp;
+}
+
+/* Оборачивает стилизованные пилюли во временные OSC 8 маркеры до переноса строк, чтобы не путать их с обычным текстом */
+function tagFormattedPillsWithOsc8(
+	text: string,
+	pills: readonly PromptPillDescriptor[],
+): string {
+	if (pills.length === 0) return text;
+	let result = text;
+	let searchPos = 0;
+
+	for (let idx = 0; idx < pills.length; idx++) {
+		const label = pills[idx]!.label;
+		if (!label) continue;
+
+		let chosenStart = -1;
+		let chosenEnd = -1;
+		let fallbackIdx = -1;
+		let cursor = searchPos;
+
+		while (cursor <= result.length - label.length) {
+			const found = result.indexOf(label, cursor);
+			if (found === -1) break;
+			if (fallbackIdx === -1) fallbackIdx = found;
+
+			const beforeSlice = result.slice(searchPos, found);
+			const leadingMatch = /((?:\x1b\[[0-9;]*m)+ ?)$/.exec(beforeSlice);
+			if (leadingMatch) {
+				const afterSlice = result.slice(found + label.length);
+				const trailingMatch = /^( ?(?:\x1b\[[0-9;]*m)+)/.exec(afterSlice);
+				chosenStart = found - leadingMatch[1]!.length;
+				chosenEnd = found + label.length + (trailingMatch ? trailingMatch[1]!.length : 0);
+				break;
+			}
+			cursor = found + label.length;
+		}
+
+		if (chosenStart === -1 && fallbackIdx !== -1) {
+			chosenStart = fallbackIdx;
+			chosenEnd = fallbackIdx + label.length;
+		}
+		if (chosenStart === -1) continue;
+
+		const openSeq = `${PILL_OSC8_OPEN_PREFIX}${idx}\x07`;
+		result =
+			result.slice(0, chosenStart) +
+			openSeq +
+			result.slice(chosenStart, chosenEnd) +
+			PILL_OSC8_CLOSE +
+			result.slice(chosenEnd);
+		searchPos = chosenEnd + openSeq.length + PILL_OSC8_CLOSE.length;
+	}
+
+	return result;
+}
+
+function extractAndStripPillHits(
+	rowBody: string,
+	rowY: number,
+	prefixWidth: number,
+	pills: readonly PromptPillDescriptor[],
+): { cleanedRow: string; hits: PromptPillHitTarget[] } {
+	if (pills.length === 0 || !rowBody.includes(PILL_OSC8_OPEN_PREFIX)) {
+		return { cleanedRow: rowBody, hits: [] };
+	}
+
+	const hits: PromptPillHitTarget[] = [];
+	let cleanedRow = "";
+	let col = 0;
+	let activePill: { idx: number; startCol: number } | undefined;
+	let i = 0;
+
+	while (i < rowBody.length) {
+		const escAt = rowBody.indexOf("\x1b", i);
+		if (escAt === -1) {
+			const tail = rowBody.slice(i);
+			cleanedRow += tail;
+			col += visibleWidth(tail);
+			break;
+		}
+		if (escAt > i) {
+			const chunk = rowBody.slice(i, escAt);
+			cleanedRow += chunk;
+			col += visibleWidth(chunk);
+			i = escAt;
+		}
+
+		const pillOpen = /^\x1b\]8;;conarti-pill:(\d+)(?:\x07|\x1b\\)/.exec(rowBody.slice(i));
+		if (pillOpen) {
+			activePill = { idx: Number.parseInt(pillOpen[1]!, 10), startCol: col };
+			i += pillOpen[0].length;
+			continue;
+		}
+
+		const pillClose = /^\x1b\]8;;(?:\x07|\x1b\\)/.exec(rowBody.slice(i));
+		if (pillClose && activePill !== undefined) {
+			const desc = pills[activePill.idx];
+			if (desc && col > activePill.startCol) {
+				hits.push({
+					id: desc.id,
+					y: rowY,
+					xStart: prefixWidth + activePill.startCol,
+					xEnd: prefixWidth + col,
+					onClick: desc.onClick,
+				});
+			}
+			activePill = undefined;
+			i += pillClose[0].length;
+			continue;
+		}
+
+		const anyEsc = /^\x1b(?:\[[0-9;?]*[A-Za-z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|_[^\x07\x1b]*(?:\x07|\x1b\\))/.exec(
+			rowBody.slice(i),
+		);
+		if (anyEsc) {
+			cleanedRow += anyEsc[0];
+			i += anyEsc[0].length;
+			continue;
+		}
+
+		cleanedRow += rowBody[i]!;
+		col += 1;
+		i += 1;
+	}
+
+	if (activePill !== undefined) {
+		const desc = pills[activePill.idx];
+		if (desc && col > activePill.startCol) {
+			hits.push({
+				id: desc.id,
+				y: rowY,
+				xStart: prefixWidth + activePill.startCol,
+				xEnd: prefixWidth + col,
+				onClick: desc.onClick,
+			});
+		}
+	}
+
+	return { cleanedRow, hits };
 }
 
 /* Восстанавливает основной цвет текста после встроенных ANSI-пилюль, не затирая их собственный fg */
@@ -234,8 +400,9 @@ export function renderUserPromptCardLines(
 	const timeGutterWidth = width >= 32 ? 9 : width >= 22 ? 7 : 0;
 	const textAvail = Math.max(4, width - prefixWidth - timeGutterWidth);
 
+	const taggedText = tagFormattedPillsWithOsc8(formattedText, pillDescriptors);
 	const wrappedRows: string[] = [];
-	for (const logical of formattedText.split("\n")) {
+	for (const logical of taggedText.split("\n")) {
 		const chunks = wrapTextWithAnsi(logical, textAvail);
 		for (const chunk of chunks.length > 0 ? chunks : [""]) {
 			wrappedRows.push(chunk);
@@ -288,33 +455,19 @@ export function renderUserPromptCardLines(
 	}
 
 	const pillHits: PromptPillHitTarget[] = [];
-	let nextPillIdx = 0;
 
 	for (let i = 0; i < visibleRows.length; i++) {
 		const prefix = i === 0 ? firstPrefix : nextPrefix;
-		const rowBody = visibleRows[i]!;
-		const styledBody = styleBodyPreservingPills(rowBody, bodyRgb);
-
-		if (nextPillIdx < pillDescriptors.length) {
-			const plainLine = stripTerminalSequences(rowBody);
-			let searchFrom = 0;
-			while (nextPillIdx < pillDescriptors.length) {
-				const descriptor = pillDescriptors[nextPillIdx]!;
-				const foundAt = plainLine.indexOf(descriptor.label, searchFrom);
-				if (foundAt === -1) break;
-				const xStart = prefixWidth + visibleWidth(plainLine.slice(0, foundAt));
-				const xEnd = xStart + visibleWidth(descriptor.label);
-				pillHits.push({
-					id: descriptor.id,
-					y: i + 1,
-					xStart,
-					xEnd,
-					onClick: descriptor.onClick,
-				});
-				searchFrom = foundAt + descriptor.label.length;
-				nextPillIdx++;
-			}
+		const { cleanedRow, hits } = extractAndStripPillHits(
+			visibleRows[i]!,
+			i + 1,
+			prefixWidth,
+			pillDescriptors,
+		);
+		if (hits.length > 0) {
+			pillHits.push(...hits);
 		}
+		const styledBody = styleBodyPreservingPills(cleanedRow, bodyRgb);
 
 		const timeStr = i === 0 && options.formattedTime && timeGutterWidth > 0 ? options.formattedTime : "";
 		const rightStyled = timeStr ? `${fgRgb(dimRgb, timeStr)}${rightPad}` : "";
@@ -432,13 +585,28 @@ export function installUserPromptCards(): void {
 
 			if (event.type === "click" && event.button === "left") {
 				if (matchedCopy) {
-					copyToClipboard(String(self.text ?? "").trim());
+					copyToClipboard(sanitizeTurnText(String(self.text ?? "")).trim());
 					self.__conartiCopied = true;
+					const timers = getCopyTimers();
+					if (self.__conartiCopyTimer) {
+						clearTimeout(self.__conartiCopyTimer.timer);
+						timers.delete(self.__conartiCopyTimer);
+					}
 					requestRender();
-					setTimeout(() => {
-						self.__conartiCopied = false;
-						requestRender();
-					}, 1300).unref?.();
+					const entry: ActiveCopyTimer = {
+						target: self,
+						timer: setTimeout(() => {
+							timers.delete(entry);
+							if (self.__conartiCopyTimer === entry) {
+								self.__conartiCopyTimer = undefined;
+							}
+							self.__conartiCopied = false;
+							requestRender();
+						}, 1300),
+					};
+					entry.timer.unref?.();
+					self.__conartiCopyTimer = entry;
+					timers.add(entry);
 					return { handled: true, render: true };
 				}
 				if (matchedPill) {

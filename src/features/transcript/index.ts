@@ -8,6 +8,7 @@ import {
 } from "./thinking-block.ts";
 import {
 	clearPendingUserMessageTimestamps,
+	clearUserPromptCopyTimers,
 	installUserPromptCards,
 	recordPendingUserMessageTimestamp,
 } from "./user-prompt.ts";
@@ -20,6 +21,12 @@ export function registerTranscriptFeature(pi: ExtensionAPI): void {
 	pi.on("message_start", async (event: any) => {
 		if (event?.message?.role === "user") {
 			recordPendingUserMessageTimestamp(event.message.timestamp ?? Date.now());
+		}
+	});
+
+	pi.on("message_end", async (event: any) => {
+		if (event?.message?.role === "user") {
+			clearPendingUserMessageTimestamps();
 		}
 	});
 
@@ -38,6 +45,7 @@ export function registerTranscriptFeature(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", async () => {
 		stopThinkingWave();
 		clearPendingUserMessageTimestamps();
+		clearUserPromptCopyTimers();
 		clearHoverExcept(undefined);
 	});
 }

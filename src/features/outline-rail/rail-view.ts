@@ -201,6 +201,8 @@ export class OutlineRailComponent implements Component {
 	geometry?: RailGeometry;
 	hovered?: RailHit;
 
+	private lastPointer?: { x: number; y: number; screenY: number };
+	private lastHoverTurnId?: string;
 	private lastRenderedHeight = -1;
 	private syncScheduled = false;
 
@@ -210,7 +212,12 @@ export class OutlineRailComponent implements Component {
 		private readonly getTheme: () => Theme,
 		private readonly turnIndex: TranscriptTurnIndex,
 		private readonly isEnabled: () => boolean,
-		private readonly onHoverChange: (hit: RailHit | undefined, turn: IndexedTurn | undefined, screenY: number) => void,
+		private readonly onHoverChange: (
+			hit: RailHit | undefined,
+			turn: IndexedTurn | undefined,
+			screenY: number,
+			fromRender?: boolean,
+		) => void,
 		private readonly onSelectTurn: (
 			turn: IndexedTurn,
 			turnIndex: number,
@@ -227,11 +234,26 @@ export class OutlineRailComponent implements Component {
 		return this.turnIndex.getTurnCount() >= MIN_TURNS_FOR_RAIL;
 	};
 
-	clearHover(): void {
-		if (this.hovered) {
-			this.hovered = undefined;
-			this.onHoverChange(undefined, undefined, 0);
+	clearHover(fromRender = false): void {
+		const hadState = Boolean(this.hovered || this.lastPointer || this.lastHoverTurnId);
+		this.hovered = undefined;
+		this.lastPointer = undefined;
+		this.lastHoverTurnId = undefined;
+		if (hadState) {
+			this.onHoverChange(undefined, undefined, 0, fromRender);
 		}
+	}
+
+	private resolveTurnForHit(
+		geo: RailGeometry | undefined,
+		hit: RailHit | undefined,
+		turns: readonly IndexedTurn[],
+	): IndexedTurn | undefined {
+		if (!geo || !hit) return undefined;
+		if (hit.kind === "tick") return turns[hit.turn];
+		if (hit.kind === "up" && geo.upTarget !== undefined) return turns[geo.upTarget];
+		if (hit.kind === "down" && geo.downTarget !== undefined) return turns[geo.downTarget];
+		return undefined;
 	}
 
 	offsetOf(turnIndex: number): number {
@@ -244,24 +266,30 @@ export class OutlineRailComponent implements Component {
 			return { handled: true, render: true };
 		}
 
+		if ((this.tui as any).getTopmostVisibleOverlay?.()) {
+			this.clearHover();
+			return undefined;
+		}
+
 		const hit = this.geometry ? hitTestRail(this.geometry, e.x, e.y) : undefined;
 
 		if (e.type === "move") {
 			claimHover(this, () => {
-				if (this.hovered) {
+				if (this.hovered || this.lastPointer) {
 					this.clearHover();
 					this.tui.requestRender();
 				}
 			});
-			if (hitKey(hit) === hitKey(this.hovered)) return undefined;
-			this.hovered = hit;
+			this.lastPointer = { x: e.x, y: e.y, screenY: e.screenY };
 			const turns = this.turnIndex.getTurns();
-			let turn: IndexedTurn | undefined;
-			if (hit?.kind === "tick") turn = turns[hit.turn];
-			else if (hit?.kind === "up" && this.geometry?.upTarget !== undefined) turn = turns[this.geometry.upTarget];
-			else if (hit?.kind === "down" && this.geometry?.downTarget !== undefined) turn = turns[this.geometry.downTarget];
-
-			this.onHoverChange(hit, turn, e.screenY);
+			const turn = this.resolveTurnForHit(this.geometry, hit, turns);
+			const nextTurnId = turn?.id;
+			if (hitKey(hit) === hitKey(this.hovered) && nextTurnId === this.lastHoverTurnId) {
+				return undefined;
+			}
+			this.hovered = hit;
+			this.lastHoverTurnId = nextTurnId;
+			this.onHoverChange(hit, turn, e.screenY, false);
 			return { handled: true, render: true };
 		}
 
@@ -300,7 +328,7 @@ export class OutlineRailComponent implements Component {
 
 		if (!this.isEnabled() || turns.length < MIN_TURNS_FOR_RAIL || height < 3) {
 			this.geometry = undefined;
-			this.clearHover();
+			this.clearHover(true);
 			return [];
 		}
 
@@ -321,7 +349,21 @@ export class OutlineRailComponent implements Component {
 		);
 		const geo = computeOutlineGeometry(height, turns.length, vp);
 		this.geometry = geo;
-		if (!geo) return lines;
+		if (!geo) {
+			this.clearHover(true);
+			return lines;
+		}
+
+		if (this.lastPointer && !(this.tui as any).getTopmostVisibleOverlay?.()) {
+			const syncedHit = hitTestRail(geo, this.lastPointer.x, this.lastPointer.y);
+			const syncedTurn = this.resolveTurnForHit(geo, syncedHit, turns);
+			const syncedTurnId = syncedTurn?.id;
+			if (hitKey(syncedHit) !== hitKey(this.hovered) || syncedTurnId !== this.lastHoverTurnId) {
+				this.hovered = syncedHit;
+				this.lastHoverTurnId = syncedTurnId;
+				this.onHoverChange(syncedHit, syncedTurn, this.lastPointer.screenY, true);
+			}
+		}
 
 		const paint = (y: number, glyph: string, tone: "dim" | "muted" | "primary") => {
 			if (y < 0 || y >= height) return;

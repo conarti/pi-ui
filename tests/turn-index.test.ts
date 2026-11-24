@@ -323,13 +323,19 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 		expect(resp1RenderSpy).toHaveBeenCalledTimes(3);
 
 		const t3 = new Date(2026, 0, 15, 11, 10).getTime();
-		const nextBranch = [...branch, makeUserEntry("u3", "Third turn", t3)];
+		/* Во время live message_start карточка новой реплики уже смонтирована в chatContainer до записи в sessionManager.getBranch() */
+		const liveTurn3Card = new UserMessageComponent("Third turn live", undefined, 1, [], "u3", new Date(t3).toISOString());
+		harness.tui.chatContainer.addChild(liveTurn3Card);
+		harness.tui.scroll.updateLayout(initialHeight + 18, 12, () => harness!.tui.requestRender());
+		harness.tui.scroll.scrollTo(40, { disableFollow: true });
+		expect(stripTerminalSequences(stickyBar.render(97).join("\n"))).toContain("Third turn live");
+
+		const nextBranch = [...branch, makeUserEntry("u3", "Third turn live", t3)];
 		harness.setEntries(nextBranch, nextBranch);
-		harness.tui.chatContainer.addChild(new UserMessageComponent("Third turn"));
 		stickyBar.render(97);
 		outlineRail.render(2);
-		expect(turn1RenderSpy).toHaveBeenCalledTimes(4);
-		expect(resp1RenderSpy).toHaveBeenCalledTimes(4);
+		expect(turn1RenderSpy).toHaveBeenCalledTimes(5);
+		expect(resp1RenderSpy).toHaveBeenCalledTimes(5);
 	});
 
 	it("disables follow-end when jumping to an earlier Turn and restores follow-end when navigating forward to the final Turn via Sticky Prompt or Outline Rail", async () => {

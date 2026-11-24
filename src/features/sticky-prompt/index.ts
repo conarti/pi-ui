@@ -223,11 +223,14 @@ export class StickyPromptBar implements Component {
 		}
 
 		const isExpanded = this.expanded.has(this.active.id);
-		const viewportLimit =
-			scroll.viewportHeight && scroll.viewportHeight > 4
-				? Math.max(COLLAPSED_MAX_CONTENT_LINES, scroll.viewportHeight - 3)
-				: undefined;
-		const maxContentLines = isExpanded ? viewportLimit : COLLAPSED_MAX_CONTENT_LINES;
+		const vpHeight = scroll.viewportHeight ?? 0;
+		const maxContentLines = isExpanded
+			? vpHeight > 0
+				? Math.max(1, vpHeight - 3)
+				: undefined
+			: vpHeight > 0 && vpHeight < COLLAPSED_MAX_CONTENT_LINES + 2
+				? Math.max(1, vpHeight - 2)
+				: COLLAPSED_MAX_CONTENT_LINES;
 
 		const rendered = renderUserPromptCardLines(
 			this.active.prompt,

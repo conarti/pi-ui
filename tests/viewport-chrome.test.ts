@@ -1,9 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { UserMessageComponent } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences, sliceByColumn, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import {
+	renderImage,
+	resetCapabilitiesCache,
+	setCapabilities,
+	sliceByColumn,
+	stripTerminalSequences,
+	visibleWidth,
+	type TuiMouseEvent,
+} from "@earendil-works/pi-tui";
 import conartiPiUi from "../src/index.ts";
 import { OutlinePreviewPopup, OutlineRailComponent } from "../src/features/outline-rail/rail-view.ts";
-import { createOutlineRailSlot } from "../src/features/outline-rail/index.ts";
+import { createOutlineRailSlot, getOutlineSettings } from "../src/features/outline-rail/index.ts";
+import { getStickyConfig } from "../src/features/sticky-prompt/index.ts";
 import { renderPill } from "../src/shared/ansi.ts";
 import { TranscriptTurnIndex } from "../src/shared/turn-index.ts";
 import { registerPromptPillFormatter } from "../src/features/transcript/user-prompt.ts";
@@ -71,6 +80,13 @@ describe("Viewport chrome & refined user prompt cards", () => {
 	let disposePillFormatter: (() => void) | undefined;
 
 	afterEach(async () => {
+		resetCapabilitiesCache();
+		const stickyCfg = getStickyConfig();
+		stickyCfg.enabled = true;
+		stickyCfg.showTimestamp = true;
+		stickyCfg.showNavigation = false;
+		stickyCfg.mode = "auto";
+		getOutlineSettings().enabled = true;
 		disposePillFormatter?.();
 		disposePillFormatter = undefined;
 		vi.restoreAllMocks();
@@ -155,6 +171,24 @@ describe("Viewport chrome & refined user prompt cards", () => {
 			const copiedLines = card.render(56).map(cleanPromptLine);
 			expect(copiedLines[0]).toContain("Copied");
 			expect(copiedLines[1]).toBe(plainIdle[1]);
+
+			/* Таймер сброса ✓ Copied не утекает после завершения сессии */
+			vi.useFakeTimers();
+			(card as unknown as { handleMouse?: (e: TuiMouseEvent) => unknown }).handleMouse?.({
+				type: "click",
+				button: "left",
+				x: copyCol + 1,
+				y: 0,
+				screenX: copyCol + 1,
+				screenY: 0,
+				width: 56,
+				height: 3,
+			} as TuiMouseEvent);
+			expect(vi.getTimerCount()).toBe(1);
+			await harness.shutdownSession();
+			expect(vi.getTimerCount()).toBe(0);
+			vi.useRealTimers();
+			harness = undefined;
 		},
 	);
 
@@ -165,46 +199,94 @@ describe("Viewport chrome & refined user prompt cards", () => {
 
 		const clickedIds: string[] = [];
 		disposePillFormatter = registerPromptPillFormatter((rawText, context) => {
-			const token = "[🖼 Image #1]";
-			if (!rawText.includes(token)) return rawText;
-			const styledPill = renderPill("🖼 Image #1", { theme: context.theme, variant: "neutral" });
-			return {
-				text: rawText.replace(token, styledPill),
-				pills: [
-					{
-						id: "chip-1",
-						label: "🖼 Image #1",
-						onClick: () => clickedIds.push("chip-1"),
-					},
-				],
-			};
+			let text = rawText;
+			const pills = [];
+			if (text.includes("[🖼 Image #1]")) {
+				text = text.replace("[🖼 Image #1]", renderPill("🖼 Image #1", { theme: context.theme, variant: "neutral" }));
+				pills.push({ id: "chip-1", label: "🖼 Image #1", onClick: () => clickedIds.push("chip-1") });
+			}
+			if (text.includes("[📋 Pasted #2 · 8 lines]")) {
+				text = text.replace(
+					"[📋 Pasted #2 · 8 lines]",
+					renderPill("📋 Pasted #2 · 8 lines", { theme: context.theme, variant: "neutral" }),
+				);
+				pills.push({
+					id: "chip-2",
+					label: "📋 Pasted #2 · 8 lines",
+					onClick: () => clickedIds.push("chip-2"),
+				});
+			}
+			return { text, pills };
 		});
 
-		const card = new UserMessageComponent("Check [🖼 Image #1] layout");
+		/* Обычный текст с той же подстрокой "🖼 Image #1" перед реальной пилюлей НЕ перехватывает хитбокс пилюли */
+		const card = new UserMessageComponent("Plain 🖼 Image #1 then [🖼 Image #1] and [📋 Pasted #2 · 8 lines]");
 		harness.tui.chatContainer.addChild(card);
 
-		const lines = card.render(70);
+		const lines = card.render(92);
 		expect(lines.length).toBe(3);
 		const plainRow1 = cleanPromptLine(lines[1]!);
-		expect(plainRow1).toContain("Check");
-		expect(plainRow1).toContain("🖼 Image #1");
-		expect(plainRow1).toContain("layout");
+		const firstPlainCol = plainRow1.indexOf("🖼 Image #1");
+		const secondPillCol = plainRow1.indexOf("🖼 Image #1", firstPlainCol + 11);
+		expect(firstPlainCol).toBeGreaterThan(2);
+		expect(secondPillCol).toBeGreaterThan(firstPlainCol + 10);
 
-		const pillCol = plainRow1.indexOf("🖼 Image #1");
-		expect(pillCol).toBeGreaterThan(2);
-
+		/* Клик по обычному тексту НЕ срабатывает как клик по пилюле */
 		(card as unknown as { handleMouse?: (e: TuiMouseEvent) => unknown }).handleMouse?.({
 			type: "click",
 			button: "left",
-			x: pillCol + 2,
+			x: firstPlainCol + 2,
 			y: 1,
-			screenX: pillCol + 2,
+			screenX: firstPlainCol + 2,
 			screenY: 1,
-			width: 70,
+			width: 92,
 			height: 3,
 		} as TuiMouseEvent);
+		expect(clickedIds).toEqual([]);
 
+		/* Клик по настоящей стилизованной пилюле срабатывает */
+		(card as unknown as { handleMouse?: (e: TuiMouseEvent) => unknown }).handleMouse?.({
+			type: "click",
+			button: "left",
+			x: secondPillCol + 2,
+			y: 1,
+			screenX: secondPillCol + 2,
+			screenY: 1,
+			width: 92,
+			height: 3,
+		} as TuiMouseEvent);
 		expect(clickedIds).toEqual(["chip-1"]);
+
+		/* Даже если первая пилюля перенеслась по словам на узком экране, вторая пилюля ниже остается кликабельной */
+		const narrowCard = new UserMessageComponent("[📋 Pasted #2 · 8 lines]\n[🖼 Image #1]");
+		disposePillFormatter();
+		disposePillFormatter = registerPromptPillFormatter((rawText, context) => ({
+			text: rawText
+				.replace(
+					"[📋 Pasted #2 · 8 lines]",
+					renderPill("📋 Pasted #2 · 8 lines", { theme: context.theme, variant: "neutral" }),
+				)
+				.replace("[🖼 Image #1]", renderPill("🖼 Image #1", { theme: context.theme, variant: "neutral" })),
+			pills: [
+				{ id: "wrapped-1", label: "📋 Pasted #2 · 8 lines", onClick: () => clickedIds.push("wrapped-1") },
+				{ id: "after-wrap-2", label: "🖼 Image #1", onClick: () => clickedIds.push("after-wrap-2") },
+			],
+		}));
+		const narrowLines = narrowCard.render(24).map(cleanPromptLine);
+		const imgRowIdx = narrowLines.findIndex((row) => row.includes("🖼 Image #1"));
+		expect(imgRowIdx).toBeGreaterThan(1);
+		const imgCol = narrowLines[imgRowIdx]!.indexOf("🖼 Image #1");
+		(narrowCard as unknown as { handleMouse?: (e: TuiMouseEvent) => unknown }).handleMouse?.({
+			type: "click",
+			button: "left",
+			x: imgCol + 2,
+			y: imgRowIdx,
+			screenX: imgCol + 2,
+			screenY: imgRowIdx,
+			width: 24,
+			height: narrowLines.length,
+		} as TuiMouseEvent);
+		expect(clickedIds).toEqual(["chip-1", "after-wrap-2"]);
 	});
 
 	it.each(["dark", "light"] as const)(
@@ -537,11 +619,76 @@ describe("Viewport chrome & refined user prompt cards", () => {
 		expect(uncoveredImageFrame.slice(0, 3).some((line) => line.includes("\x1b_G"))).toBe(false);
 
 		/* При scrollTop = 4 строка 5 с Kitty-изображением попадает на экранную строку 1 под Sticky Prompt (0..2):
-		   последовательность изображения очищается, и поверх рендерится Sticky Prompt */
+		   верхние 2 строки изображения перекрыты Sticky Prompt, но нижняя строка (r=1) переносится на экранную строку 3! */
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		const pngHeader = Buffer.alloc(32);
+		pngHeader.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+		pngHeader.writeUInt32BE(13, 8);
+		pngHeader.write("IHDR", 12, "ascii");
+		pngHeader.writeUInt32BE(360, 16);
+		pngHeader.writeUInt32BE(108, 20);
+		const realKitty = renderImage(
+			pngHeader.toString("base64"),
+			{ widthPx: 360, heightPx: 108 },
+			{ maxWidthCells: 40, maxHeightCells: 6, imageId: 191, moveCursor: false },
+		);
+		expect(realKitty).not.toBeNull();
+		expect(realKitty!.rows).toBe(6);
+
+		harness.tui.chatContainer.clear();
+		harness.tui.chatContainer.addChild(
+			new UserMessageComponent("Show chart", undefined, 1, [], "u1", new Date(t1).toISOString()),
+		);
+		harness.tui.chatContainer.addChild({
+			render: () => [
+				"intro-1",
+				"intro-2",
+				realKitty!.sequence,
+				"",
+				"",
+				"",
+				"",
+				"",
+				"\x1b[4A\x1b]1337;File=inline=1;width=30:AAAA\x07",
+				...Array.from({ length: 12 }, (_, idx) => `after-image-${idx + 1}`),
+			],
+			invalidate() {},
+		});
+		harness.tui.chatContainer.addChild(
+			new UserMessageComponent("Follow up", undefined, 1, [], "u2", new Date(t2).toISOString()),
+		);
+		harness.tui.chatContainer.addChild({
+			render: () => Array.from({ length: 10 }, (_, idx) => `tail-${idx + 1}`),
+			invalidate() {},
+		});
+
+		/* На scrollTop = 4 6-строчное изображение (док. 5..10) занимает экранные строки 1..6:
+		   строки 0..2 заняты Sticky Prompt без \x1b_G, а на строке 3 рендерится подрезанный остаток r=4 (строки 3..6)! */
+		harness.tui.renderViewport(100, 14);
 		harness.tui.scroll.scrollTo(4, { disableFollow: true });
-		const coveredImageFrame = harness.tui.renderViewport(100, 14);
-		expect(coveredImageFrame.slice(0, 3).some((line) => line.includes("\x1b_G"))).toBe(false);
-		expect(stripTerminalSequences(coveredImageFrame[1]!)).toContain("› Show chart");
+		const partiallyCoveredAt4 = harness.tui.renderViewport(100, 14);
+		expect(partiallyCoveredAt4.slice(0, 3).some((line) => line.includes("\x1b_G"))).toBe(false);
+		expect(stripTerminalSequences(partiallyCoveredAt4[1]!)).toContain("› Show chart");
+		expect(partiallyCoveredAt4[3]).toContain("\x1b_G");
+		expect(partiallyCoveredAt4[3]).toContain("r=4");
+		expect(partiallyCoveredAt4[3]).toContain("y=36");
+		expect(partiallyCoveredAt4[3]).toContain("h=72");
+
+		/* На scrollTop = 6 верх изображения уже выше scrollTop (док. 5 < 6), layout.js кладет r=5 на экранную строку 0,
+		   а композитор Sticky Prompt (0..2) переносит видимый нижний срез r=2 на экранную строку 3! */
+		harness.tui.scroll.scrollTo(6, { disableFollow: true });
+		const partiallyCoveredAt6 = harness.tui.renderViewport(100, 14);
+		expect(partiallyCoveredAt6.slice(0, 3).some((line) => line.includes("\x1b_G"))).toBe(false);
+		expect(partiallyCoveredAt6[3]).toContain("\x1b_G");
+		expect(partiallyCoveredAt6[3]).toContain("r=2");
+		expect(partiallyCoveredAt6[3]).toContain("y=72");
+		expect(partiallyCoveredAt6[3]).toContain("h=36");
+
+		/* На scrollTop = 8 iTerm2-строка (док. 11) оказывается на экранной строке 3 с \x1b[4A (прыжок вверх в Sticky Prompt):
+		   последовательность очищается, чтобы не затереть Sticky Prompt */
+		harness.tui.scroll.scrollTo(8, { disableFollow: true });
+		const itermBleedFrame = harness.tui.renderViewport(100, 14);
+		expect(itermBleedFrame[3]).not.toContain("\x1b]1337;File=");
 	});
 
 	it("prevents applySelection highlight bleed onto composited Sticky Prompt and Outline Rail while highlighting uncovered transcript text", async () => {
@@ -600,6 +747,20 @@ describe("Viewport chrome & refined user prompt cards", () => {
 		}
 		for (let row = 0; row < 14; row++) {
 			expect(hasInvertedVisibleCell(sliceByColumn(selectedFrame[row]!, 97, 3, true))).toBe(false);
+		}
+
+		/* При открытии Hover Popup (OutlinePreviewPopup) поверх активного выделения транскрипта сам попап не инвертируется, а текст слева от попапа остается выделенным */
+		harness.tui.moveMouse(97, 6);
+		const popupWithSelectionFrame = harness.tui.renderViewport(100, 14);
+		const popupOverlay = harness.tui.overlayStack.find((o) => o.component instanceof OutlinePreviewPopup);
+		expect(popupOverlay).toBeDefined();
+		const popupBounds = (popupOverlay as any).bounds as { row: number; col: number; width: number; height: number };
+		expect(popupBounds).toBeDefined();
+		expect(hasInvertedVisibleCell(sliceByColumn(popupWithSelectionFrame[4]!, 0, popupBounds.col, true))).toBe(true);
+		for (let r = popupBounds.row; r < popupBounds.row + popupBounds.height; r++) {
+			expect(
+				hasInvertedVisibleCell(sliceByColumn(popupWithSelectionFrame[r]!, popupBounds.col, popupBounds.width, true)),
+			).toBe(false);
 		}
 	});
 
@@ -677,11 +838,16 @@ describe("Viewport chrome & refined user prompt cards", () => {
 		harness.tui.clickMouse(15, 2, "left");
 		harness.tui.renderViewport(100, 14);
 
-		/* Колесо мыши по Sticky Prompt и по Outline Rail прокручивает ScrollView, не передавая wheel в нижележащий блок */
+		/* Колесо мыши по Sticky Prompt и по Outline Rail прокручивает ScrollView через кэшированный requestViewRender без повторного рендера chatContainer */
+		const chatRenderSpy = vi.spyOn(harness.tui.chatContainer, "render");
 		const beforeStickyWheel = harness.tui.scroll.scrollTop;
 		harness.tui.wheelMouse(15, 2, "down");
 		expect(harness.tui.scroll.scrollTop).toBeGreaterThan(beforeStickyWheel);
 		expect(underlyingEvents).toEqual([]);
+		const cachedWheelFrame = harness.tui.renderViewFrame();
+		expect(chatRenderSpy).not.toHaveBeenCalled();
+		expect(stripTerminalSequences(cachedWheelFrame[1]!)).toContain("› Alpha line 1");
+		chatRenderSpy.mockRestore();
 
 		harness.tui.renderViewport(100, 14);
 		harness.tui.moveMouse(15, 7);
@@ -710,6 +876,33 @@ describe("Viewport chrome & refined user prompt cards", () => {
 		harness.tui.renderViewport(100, 14);
 		harness.tui.moveMouse(20, 10);
 		expect(harness.tui.overlayStack.some((o) => o.component instanceof OutlinePreviewPopup)).toBe(false);
+
+		/* Наведение на стрелку ▼ (y = 8) на scrollTop = 0 показывает превью Turn 2, а прокрутка колесом до низа без сдвига мыши скрывает старый попап */
+		harness.tui.scroll.scrollTo(0, { disableFollow: true });
+		harness.tui.renderViewport(100, 14);
+		harness.tui.moveMouse(97, 8);
+		expect(harness.tui.overlayStack.some((o) => o.component instanceof OutlinePreviewPopup)).toBe(true);
+		for (let step = 0; step < 26; step++) {
+			harness.tui.wheelMouse(97, 8, "down");
+		}
+		const atBottomAfterWheel = harness.tui.renderViewport(100, 14).map(stripTerminalSequences).join("\n");
+		expect(atBottomAfterWheel).not.toContain("╭─");
+		expect(harness.tui.overlayStack.some((o) => o.component instanceof OutlinePreviewPopup)).toBe(false);
+
+		/* Зажатие кнопки на Sticky Prompt с отпусканием вне окна терминала не блокирует последующий hover на Outline Rail */
+		harness.tui.scroll.scrollTo(8, { disableFollow: true });
+		harness.tui.renderViewport(100, 14);
+		harness.tui.pressMouse(15, 1, "left");
+		harness.tui.moveMouse(97, 6);
+		expect(harness.tui.overlayStack.some((o) => o.component instanceof OutlinePreviewPopup)).toBe(true);
+		harness.tui.moveMouse(20, 10);
+		expect(harness.tui.overlayStack.some((o) => o.component instanceof OutlinePreviewPopup)).toBe(false);
+
+		/* При уже открытом блокирующем Modal Card наведение на Outline Rail не монтирует Hover Popup */
+		const blockingModal = harness.tui.showOverlay({ render: () => ["modal"], invalidate() {} }, {});
+		harness.tui.moveMouse(97, 6);
+		expect(harness.tui.overlayStack.some((o) => o.component instanceof OutlinePreviewPopup)).toBe(false);
+		blockingModal.hide();
 	});
 
 	it("handles empty/narrow/CJK user prompts, mid-push Sticky clicks, and live /outline content margin toggling cleanly", async () => {
@@ -790,5 +983,29 @@ describe("Viewport chrome & refined user prompt cards", () => {
 		expect(railOffCols.some((c) => c === " ▲" || c === "──")).toBe(false);
 		const scrollbarColOff = railOffFrame.map((l) => stripTerminalSequences(sliceByColumn(l, 79, 1, true)));
 		expect(scrollbarColOff.some((ch) => ch === "┃" || ch === "│" || ch === "█")).toBe(true);
+
+		/* При скрытом Outline Rail затухание auto-скроллбара НЕ сдвигает таймстемп и текст Sticky Prompt на 1 колонку */
+		const tsColWhileScrollbarVisible = stripTerminalSequences(railOffFrame[1]!).indexOf("00:00");
+		expect(tsColWhileScrollbarVisible).toBeGreaterThan(60);
+		(harness.tui.scroll as any).hideTransientScrollbar();
+		expect(harness.tui.scroll.isScrollbarVisible).toBe(false);
+		const railOffScrollbarHiddenFrame = harness.tui.renderViewport(80, 12);
+		const tsColAfterScrollbarFade = stripTerminalSequences(railOffScrollbarHiddenFrame[1]!).indexOf("00:00");
+		expect(tsColAfterScrollbarFade).toBe(tsColWhileScrollbarVisible);
+
+		/* Когда контент помещается во viewport (скроллбара в колонке 79 нет) и включен /sticky always, клик по крайней правой колонке 79 попадает в Sticky Prompt */
+		harness.setEntries([branch[0]!], [branch[0]!]);
+		harness.tui.chatContainer.clear();
+		harness.tui.chatContainer.addChild(cjkCard);
+		await harness.runCommand("sticky", "always");
+		/* Ранее u1 был развернут кликом, поэтому первый клик по (79, 1) сворачивает его до 3 строк с "…", а второй клик по (79, 1) снова разворачивает */
+		harness.tui.renderViewport(80, 12);
+		harness.tui.clickMouse(79, 1, "left");
+		const shortCollapsed = harness.tui.renderViewport(80, 12);
+		expect(stripTerminalSequences(shortCollapsed[3]!)).toContain("Line 3…");
+		harness.tui.clickMouse(79, 1, "left");
+		const shortExpanded = harness.tui.renderViewport(80, 12);
+		expect(stripTerminalSequences(shortExpanded[3]!)).not.toContain("…");
+		expect(stripTerminalSequences(shortExpanded[4]!)).toContain("Hidden line 4");
 	});
 });

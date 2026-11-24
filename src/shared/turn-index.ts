@@ -195,6 +195,7 @@ export class TranscriptTurnIndex {
 	private cacheBranchVersion = -1;
 	private cacheWidth = -1;
 	private cacheContentHeight = -1;
+	private cacheMountedCount = -1;
 	private cacheZeroHeightChildCount = -1;
 	private cacheTurns: readonly IndexedTurn[] = [];
 
@@ -209,6 +210,7 @@ export class TranscriptTurnIndex {
 		this.cacheBranchVersion = -1;
 		this.cacheWidth = -1;
 		this.cacheContentHeight = -1;
+		this.cacheMountedCount = -1;
 		this.cacheZeroHeightChildCount = -1;
 	}
 
@@ -236,8 +238,8 @@ export class TranscriptTurnIndex {
 
 	getTurnCount(): number {
 		const branchCount = this.getBranchTurns().length;
-		if (branchCount > 0) return branchCount;
-		return countMountedUserComponents(this.shell.scroll.children[0]);
+		const mountedCount = countMountedUserComponents(this.shell.scroll.children[0]);
+		return Math.max(branchCount, mountedCount);
 	}
 
 	getContentWidth(viewportWidth?: number): number {
@@ -252,6 +254,7 @@ export class TranscriptTurnIndex {
 		const doc = this.shell.scroll.children[0];
 		const contentWidth = this.getContentWidth(viewportWidth);
 		const contentHeight = (this.shell.scroll as unknown as { contentHeight?: number }).contentHeight ?? 0;
+		const mountedCount = countMountedUserComponents(doc);
 		const zeroHeightChildCount = contentHeight === 0 && doc instanceof Container ? doc.children.length : -1;
 
 		if (
@@ -259,6 +262,7 @@ export class TranscriptTurnIndex {
 			this.branchVersion === this.cacheBranchVersion &&
 			contentWidth === this.cacheWidth &&
 			contentHeight === this.cacheContentHeight &&
+			mountedCount === this.cacheMountedCount &&
 			(contentHeight > 0 || zeroHeightChildCount === this.cacheZeroHeightChildCount)
 		) {
 			return this.cacheTurns;
@@ -267,37 +271,77 @@ export class TranscriptTurnIndex {
 		const mountedUsers = doc ? collectStructuralUserMetrics(doc, contentWidth) : [];
 		let indexed: IndexedTurn[];
 
+		const buildMountedTurn = (metric: MountedUserMetric, idx: number): IndexedTurn => {
+			const rawText: unknown = Reflect.get(metric.component, "text");
+			const prompt = sanitizeTurnText(typeof rawText === "string" ? rawText : "").trim();
+			const ordinal = idx + 1;
+			const rawId: unknown = Reflect.get(metric.component, "messageId");
+			const rawTs: unknown = Reflect.get(metric.component, "timestamp");
+			const timestamp = typeof rawTs === "number" || typeof rawTs === "string" ? rawTs : undefined;
+			return {
+				id: String(rawId ?? ordinal),
+				index: idx,
+				ordinal,
+				title: summarizeTurnTitle(prompt, ordinal),
+				prompt,
+				timestamp,
+				formattedTime: formatTurnTime(timestamp),
+				start: metric.start,
+				end: metric.end,
+				height: Math.max(1, metric.height),
+				component: metric.component,
+				mounted: true,
+			};
+		};
+
 		if (branchTurns.length === 0 && mountedUsers.length > 0) {
-			indexed = mountedUsers.map((metric, idx) => {
-				const rawText: unknown = Reflect.get(metric.component, "text");
-				const prompt = sanitizeTurnText(typeof rawText === "string" ? rawText : "").trim();
-				const ordinal = idx + 1;
-				const rawId: unknown = Reflect.get(metric.component, "messageId");
-				const rawTs: unknown = Reflect.get(metric.component, "timestamp");
-				const timestamp = typeof rawTs === "number" || typeof rawTs === "string" ? rawTs : undefined;
+			indexed = mountedUsers.map((metric, idx) => buildMountedTurn(metric, idx));
+		} else if (mountedUsers.length > branchTurns.length) {
+			/* Новая карточка реплики уже смонтирована на message_start до записи в ветку на message_end */
+			indexed = branchTurns.map((bt, tIdx) => {
+				const metric = mountedUsers[tIdx];
 				return {
-					id: String(rawId ?? ordinal),
-					index: idx,
-					ordinal,
-					title: summarizeTurnTitle(prompt, ordinal),
-					prompt,
-					timestamp,
-					formattedTime: formatTurnTime(timestamp),
-					start: metric.start,
-					end: metric.end,
-					height: Math.max(1, metric.height),
-					component: metric.component,
-					mounted: true,
+					...bt,
+					index: tIdx,
+					start: metric ? metric.start : 0,
+					end: metric ? metric.end : 1,
+					height: metric ? Math.max(1, metric.height) : 1,
+					component: metric?.component,
+					mounted: Boolean(metric),
 				};
 			});
+			for (let mIdx = branchTurns.length; mIdx < mountedUsers.length; mIdx++) {
+				indexed.push(buildMountedTurn(mountedUsers[mIdx]!, mIdx));
+			}
 		} else {
-			// Compaction can remove older user cards while the session branch retains full history; align from tail.
-			const tailOffset = Math.max(0, branchTurns.length - mountedUsers.length);
-			const userOffset = Math.max(0, mountedUsers.length - branchTurns.length);
+			/* При компакте старые карточки удаляются, но если у карточек есть явный messageId, сопоставляем сначала по нему */
+			const branchIds = new Set(branchTurns.map((bt) => bt.id));
+			const byId = new Map<string, MountedUserMetric>();
+			const usedMetrics = new Set<MountedUserMetric>();
+			for (const metric of mountedUsers) {
+				const rawId: unknown = Reflect.get(metric.component, "messageId");
+				if (rawId !== undefined && rawId !== null) {
+					const idStr = String(rawId);
+					if (branchIds.has(idStr) && !byId.has(idStr)) {
+						byId.set(idStr, metric);
+						usedMetrics.add(metric);
+					}
+				}
+			}
 
+			const tailOffset = Math.max(0, branchTurns.length - mountedUsers.length);
 			indexed = branchTurns.map((bt, tIdx) => {
-				const uIdx = tIdx - tailOffset + userOffset;
-				const metric = uIdx >= 0 && uIdx < mountedUsers.length ? mountedUsers[uIdx] : undefined;
+				let metric = byId.get(bt.id);
+				if (!metric && byId.size === 0) {
+					const uIdx = tIdx - tailOffset;
+					metric = uIdx >= 0 && uIdx < mountedUsers.length ? mountedUsers[uIdx] : undefined;
+				} else if (!metric) {
+					const uIdx = tIdx - tailOffset;
+					const candidate = uIdx >= 0 && uIdx < mountedUsers.length ? mountedUsers[uIdx] : undefined;
+					if (candidate && !usedMetrics.has(candidate)) {
+						metric = candidate;
+					}
+				}
 				return {
 					...bt,
 					index: tIdx,
@@ -314,6 +358,7 @@ export class TranscriptTurnIndex {
 		this.cacheBranchVersion = this.branchVersion;
 		this.cacheWidth = contentWidth;
 		this.cacheContentHeight = contentHeight;
+		this.cacheMountedCount = mountedCount;
 		this.cacheZeroHeightChildCount = zeroHeightChildCount;
 		this.cacheTurns = indexed;
 		return indexed;
