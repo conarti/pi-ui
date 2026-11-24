@@ -52,8 +52,14 @@ export function explainer(ctx: ExtensionContext, params: Params, lastRequest: ()
 
 export function addUsage(total: Usage | undefined, usage: Usage): Usage {
   if (!total) return usage;
-  const cost = { ...total.cost };
-  for (const key of Object.keys(cost) as (keyof Usage["cost"])[]) cost[key] += usage.cost[key];
+  const cost: Usage["cost"] = {
+    ...total.cost,
+    input: total.cost.input + usage.cost.input,
+    output: total.cost.output + usage.cost.output,
+    cacheRead: total.cost.cacheRead + usage.cost.cacheRead,
+    cacheWrite: total.cost.cacheWrite + usage.cost.cacheWrite,
+    total: total.cost.total + usage.cost.total,
+  };
   return {
     input: total.input + usage.input, output: total.output + usage.output,
     cacheRead: total.cacheRead + usage.cacheRead, cacheWrite: total.cacheWrite + usage.cacheWrite,

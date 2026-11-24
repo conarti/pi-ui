@@ -35,9 +35,9 @@ interface SilentState {
 	overridden: boolean;
 }
 
-type Renderable = { render(width: number): string[] };
-type Render = (width: number) => string[];
-export type RenderOverride = (component: any, width: number, render: Render) => string[];
+type Renderable = { render(width: number): readonly string[] };
+type Render = (width: number) => readonly string[];
+export type RenderOverride = (component: any, width: number, render: Render) => readonly string[];
 
 type AssistantLike = {
 	hasToolCalls?: unknown;
@@ -85,7 +85,7 @@ export function isIntermediateAssistant(component: AssistantLike): boolean {
  * swapped only for this one render, so the component and its message stay
  * untouched and reappear in full once silent mode is off.
  */
-export function renderAnswerOnly(component: AssistantLike, width: number, render: Render): string[] {
+export function renderAnswerOnly(component: AssistantLike, width: number, render: Render): readonly string[] {
 	const container = component.contentContainer;
 	const children = container?.children;
 	if (!container || !Array.isArray(children)) return render(width);
@@ -148,7 +148,7 @@ function isNotice(child: unknown): boolean {
  * message has a component of its own. Dropping top-level Text rows and the
  * spacer before each leaves the conversation itself untouched.
  */
-export function renderWithoutNotices(container: { children?: unknown[] }, width: number, render: Render): string[] {
+export function renderWithoutNotices(container: { children?: unknown[] }, width: number, render: Render): readonly string[] {
 	const children = container.children;
 	if (!Array.isArray(children) || !children.some(isNotice)) return render(width);
 	const kept: unknown[] = [];
@@ -207,7 +207,7 @@ export function patchRender(
 	// base (CustomMessageComponent uses Container's) must still get its own wrapper.
 	if (Object.hasOwn(prototype, ORIGINAL_RENDER)) return true;
 	const original = prototype.render;
-	prototype.render = function (this: unknown, width: number): string[] {
+	prototype.render = function (this: unknown, width: number): readonly string[] {
 		if (!engaged()) return original.call(this, width);
 		return override(this, width, (nextWidth) => original.call(this, nextWidth));
 	};

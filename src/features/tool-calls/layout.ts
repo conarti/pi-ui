@@ -20,15 +20,15 @@ import type { ToolArgs } from "./types.ts";
  * no outer padding; reclaim that column without changing tree/code indentation.
  * Missing fields and outputPad=1 keep the legacy output byte-for-byte.
  */
-export function outputPadLines(lines: string[], width: number, outputPad?: number): string[] {
-	if (outputPad !== 0) return lines;
+export function outputPadLines(lines: readonly string[], width: number, outputPad?: number): string[] {
+	if (outputPad !== 0) return [...lines];
 	return lines.map((line) => stripTerminalSequences(line).startsWith(" ")
 		? sliceByColumn(line, 1, Math.max(0, width), true)
 		: truncateToWidth(line, Math.max(0, width), "…"));
 }
 
 class UnpaddedComponent implements Component {
-	private source?: string[];
+	private source?: readonly string[];
 	private width?: number;
 	private lines: string[] = [];
 
@@ -86,7 +86,7 @@ export class CachedComponent implements Component {
 export class CachedContainer extends Container {
 	private cachedWidth?: number;
 	private cachedKey?: unknown;
-	private cachedLines?: string[];
+	private cachedLines?: readonly string[];
 
 	/** What besides the width the lines depend on, read as each frame is drawn. */
 	protected cacheKey(): unknown {
@@ -121,7 +121,7 @@ export class CachedContainer extends Container {
 			this.cachedKey = key;
 			this.cachedLines = super.render(width);
 		}
-		return this.cachedLines;
+		return this.cachedLines as string[];
 	}
 
 	override invalidate(): void {
@@ -738,9 +738,9 @@ export function renderCodexDiff(
  * when the component draws new ones.
  */
 export class WithinWidth implements Component {
-	private source: string[] | undefined;
+	private source: readonly string[] | undefined;
 	private width: number | undefined;
-	private lines: string[] = [];
+	private lines: readonly string[] = [];
 
 	constructor(private readonly inner: Component) {}
 
@@ -753,7 +753,7 @@ export class WithinWidth implements Component {
 				? lines.map((line) => visibleWidth(line) > width ? truncateToWidth(line, Math.max(1, width), "") : line)
 				: lines;
 		}
-		return this.lines;
+		return this.lines as string[];
 	}
 
 	invalidate(): void {
@@ -772,7 +772,7 @@ export function limitComponentLines(
 ): Component {
 	return new CachedComponent((width) => {
 		const lines = component.render(width);
-		if (lines.length <= maximumLines) return lines;
+		if (lines.length <= maximumLines) return [...lines];
 		return [...lines.slice(0, maximumLines), truncateToWidth(footer(lines.length - maximumLines), Math.max(1, width), "…")];
 	}, () => component.invalidate?.());
 }
