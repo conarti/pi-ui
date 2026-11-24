@@ -1,13 +1,25 @@
 import type {
 	ExtensionAPI,
 	ExtensionContext,
+	ExtensionUIContext,
 	KeybindingsManager,
 	Theme,
 	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { Component, EditorTheme, OverlayHandle, OverlayOptions } from "@earendil-works/pi-tui";
+import {
+	isKeyRelease,
+	matchesKey,
+	type Component,
+	type EditorComponent,
+	type EditorTheme,
+	type KeyId,
+	type OverlayHandle,
+	type OverlayOptions,
+} from "@earendil-works/pi-tui";
 import { createDarkTheme, createLightTheme } from "./fake-theme.ts";
 import { FakeTui } from "./fake-tui.ts";
+
+export type HarnessEditorFactory = ReturnType<ExtensionUIContext["getEditorComponent"]>;
 
 export interface RegisteredCommand {
 	name: string;
@@ -87,7 +99,8 @@ export interface ExtensionHarness {
 	readonly statuses: Map<string, string>;
 
 	header: Component | undefined;
-	editor: Component | undefined;
+	editor: (Component & Partial<EditorComponent>) | undefined;
+	editorFactory: HarnessEditorFactory;
 	editorText: string;
 	activeCustomModal: ActiveCustomModal | undefined;
 	confirmHandler: ((title: string, message: string) => boolean | Promise<boolean>) | undefined;
@@ -99,6 +112,7 @@ export interface ExtensionHarness {
 	shutdownSession(): Promise<void>;
 	runCommand(name: string, args?: string): Promise<unknown>;
 	triggerShortcut(key: string): Promise<unknown>;
+	sendTerminalInput(data: string): Promise<void>;
 	setTheme(theme: "dark" | "light" | Theme): void;
 	setEntries(entries: unknown[], branch?: unknown[]): void;
 	getActiveTools(): string[];
@@ -172,14 +186,22 @@ export function createExtensionHarness(options: ExtensionHarnessOptions = {}): E
 	setGlobalTheme(currentTheme);
 
 	let headerComponent: Component | undefined;
-	let editorComponent: Component | undefined;
-	let editorFactory:
-		| ((t: unknown, editorTheme: EditorTheme, kb: KeybindingsManager) => Component)
-		| undefined;
+	let editorFactory: HarnessEditorFactory;
+	let editorComponent: (Component & Partial<EditorComponent>) | undefined;
 	let editorText = "";
 	let activeCustomModal: ActiveCustomModal | undefined;
 	let confirmHandler: ((title: string, message: string) => boolean | Promise<boolean>) | undefined;
 	let selectHandler: ((title: string, items: unknown[]) => unknown | Promise<unknown>) | undefined;
+
+	const runExtensionShortcut = (data: string): boolean => {
+		for (const [shortcutStr, shortcut] of shortcuts) {
+			if (matchesKey(data, shortcutStr as KeyId)) {
+				void Promise.resolve(shortcut.handler(ctx));
+				return true;
+			}
+		}
+		return false;
+	};
 
 	const ui = {
 		get theme() {
@@ -212,18 +234,43 @@ export function createExtensionHarness(options: ExtensionHarnessOptions = {}): E
 			headerComponent = factory ? factory(tui.asTui(), currentTheme) : undefined;
 			tui.requestRender();
 		},
-		setEditorComponent: (
-			factory: ((t: unknown, editorTheme: EditorTheme, kb: KeybindingsManager) => Component) | undefined,
-		) => {
+		setEditorComponent: (factory: HarnessEditorFactory) => {
+			const previousText = editorComponent?.getText?.() ?? editorText;
 			editorFactory = factory;
-			editorComponent = factory
-				? factory(tui.asTui(), createEditorTheme(() => currentTheme), keybindings)
-				: undefined;
+			if (factory) {
+				const nextEditor = factory(
+					tui.asTui(),
+					createEditorTheme(() => currentTheme),
+					keybindings,
+				) as Component & Partial<EditorComponent> & Record<string, any>;
+				nextEditor.onChange = (val: string) => {
+					editorText = val;
+				};
+				nextEditor.setText?.(previousText);
+				/* Повторяем поведение InteractiveMode.setCustomEditorComponent (перезапись borderColor и paddingX) */
+				if (nextEditor.borderColor !== undefined) {
+					nextEditor.borderColor = (text: string) => currentTheme.fg("border", text);
+				}
+				nextEditor.setPaddingX?.(2);
+				if ("actionHandlers" in nextEditor && nextEditor.actionHandlers instanceof Map) {
+					if (!nextEditor.onExtensionShortcut) {
+						nextEditor.onExtensionShortcut = (data: string) => runExtensionShortcut(data);
+					}
+				}
+				nextEditor.focused = true;
+				if (!tui.getTopmostVisibleOverlay()) {
+					tui.setFocus(nextEditor);
+				}
+				editorComponent = nextEditor;
+			} else {
+				editorComponent = undefined;
+			}
 			tui.requestRender();
 		},
 		getEditorComponent: () => editorFactory,
 		setEditorText: (text: string) => {
 			editorText = text;
+			editorComponent?.setText?.(text);
 		},
 		setWorkingIndicator: () => {},
 		setWorkingVisible: () => {},
@@ -429,8 +476,14 @@ export function createExtensionHarness(options: ExtensionHarnessOptions = {}): E
 		get editor() {
 			return editorComponent;
 		},
-		set editor(value: Component | undefined) {
+		set editor(value: (Component & Partial<EditorComponent>) | undefined) {
 			editorComponent = value;
+		},
+		get editorFactory() {
+			return editorFactory;
+		},
+		set editorFactory(value: HarnessEditorFactory) {
+			editorFactory = value;
 		},
 		get editorText() {
 			return editorText;
@@ -483,6 +536,32 @@ export function createExtensionHarness(options: ExtensionHarnessOptions = {}): E
 			const sc = shortcuts.get(key);
 			if (!sc) throw new Error(`Shortcut not registered: ${key}`);
 			return await sc.handler(ctx);
+		},
+		async sendTerminalInput(data) {
+			let current = data;
+			for (const listener of terminalInputListeners) {
+				const result = listener(current) as { consume?: boolean; data?: string } | undefined;
+				if (result?.consume) {
+					return;
+				}
+				if (result?.data !== undefined) {
+					current = result.data;
+				}
+			}
+			if (current.length === 0) {
+				return;
+			}
+			const target = (activeCustomModal?.component ?? editorComponent) as
+				| (Component & { wantsKeyRelease?: boolean })
+				| undefined;
+			if (!target?.handleInput) {
+				return;
+			}
+			if (isKeyRelease(current) && !target.wantsKeyRelease) {
+				return;
+			}
+			target.handleInput(current);
+			await Promise.resolve();
 		},
 		setTheme(theme) {
 			currentTheme = resolveTheme(theme);
