@@ -111,6 +111,33 @@ describe("animation-scheduler (30 fps monotonic clock)", () => {
 		expect(renderComposerWorkingFrame({ theme: lightTheme, elapsedMs: 0 })).toBe(
 			"\x1b[38;2;37;99;235m◆\x1b[39m",
 		);
+
+		expect(sampleBreathingWaveRgb(Number.NaN, { theme: darkTheme, elapsedMs: Number.NaN })).toEqual([
+			125, 207, 255,
+		]);
+	});
+
+	it("notifies subscriber onStop hooks when stopAllAnimations forcibly detaches active ticks", () => {
+		vi.useFakeTimers();
+		let stoppedCount = 0;
+		const deltas: number[] = [];
+
+		subscribeAnimationTicks(
+			(_elapsedMs, deltaMs) => {
+				deltas.push(deltaMs);
+			},
+			() => {
+				stoppedCount += 1;
+			},
+		);
+
+		vi.advanceTimersByTime(33);
+		expect(deltas).toEqual([33]);
+		expect(stoppedCount).toBe(0);
+
+		stopAllAnimations();
+		expect(stoppedCount).toBe(1);
+		expect(vi.getTimerCount()).toBe(0);
 	});
 
 	it("formats observed thinking durations into concise labels and falls back to plain Thought when unmeasured", () => {

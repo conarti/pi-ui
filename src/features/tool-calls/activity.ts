@@ -337,15 +337,21 @@ export class SilentActivityAnimator {
 		}
 		// Ticks with the working label, so the two share one repaint per frame, and
 		// frames that look the same as the last one ask for no repaint at all.
-		this.stopTicking = onTick(() => {
-			this.frame++;
-			const state = sharedActivityState();
-			const level = this.readLevel();
-			const changed = frameChanges(this.frame) || level !== state.level;
-			state.frame = this.frame;
-			state.level = level;
-			if (changed) state.tui?.requestRender();
-		});
+		this.stopTicking = onTick(
+			() => {
+				this.frame++;
+				const state = sharedActivityState();
+				const level = this.readLevel();
+				const changed = frameChanges(this.frame) || level !== state.level;
+				state.frame = this.frame;
+				state.level = level;
+				if (changed) state.tui?.requestRender();
+			},
+			undefined,
+			() => {
+				this.stopTicking = undefined;
+			},
+		);
 	}
 
 	private hide(): void {

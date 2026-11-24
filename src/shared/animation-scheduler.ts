@@ -23,11 +23,13 @@ export interface WaveSampleOptions {
 	elapsedMs?: number;
 }
 
+export type AnimationTickListener = (elapsedMs: number, deltaMs: number) => void;
+
 interface SchedulerState {
 	elapsedMs: number;
 	lastTickAt: number | undefined;
 	timer: ReturnType<typeof setInterval> | undefined;
-	subscribers: Set<(elapsedMs: number) => void>;
+	subscribers: Map<AnimationTickListener, (() => void) | undefined>;
 	surfaces: Map<object | string, () => void>;
 }
 
@@ -46,7 +48,7 @@ function getSchedulerState(): SchedulerState {
 			elapsedMs: 0,
 			lastTickAt: undefined,
 			timer: undefined,
-			subscribers: new Set(),
+			subscribers: new Map(),
 			surfaces: new Map(),
 		};
 	}
@@ -74,9 +76,9 @@ function syncTimer(state: SchedulerState): void {
 		state.lastTickAt = now;
 		state.elapsedMs += delta;
 
-		for (const listener of [...state.subscribers]) {
+		for (const listener of [...state.subscribers.keys()]) {
 			if (!state.subscribers.has(listener)) continue;
-			listener(state.elapsedMs);
+			listener(state.elapsedMs, delta);
 		}
 		if (state.subscribers.size === 0) {
 			syncTimer(state);
@@ -89,9 +91,12 @@ export function getAnimationElapsedMs(): number {
 	return getSchedulerState().elapsedMs;
 }
 
-export function subscribeAnimationTicks(listener: (elapsedMs: number) => void): () => void {
+export function subscribeAnimationTicks(
+	listener: AnimationTickListener,
+	onStop?: () => void,
+): () => void {
 	const state = getSchedulerState();
-	state.subscribers.add(listener);
+	state.subscribers.set(listener, onStop);
 	syncTimer(state);
 	return () => {
 		state.subscribers.delete(listener);
@@ -121,13 +126,19 @@ export function deactivateAnimationSurface(key: object | string): void {
 
 export function stopAllAnimations(): void {
 	const state = getSchedulerState();
+	const stopHooks = [...state.subscribers.values()];
 	state.surfaces.clear();
 	state.subscribers.clear();
 	syncTimer(state);
+	for (const onStop of stopHooks) {
+		onStop?.();
+	}
 }
 
 export function computeWaveIntensity(row: number, elapsedMs = getAnimationElapsedMs()): number {
-	const angle = (row / WAVE_ROWS - elapsedMs / BREATHING_PERIOD_MS) * Math.PI * 2;
+	const safeRow = Number.isFinite(row) ? row : 0;
+	const safeElapsed = Number.isFinite(elapsedMs) ? elapsedMs : 0;
+	const angle = (safeRow / WAVE_ROWS - safeElapsed / BREATHING_PERIOD_MS) * Math.PI * 2;
 	return (Math.cos(angle) + 1) * 0.5;
 }
 
@@ -139,7 +150,7 @@ export function interpolateWaveStops(
 	stops: readonly [RgbTuple, RgbTuple, RgbTuple],
 	t: number,
 ): RgbTuple {
-	const clamped = Math.max(0, Math.min(1, t));
+	const clamped = Number.isFinite(t) ? Math.max(0, Math.min(1, t)) : 0;
 	if (clamped <= 0.5) {
 		const local = clamped * 2;
 		const [low, mid] = stops;

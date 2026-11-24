@@ -26,7 +26,7 @@ export function registerTranscriptFeature(pi: ExtensionAPI): void {
 	});
 
 	pi.on("message_update", async (event) => {
-		observeAssistantThinkingMessage(event.message, true);
+		observeAssistantThinkingMessage(event.message, true, event.assistantMessageEvent);
 	});
 
 	pi.on("message_end", async (event) => {

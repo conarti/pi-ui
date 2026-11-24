@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, truncateToWidth } from "@earendil-works/pi-tui";
+import { restoreDefaultWorkingIndicator, setComposerWorkingSuppressed } from "../chrome/working-indicator.ts";
 import { onTick } from "./clock.ts";
 import { colorizeRgb, interpolateRgb, paletteOf } from "./color.ts";
 import { progressGlow, type ColorRamp, type ThinkingLevel } from "./palette.ts";
@@ -158,6 +159,7 @@ export class ProgressController {
 		this.message = undefined;
 		this.frames = [];
 		this.frame = 0;
+		setComposerWorkingSuppressed(true, ctx);
 		ctx.ui.setWorkingVisible(true);
 		ctx.ui.setWorkingIndicator({ frames: [] });
 		if (message) this.setMessage(message);
@@ -171,7 +173,7 @@ export class ProgressController {
 		if (!preservePhase) this.message = undefined;
 		this.frames = [];
 		try { context?.ui.setWorkingMessage(); }
-		finally { context?.ui.setWorkingIndicator(); }
+		finally { restoreDefaultWorkingIndicator(context); }
 	}
 
 	private setMessage(message: string): void {
@@ -186,10 +188,16 @@ export class ProgressController {
 
 	private startTicking(): void {
 		if (this.stopTicking) return;
-		this.stopTicking = onTick(() => {
-			this.frame++;
-			this.renderMessage();
-		});
+		this.stopTicking = onTick(
+			() => {
+				this.frame++;
+				this.renderMessage();
+			},
+			undefined,
+			() => {
+				this.stopTicking = undefined;
+			},
+		);
 	}
 
 	private renderMessage(): void {

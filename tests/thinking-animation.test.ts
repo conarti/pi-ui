@@ -1,10 +1,15 @@
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	AssistantMessageComponent,
+	CustomEditor,
+	ToolExecutionComponent,
 	getMarkdownTheme,
 	type WorkingIndicatorOptions,
 } from "@earendil-works/pi-coding-agent";
-import { Loader, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import { Loader, stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import conartiPiUi from "../src/index.ts";
 import { stopAllAnimations } from "../src/shared/animation-scheduler.ts";
 import { createExtensionHarness, type ExtensionHarness } from "./harness/index.ts";
@@ -455,5 +460,301 @@ describe("30 fps breathing animation & refined Thinking blocks", () => {
 		const [r, g, b] = [Number(spineMatch![1]), Number(spineMatch![2]), Number(spineMatch![3])];
 		expect(r).toBeLessThan(g);
 		expect(g).toBeLessThan(b);
+	});
+
+	it("keeps ToolRuntime indicators alive after agent_settled, respects compact-tools working flag without restoring 80ms Loader timers, and coexists with top-border editor wrappers", async () => {
+		vi.useFakeTimers();
+		const tempRoot = mkdtempSync(join(tmpdir(), "pi-ui-ticket12-"));
+		try {
+			const piDir = join(tempRoot, ".pi");
+			mkdirSync(piDir, { recursive: true });
+			writeFileSync(
+				join(piDir, "compact-tools.json"),
+				JSON.stringify({ style: "compact", working: true }),
+				"utf8",
+			);
+
+			harness = createExtensionHarness({
+				theme: "dark",
+				width: 100,
+				height: 32,
+				cwd: tempRoot,
+				projectTrusted: true,
+			});
+
+			const indicatorLog: Array<WorkingIndicatorOptions | undefined> = [];
+			vi.spyOn(harness.ctx.ui, "setWorkingIndicator").mockImplementation((opts) => {
+				indicatorLog.push(opts);
+			});
+
+			harness.mount(conartiPiUi);
+			await harness.startSession();
+
+			expect(indicatorLog.at(-1)).toEqual({ frames: [] });
+
+			await harness.emit("agent_start", {});
+			await harness.emit("tool_execution_start", {
+				toolCallId: "tc-a",
+				toolName: "read",
+				args: { path: "src/index.ts" },
+			});
+			const rowA = new ToolExecutionComponent(
+				"read",
+				"tc-a",
+				{ path: "src/index.ts" },
+				undefined,
+				undefined,
+				harness.tui.asTui(),
+				harness.ctx.cwd,
+			);
+			(rowA as any).markExecutionStarted();
+			rowA.render(80);
+
+			vi.advanceTimersByTime(33 * 5);
+			expect(indicatorLog.at(-1)).toEqual({ frames: [] });
+
+			await harness.emit("agent_settled", {});
+			expect(vi.getTimerCount()).toBe(0);
+
+			await harness.emit("agent_start", {});
+			await harness.emit("tool_execution_start", {
+				toolCallId: "tc-b",
+				toolName: "read",
+				args: { path: "src/shared/ansi.ts" },
+			});
+			const rowB = new ToolExecutionComponent(
+				"read",
+				"tc-b",
+				{ path: "src/shared/ansi.ts" },
+				undefined,
+				undefined,
+				harness.tui.asTui(),
+				harness.ctx.cwd,
+			);
+			(rowB as any).markExecutionStarted();
+			const beforeTick = rowB.render(80).join("\n");
+			vi.advanceTimersByTime(33 * 6);
+			const afterTick = rowB.render(80).join("\n");
+			expect(afterTick).not.toBe(beforeTick);
+
+			writeFileSync(join(piDir, "compact-tools.json"), JSON.stringify({ style: "off" }), "utf8");
+			await harness.runCommand("compact-tools", "off");
+			const restoredIndicator = indicatorLog.at(-1);
+			expect(restoredIndicator?.frames?.length).toBe(1);
+			expect(stripTerminalSequences(restoredIndicator?.frames?.[0] ?? "")).toBe("◆");
+
+			const prevFactory = harness.ctx.ui.getEditorComponent();
+			harness.ctx.ui.setEditorComponent((t, editorTheme, kb) => {
+				const ed =
+					prevFactory?.(t as any, editorTheme, kb) ??
+					new CustomEditor(t as any, editorTheme, kb, { embedWorkingStatus: true });
+				(ed as any).embedWorkingStatus = true;
+				return ed;
+			});
+
+			class HostBorderStatusShim extends Loader {
+				renderInBorder(width: number): string {
+					const line = super.render(width + 2)[1] ?? "";
+					return truncateToWidth(line.startsWith(" ") ? line.slice(1).trimEnd() : line.trimEnd(), width, "");
+				}
+				renderSpinnerInBorder(width: number): string {
+					return truncateToWidth((this as any).getRenderedIndicator(), width, "");
+				}
+			}
+
+			const borderStatus = new HostBorderStatusShim(
+				harness.tui.asTui(),
+				(s) => s,
+				(s) => s,
+				"Working... (esc to interrupt)",
+				restoredIndicator,
+			);
+			(harness.editor as any).setWorkingStatusIndicator(borderStatus);
+			for (const w of [14, 30, 64, 100]) {
+				const topLine = harness.editor!.render(w)[0]!;
+				expect(visibleWidth(topLine)).toBe(w);
+				expect(stripTerminalSequences(topLine)).toContain("◆");
+			}
+			borderStatus.stop();
+
+			await harness.emit("agent_end", { messages: [] });
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			rmSync(tempRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("locks thinking duration at thinking_end / empty text_start, renders Thinking… on empty non-redacted start without leaking timers on redacted blocks, and retains session timings across 15+ char-by-char streamed turns", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-11-24T15:00:00Z"));
+		harness = createExtensionHarness({ theme: "dark", width: 100, height: 32 });
+		harness.mount(conartiPiUi);
+		await harness.startSession();
+
+		const mdTheme = getMarkdownTheme();
+
+		const redactedTurn = new AssistantMessageComponent(undefined, false, mdTheme);
+		redactedTurn.updateContent(
+			makeAssistantMessage([{ type: "thinking", thinking: "", redacted: true }], {
+				timestamp: Date.now(),
+			}),
+			true,
+		);
+		expect(redactedTurn.render(80)).toEqual([]);
+		expect(vi.getTimerCount()).toBe(0);
+
+		const tsEndLock = Date.now() + 100;
+		const lockTurn = new AssistantMessageComponent(undefined, false, mdTheme);
+		const emptyStartMsg = makeAssistantMessage([{ type: "thinking", thinking: "" }], {
+			timestamp: tsEndLock,
+		});
+		await harness.emit("message_start", { message: emptyStartMsg });
+		lockTurn.updateContent(emptyStartMsg, true);
+		expect(lockTurn.render(80).map(stripTerminalSequences).join("\n")).toContain("┃ Thinking…");
+
+		vi.advanceTimersByTime(3000);
+		const thinkingEndMsg = makeAssistantMessage(
+			[{ type: "thinking", thinking: "Finished reasoning early" }],
+			{ timestamp: tsEndLock },
+		);
+		await harness.emit("message_update", {
+			message: thinkingEndMsg,
+			assistantMessageEvent: {
+				type: "thinking_end",
+				contentIndex: 0,
+				content: "Finished reasoning early",
+				partial: thinkingEndMsg,
+			},
+		});
+		lockTurn.updateContent(thinkingEndMsg, true);
+		expect(lockTurn.render(80).map(stripTerminalSequences).join("\n")).toContain(
+			"❙ › Thought for 3s",
+		);
+		expect(vi.getTimerCount()).toBe(0);
+
+		vi.advanceTimersByTime(5000);
+		const finalLockMsg = makeAssistantMessage(
+			[
+				{ type: "thinking", thinking: "Finished reasoning early" },
+				{ type: "text", text: "Delayed answer." },
+			],
+			{ timestamp: tsEndLock },
+		);
+		await harness.emit("message_end", { message: finalLockMsg });
+		lockTurn.updateContent(finalLockMsg, false);
+		expect(lockTurn.render(80).map(stripTerminalSequences).join("\n")).toContain(
+			"❙ › Thought for 3s",
+		);
+
+		const completedTurns: any[] = [];
+		for (let t = 0; t < 15; t++) {
+			const turnTs = Date.now() + t + 1;
+			let acc = "";
+			const baseText = `Turn ${t} detailed thought `.padEnd(170, "x");
+			await harness.emit("message_start", {
+				message: makeAssistantMessage([{ type: "thinking", thinking: "" }], { timestamp: turnTs }),
+			});
+			for (let ch = 0; ch < baseText.length; ch++) {
+				acc += baseText[ch]!;
+				await harness.emit("message_update", {
+					message: makeAssistantMessage([{ type: "thinking", thinking: acc }], {
+						timestamp: turnTs,
+					}),
+				});
+			}
+			vi.advanceTimersByTime(3000);
+			const doneMsg = makeAssistantMessage(
+				[
+					{ type: "thinking", thinking: acc },
+					{ type: "text", text: `Reply ${t}` },
+				],
+				{ timestamp: turnTs },
+			);
+			await harness.emit("message_end", { message: doneMsg });
+			completedTurns.push(doneMsg);
+		}
+
+		await harness.emit("session_start", { reason: "reload" });
+		const reloadedFirst = new AssistantMessageComponent(completedTurns[0], false, mdTheme);
+		expect(reloadedFirst.render(80).map(stripTerminalSequences).join("\n")).toContain(
+			"❙ › Thought for 3s",
+		);
+	});
+
+	it("applies strongFg color directly to bold spans, omits bare fence borders from the 3-line streaming tail, and preserves Thinking hover state across streaming text deltas", async () => {
+		vi.useFakeTimers();
+		harness = createExtensionHarness({ theme: "dark", width: 100, height: 32 });
+		harness.mount(conartiPiUi);
+		await harness.startSession();
+
+		const mdTheme = getMarkdownTheme();
+		const streamingCode = new AssistantMessageComponent(undefined, false, mdTheme);
+		streamingCode.updateContent(
+			makeAssistantMessage([
+				{
+					type: "thinking",
+					thinking: [
+						"Check **auth.ts** exports",
+						"```ts",
+						"const tokenValid = true;",
+						"const sessionReady = true;",
+					].join("\n"),
+				},
+			]),
+			true,
+		);
+
+		const codeAnsi = streamingCode.render(80);
+		const codePlain = codeAnsi.map(stripTerminalSequences).map((l) => l.trim()).filter(Boolean);
+		expect(codePlain).toEqual([
+			"┃ Thinking…",
+			"▎ Check auth.ts exports",
+			"▎   const tokenValid = true;",
+			"▎   const sessionReady = true;",
+		]);
+
+		const boldLine = codeAnsi.find((l) => stripTerminalSequences(l).includes("Check auth.ts exports"))!;
+		expect(boldLine).toContain("\x1b[38;2;156;174;200mauth.ts");
+
+		const hoverTurn = new AssistantMessageComponent(undefined, false, mdTheme);
+		const hoverTs = Date.now();
+		hoverTurn.updateContent(
+			makeAssistantMessage(
+				[
+					{ type: "thinking", thinking: "Initial reasoning" },
+					{ type: "text", text: "Part 1" },
+				],
+				{ timestamp: hoverTs },
+			),
+			true,
+		);
+
+		const beforeHoverLine = hoverTurn.render(80)[1]!;
+		hoverTurn.handleMouse?.({
+			type: "move",
+			button: "none",
+			x: 4,
+			y: 1,
+			width: 80,
+			height: 6,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		} as any);
+		const hoveredLine = hoverTurn.render(80)[1]!;
+		expect(hoveredLine).not.toBe(beforeHoverLine);
+
+		hoverTurn.updateContent(
+			makeAssistantMessage(
+				[
+					{ type: "thinking", thinking: "Initial reasoning" },
+					{ type: "text", text: "Part 1 and Part 2" },
+				],
+				{ timestamp: hoverTs },
+			),
+			true,
+		);
+		const afterDeltaLine = hoverTurn.render(80)[1]!;
+		expect(afterDeltaLine).toBe(hoveredLine);
 	});
 });

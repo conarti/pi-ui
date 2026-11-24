@@ -12,6 +12,7 @@ const WORKING_CONTROLLER_KEY = Symbol.for("conarti.pi-ui.composer-working-contro
 
 interface ComposerWorkingState {
 	ctx?: ExtensionContext;
+	suppressed?: boolean;
 }
 
 function getWorkingState(): ComposerWorkingState {
@@ -33,19 +34,47 @@ export function bindComposerWorkingIndicator(ctx: ExtensionContext): void {
 	const state = getWorkingState();
 	state.ctx = ctx;
 	deactivateAnimationSurface(COMPOSER_SURFACE_KEY);
+	if (state.suppressed) return;
 	ctx.ui.setWorkingIndicator(buildWaveIndicator({ theme: ctx.ui.theme }));
 	if (ctx.isIdle?.() === false) {
 		startComposerWorkingWave();
 	}
 }
 
+export function setComposerWorkingSuppressed(suppressed: boolean, ctx?: ExtensionContext): void {
+	const state = getWorkingState();
+	state.suppressed = suppressed;
+	if (suppressed) {
+		deactivateAnimationSurface(COMPOSER_SURFACE_KEY);
+		return;
+	}
+	const targetCtx = ctx ?? state.ctx;
+	if (targetCtx && targetCtx.mode === "tui" && targetCtx.hasUI) {
+		targetCtx.ui.setWorkingIndicator(buildWaveIndicator({ theme: targetCtx.ui.theme }));
+		if (targetCtx.isIdle?.() === false) {
+			startComposerWorkingWave();
+		}
+	}
+}
+
+export function restoreDefaultWorkingIndicator(ctx?: ExtensionContext): void {
+	const state = getWorkingState();
+	if (state.ctx && (!ctx || state.ctx === ctx)) {
+		setComposerWorkingSuppressed(false, ctx ?? state.ctx);
+		return;
+	}
+	state.suppressed = false;
+	ctx?.ui.setWorkingIndicator();
+}
+
 export function startComposerWorkingWave(): void {
 	const state = getWorkingState();
 	const ctx = state.ctx;
-	if (!ctx || ctx.mode !== "tui" || !ctx.hasUI) return;
+	if (state.suppressed || !ctx || ctx.mode !== "tui" || !ctx.hasUI) return;
 	activateAnimationSurface(COMPOSER_SURFACE_KEY, () => {
-		const activeCtx = getWorkingState().ctx;
-		if (!activeCtx || activeCtx.mode !== "tui" || !activeCtx.hasUI) {
+		const current = getWorkingState();
+		const activeCtx = current.ctx;
+		if (current.suppressed || !activeCtx || activeCtx.mode !== "tui" || !activeCtx.hasUI) {
 			deactivateAnimationSurface(COMPOSER_SURFACE_KEY);
 			return;
 		}
@@ -56,7 +85,9 @@ export function startComposerWorkingWave(): void {
 export function stopComposerWorkingWave(clearContext = false): void {
 	deactivateAnimationSurface(COMPOSER_SURFACE_KEY);
 	if (clearContext) {
-		getWorkingState().ctx = undefined;
+		const state = getWorkingState();
+		state.ctx = undefined;
+		state.suppressed = false;
 	}
 }
 
