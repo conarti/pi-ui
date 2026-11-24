@@ -1247,6 +1247,51 @@ describe("Tool Density: ExtensionHarness integration", () => {
 			expect(streamedWritePlain).toContain("-export const MODE = 'legacy';");
 			expect(streamedWritePlain).toContain("+export const MODE = 'modern';");
 
+			const finalContent = "export const MODE = 'final';\nexport const RETRIES = 3;\nexport const TIMEOUT = 500;\n";
+			await harness.emit("agent_start", {});
+			await harness.emit("message_update", {
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "write-stream-nocwd", name: "write", arguments: { path: "src/f" } }],
+				},
+			});
+			const noCwdWriteRow = new ToolExecutionComponent(
+				"write",
+				"write-stream-nocwd",
+				{ path: "src/f" },
+				undefined,
+				harness.resolveToolDefinition("write"),
+				harness.tui.asTui(),
+				undefined as unknown as string,
+			);
+			noCwdWriteRow.render(96);
+			(noCwdWriteRow as any).updateArgs({ path: "src/file.ts", content: finalContent });
+			(noCwdWriteRow as any).setArgsComplete();
+			await harness.emit("tool_execution_start", {
+				toolCallId: "write-stream-nocwd",
+				toolName: "write",
+				args: { path: "src/file.ts", content: finalContent },
+			});
+			writeFileSync(streamedFile, finalContent, "utf8");
+			await harness.emit("tool_execution_end", {
+				toolCallId: "write-stream-nocwd",
+				toolName: "write",
+				durationMs: 15,
+			});
+			(noCwdWriteRow as any).updateResult(
+				{
+					content: [{ type: "text", text: "Successfully wrote to src/file.ts" }],
+					details: undefined,
+					durationMs: 15,
+				},
+				false,
+			);
+			await harness.emit("agent_end", { messages: [] });
+			const noCwdPlain = noCwdWriteRow.render(96).map(stripTerminalSequences).join("\n");
+			expect(noCwdPlain).toContain("◆ Wrote src/file.ts (+1 -1 · 15ms)");
+			expect(noCwdPlain).toContain("-export const MODE = 'modern';");
+			expect(noCwdPlain).toContain("+export const MODE = 'final';");
+
 			const wrappedEdit = new ToolExecutionComponent(
 				"edit",
 				"edit-wrap-1",

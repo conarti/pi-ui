@@ -1101,5 +1101,93 @@ describe("Prompt Chips end-to-end via ExtensionHarness + HostRuntime", () => {
 		expect(reloadedPreview).not.toContain("[изображение]");
 		expect(reloadedPreview).not.toContain("TRACE line");
 		expect(reloadedPreview).not.toContain("quoted alpha");
+
+		const ts3 = new Date(2026, 4, 10, 16, 12).getTime();
+		const customTurn3 = {
+			type: "custom",
+			id: "c-inc-3",
+			customType: "conarti-prompt-chips",
+			data: {
+				displayText: "[❝ Quote #1 · 2 lines] Compare screenshot",
+				expandedText: "> quoted one\n> quoted two\n\nCompare screenshot",
+				chips: [
+					{
+						id: "q-inc-3",
+						kind: "quote",
+						number: 1,
+						token: "[❝ Quote #1 · 2 lines]",
+						lineCount: 2,
+						charCount: 21,
+						previewText: "quoted one\nquoted two",
+					},
+				],
+			},
+		};
+		const entriesWithCustomOnly = [...entries, customTurn3];
+		harness.setEntries(entriesWithCustomOnly, entriesWithCustomOnly);
+		harness.tui.renderViewport(100, 12);
+
+		const userMsg3 = {
+			role: "user",
+			content: [
+				{ type: "text", text: "> quoted one\n> quoted two\n\nCompare screenshot" },
+				{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" },
+			],
+			timestamp: ts3,
+		};
+		const entriesWithMsg3 = [
+			...entriesWithCustomOnly,
+			{ type: "message", id: "u3", parentId: "c-inc-3", message: userMsg3 },
+		];
+		harness.setEntries(entriesWithMsg3, entriesWithMsg3);
+		harness.tui.chatContainer.addChild(
+			new UserMessageComponent(
+				"> quoted one\n> quoted two\n\nCompare screenshot\n\n[изображение]",
+				{} as any,
+				0,
+				[],
+				"u3",
+				ts3 as any,
+			),
+		);
+		harness.tui.chatContainer.addChild(new Text(Array.from({ length: 14 }, (_, i) => `reply3 ${i}`).join("\n"), 0, 0));
+
+		const ts4 = new Date(2026, 4, 10, 16, 15).getTime();
+		const entriesWithMsg4 = [
+			...entriesWithMsg3,
+			{
+				type: "message",
+				id: "u4",
+				message: { role: "user", content: "Mounted fallback\n\n[изображение]", timestamp: ts4 },
+			},
+		];
+		harness.setEntries(entriesWithMsg4, entriesWithMsg4);
+		harness.tui.chatContainer.addChild(
+			new UserMessageComponent("Mounted fallback\n\n[изображение]", {} as any, 0, [], "u4", ts4 as any),
+		);
+		harness.tui.chatContainer.addChild(new Text(Array.from({ length: 14 }, (_, i) => `reply4 ${i}`).join("\n"), 0, 0));
+
+		harness.tui.renderViewport(100, 12);
+		harness.tui.moveMouse(97, 6);
+		const incOverlays3 = harness.tui.overlayStack.filter(
+			(e) => e.options?.nonCapturing === true && harness!.tui.isOverlayVisible(e),
+		);
+		expect(incOverlays3).toHaveLength(1);
+		const incLines3 = incOverlays3[0]!.component
+			.render(Number(incOverlays3[0]!.options?.width ?? 44))
+			.map((l) => stripTerminalSequences(l));
+		expect(extractPreviewBody(incLines3)).toBe("[❝ Quote #1 · 2 lines] Compare screenshot [🖼 Image #1]");
+		expect(incLines3.join("\n")).not.toContain("quoted one");
+
+		harness.tui.moveMouse(97, 7);
+		const incOverlays4 = harness.tui.overlayStack.filter(
+			(e) => e.options?.nonCapturing === true && harness!.tui.isOverlayVisible(e),
+		);
+		expect(incOverlays4).toHaveLength(1);
+		const incLines4 = incOverlays4[0]!.component
+			.render(Number(incOverlays4[0]!.options?.width ?? 44))
+			.map((l) => stripTerminalSequences(l));
+		expect(extractPreviewBody(incLines4)).toBe("Mounted fallback [🖼 Image #1]");
+		expect(incLines4.join("\n")).not.toContain("[изображение]");
 	});
 });

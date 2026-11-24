@@ -106,6 +106,7 @@ const MACOS_OPTION_TO_QWERTY: ReadonlyArray<readonly [string, string, boolean?]>
 	["Ќ", "r", true],
 	["ў", "o"],
 	["Ў", "o", true],
+	["„", "o", true],
 	["‘", "p"],
 	["’", "p", true],
 	["Œ", "q", true],
@@ -156,6 +157,10 @@ function isCtrlLetterControlCodepoint(codepoint: number): boolean {
 		codepoint !== 0x0a &&
 		codepoint !== 0x0d
 	);
+}
+
+function isAsciiLetterCodepoint(codepoint: number): boolean {
+	return (codepoint >= 65 && codepoint <= 90) || (codepoint >= 97 && codepoint <= 122);
 }
 
 function normalizeAsciiBaseCodepoint(codepoint: number): number | undefined {
@@ -287,6 +292,7 @@ function normalizeSingleEscapeSequence(data: string, options?: KeyboardLayoutNor
 
 	const codepoint = Number.parseInt(csiMatch[1]!, 10);
 	const baseLayoutKey = csiMatch[3] ? Number.parseInt(csiMatch[3], 10) : undefined;
+	const asciiBase = baseLayoutKey !== undefined ? normalizeAsciiBaseCodepoint(baseLayoutKey) : undefined;
 	const modValue = csiMatch[4] ? Number.parseInt(csiMatch[4], 10) : 1;
 	const modifier = modValue - 1;
 	const eventSuffix = csiMatch[5] ? `:${csiMatch[5]}` : "";
@@ -295,35 +301,40 @@ function normalizeSingleEscapeSequence(data: string, options?: KeyboardLayoutNor
 		const effectiveMod = modifier & ~LOCK_MASK;
 		if ((effectiveMod === 0 || effectiveMod === MOD_SHIFT) && codepoint > 127) {
 			const optEntry = OPTION_CODEPOINT_MAP.get(codepoint);
-			if (optEntry && isChordEnabled(optEntry.chordId, options)) {
-				const nextMod = (modifier | MOD_ALT | (optEntry.shift ? MOD_SHIFT : 0)) + 1;
-				return `\x1b[${optEntry.latinCodepoint};${nextMod}${eventSuffix}u`;
+			if (optEntry && !CYRILLIC_CODEPOINT_MAP.has(codepoint)) {
+				const targetCp =
+					asciiBase !== undefined && asciiBase >= 97 && asciiBase <= 122
+						? asciiBase
+						: optEntry.latinCodepoint;
+				const isShift = effectiveMod === MOD_SHIFT || optEntry.shift;
+				const lat = String.fromCharCode(targetCp);
+				const chordId = isShift ? `shift+alt+${lat}` : `alt+${lat}`;
+				if (isChordEnabled(chordId, options)) {
+					const nextMod = (modifier | MOD_ALT | (isShift ? MOD_SHIFT : 0)) + 1;
+					return `\x1b[${targetCp};${nextMod}${eventSuffix}u`;
+				}
 			}
 		}
 		return data;
 	}
 
-	if (codepoint > 127) {
-		const optEntry = OPTION_CODEPOINT_MAP.get(codepoint);
-		if (optEntry) {
-			const nextMod = (modifier | MOD_ALT | (optEntry.shift ? MOD_SHIFT : 0)) + 1;
-			return `\x1b[${optEntry.latinCodepoint};${nextMod}${eventSuffix}u`;
+	if (asciiBase !== undefined) {
+		if (codepoint > 127) {
+			const optEntry = !CYRILLIC_CODEPOINT_MAP.has(codepoint)
+				? OPTION_CODEPOINT_MAP.get(codepoint)
+				: undefined;
+			if (optEntry && (modifier & MOD_ALT) === 0) {
+				const nextMod = (modifier | MOD_ALT | (optEntry.shift ? MOD_SHIFT : 0)) + 1;
+				return `\x1b[${asciiBase};${nextMod}${eventSuffix}u`;
+			}
+			return `\x1b[${asciiBase};${modValue}${eventSuffix}u`;
 		}
-	}
-
-	if (baseLayoutKey !== undefined) {
-		const asciiBase = normalizeAsciiBaseCodepoint(baseLayoutKey);
-		if (asciiBase !== undefined) {
-			if (codepoint > 127) {
-				return `\x1b[${asciiBase};${modValue}${eventSuffix}u`;
+		if (!isAsciiLetterCodepoint(codepoint) && asciiBase >= 97 && asciiBase <= 122) {
+			if ((modifier & MOD_CTRL) !== 0 && (modifier & MOD_ALT) === 0 && codepoint !== asciiBase - 96) {
+				const nextMod = (modifier | MOD_ALT) + 1;
+				return `\x1b[${asciiBase};${nextMod}${eventSuffix}u`;
 			}
-			if (asciiBase >= 97 && asciiBase <= 122 && normalizeAsciiBaseCodepoint(codepoint) !== asciiBase) {
-				if ((modifier & MOD_CTRL) !== 0 && (modifier & MOD_ALT) === 0 && codepoint !== asciiBase - 96) {
-					const nextMod = (modifier | MOD_ALT) + 1;
-					return `\x1b[${asciiBase};${nextMod}${eventSuffix}u`;
-				}
-				return `\x1b[${asciiBase};${modValue}${eventSuffix}u`;
-			}
+			return `\x1b[${asciiBase};${modValue}${eventSuffix}u`;
 		}
 	}
 
@@ -332,6 +343,12 @@ function normalizeSingleEscapeSequence(data: string, options?: KeyboardLayoutNor
 			return `\x1b[${codepoint + 96};${modValue}${eventSuffix}u`;
 		}
 		return data;
+	}
+
+	const optEntry = OPTION_CODEPOINT_MAP.get(codepoint);
+	if (optEntry) {
+		const nextMod = (modifier | MOD_ALT | (optEntry.shift ? MOD_SHIFT : 0)) + 1;
+		return `\x1b[${optEntry.latinCodepoint};${nextMod}${eventSuffix}u`;
 	}
 
 	const mapped = CYRILLIC_CODEPOINT_MAP.get(codepoint);

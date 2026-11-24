@@ -255,4 +255,28 @@ describe("keyboard-layout normalizer", () => {
 		expect(matchesLayoutChord("œ", "option+q")).toBe(true);
 		expect(matchesLayoutChord("\x1b[43;5u", "ctrl++")).toBe(true);
 	});
+
+	it("prioritizes CSI-u baseLayoutKey over ambiguous Option symbols and preserves non-QWERTY Latin shortcuts", () => {
+		const scoped = { enabledOptionChords: new Set(["alt+m", "alt+q"]) };
+		expect(normalizeKeyboardLayoutInput("\x1b[181::118u", scoped)).toBe("\x1b[181::118u");
+		expect(matchesKey(normalizeKeyboardLayoutInput("\x1b[181::118u"), "alt+v")).toBe(true);
+		expect(matchesKey(normalizeKeyboardLayoutInput("\x1b[181::118;3u"), "alt+v")).toBe(true);
+
+		const ruWinCtrlOptE = normalizeKeyboardLayoutInput("\x1b[1118::101;5u");
+		expect(matchesKey(ruWinCtrlOptE, "ctrl+alt+e")).toBe(true);
+		expect(matchesKey(ruWinCtrlOptE, "ctrl+alt+o")).toBe(false);
+
+		const phoneticCtrlM = normalizeKeyboardLayoutInput("\x1b[1084::109;5u");
+		expect(matchesKey(phoneticCtrlM, "ctrl+m")).toBe(true);
+		expect(matchesKey(phoneticCtrlM, "ctrl+alt+m")).toBe(false);
+
+		const qwertzCtrlZ = normalizeKeyboardLayoutInput("\x1b[122::121;5u");
+		expect(matchesKey(qwertzCtrlZ, "ctrl+z")).toBe(true);
+		expect(matchesKey(qwertzCtrlZ, "ctrl+alt+y")).toBe(false);
+
+		const colemakCtrlAltP = normalizeKeyboardLayoutInput("\x1b[112::114;7u");
+		expect(matchesKey(colemakCtrlAltP, "ctrl+alt+p")).toBe(true);
+
+		expect(matchesKey(normalizeKeyboardLayoutInput("\x1b[8222;5u"), "shift+ctrl+alt+o")).toBe(true);
+	});
 });

@@ -231,7 +231,7 @@ function renderRowCall(name: string, args: ToolArgs, theme: Theme, ctx: RenderCo
 
 function renderRowCallContent(name: string, args: ToolArgs, theme: Theme, ctx: RenderContext): Component {
 	if (name === "write" && ctx.argsComplete && runtime.canRun(ctx.toolCallId)) {
-		runtime.captureWriteBaseline(ctx.toolCallId, args, ctx.cwd);
+		runtime.captureWriteBaseline(ctx.toolCallId, args, ctx.cwd ?? getActiveHostRuntime()?.ctx.cwd);
 	}
 	const state = runtime.syncRow(ctx);
 	runtime.syncExpansion(state, ctx.expanded, name);
@@ -908,7 +908,11 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 			return;
 		}
 		if (event.toolName === "write") {
-			runtime.captureWriteBaseline(event.toolCallId, (event as { args?: unknown }).args, ctx?.cwd);
+			runtime.captureWriteBaseline(
+				event.toolCallId,
+				(event as { args?: unknown }).args,
+				ctx?.cwd ?? sessionContext?.cwd ?? getActiveHostRuntime()?.ctx.cwd,
+			);
 		}
 		nestedSummaries.begin(event.toolCallId, event.toolName);
 		runtime.noteCall(event.toolCallId);

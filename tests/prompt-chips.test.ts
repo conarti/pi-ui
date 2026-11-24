@@ -238,6 +238,22 @@ describe("Prompt Chip pure registry & paste threshold seams", () => {
 				byteLength: 0,
 			},
 		]);
+
+		const placeholderOnly = reloadedRegistry.reconstructSubmittedPrompt("[изображение]");
+		expect(placeholderOnly.displayText).toBe("[🖼 Image #1]");
+
+		const textPlusPlaceholder = reloadedRegistry.reconstructSubmittedPrompt(
+			"Check layout\n\n[изображение]",
+		);
+		expect(textPlusPlaceholder.displayText).toBe("Check layout [🖼 Image #1]");
+
+		const quoteOnlyRegistry = new PromptChipRegistry();
+		const qChip = quoteOnlyRegistry.registerQuote("line A\nline B\nline C\nline D");
+		const qExpanded = quoteOnlyRegistry.expandDraftForSubmit(`${qChip.token} Explain`);
+		const qWithExternalImage = quoteOnlyRegistry.reconstructSubmittedPrompt(
+			`${qExpanded.text} [🖼 Image #1]`,
+		);
+		expect(qWithExternalImage.displayText).toBe("[❝ Quote #1 · 4 lines] Explain [🖼 Image #1]");
 	});
 
 	it("handles empty inputs, image-only submissions, orphan/unknown tokens, and simultaneous steer + followUp queues cleanly", () => {

@@ -94,7 +94,11 @@ function extractPromptVisibleText(content: unknown): string {
 	return trimmedText ? `${trimmedText} ${pills}` : pills;
 }
 
-function appendBranchTurns(turns: BranchTurn[], entries: readonly any[]): BranchTurn[] {
+function appendBranchTurns(
+	turns: BranchTurn[],
+	entries: readonly any[],
+	allEntries: readonly any[] = entries,
+): BranchTurn[] {
 	for (const entry of entries) {
 		if (entry?.type !== "message" || entry.message?.role !== "user") continue;
 		const prompt = extractPromptVisibleText(entry.message.content).trim();
@@ -105,7 +109,7 @@ function appendBranchTurns(turns: BranchTurn[], entries: readonly any[]): Branch
 		const displayPrompt = reconstructTurnPromptText(prompt, {
 			timestamp,
 			messageId: id,
-			entries,
+			entries: allEntries,
 		});
 		turns.push({
 			id,
@@ -255,7 +259,7 @@ export class TranscriptTurnIndex {
 		}
 
 		if (same === this.seenEntries.length && branch.length > this.seenEntries.length) {
-			this.branchTurns = appendBranchTurns(this.branchTurns.slice(), branch.slice(this.seenEntries.length));
+			this.branchTurns = appendBranchTurns(this.branchTurns.slice(), branch.slice(this.seenEntries.length), branch);
 		} else {
 			this.branchTurns = appendBranchTurns([], branch);
 		}

@@ -250,7 +250,10 @@ interface StagedDraftSnapshot {
 }
 
 const LEGACY_IMAGE_MARKER_RE = /\[Image #(\d+):\s*([^\]]+)\]/g;
-const TRAILING_IMAGE_PLACEHOLDER_RE = /(?:\n\n\[изображение\])+\s*$/u;
+const IMAGE_PLACEHOLDER_TOKEN_RE = /\[изображение\]/gu;
+const TRAILING_IMAGE_PLACEHOLDER_RE = /(?:\s*\[изображение\])+\s*$/u;
+const TRAILING_SYNTHETIC_IMAGE_PILLS_RE = /((?:\s*\[🖼 Image #\d+\])+)\s*$/u;
+const SYNTHETIC_IMAGE_PILL_RE = /\[🖼 Image #(\d+)\]/gu;
 const CONTROL_CHARS_RE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
 
 function stripTrailingImagePlaceholders(text: string): string {
@@ -852,7 +855,12 @@ export class PromptChipRegistry {
 		return finalized;
 	}
 
+	private lastHydratedEntries?: readonly unknown[];
+	private lastHydratedLength = -1;
+
 	restorePersistedEntries(entries: readonly unknown[]): void {
+		this.lastHydratedEntries = entries;
+		this.lastHydratedLength = entries.length;
 		const customByEntryId = new Map<string, PersistedPromptChipsPayload>();
 		let immediatelyPrecedingPayload: PersistedPromptChipsPayload | undefined;
 
@@ -925,70 +933,144 @@ export class PromptChipRegistry {
 		}
 	}
 
+	ensurePersistedEntriesHydrated(entries: readonly unknown[] | undefined): void {
+		if (!entries || entries.length === 0) return;
+		if (this.lastHydratedEntries === entries && this.lastHydratedLength === entries.length) {
+			return;
+		}
+		this.restorePersistedEntries(entries);
+	}
+
 	reconstructSubmittedPrompt(
 		rawCardText: string,
 		timestamp?: number | string,
 		messageId?: string,
 	): ReconstructedSubmittedPrompt {
 		const normalizedRaw = rawCardText.replace(/\r\n?/g, "\n").trim();
+		const placeholderCount = [...normalizedRaw.matchAll(IMAGE_PLACEHOLDER_TOKEN_RE)].length;
 		const clean = stripTrailingImagePlaceholders(normalizedRaw);
 		const canonical = canonicalizePromptLookupText(normalizedRaw);
 
-		const matchesRecordText = (rec: PersistedPromptChipsPayload): boolean =>
-			rec.expandedText === clean ||
-			rec.expandedText === normalizedRaw ||
-			rec.displayText === clean ||
-			canonicalizePromptLookupText(rec.expandedText) === canonical ||
-			canonicalizePromptLookupText(rec.displayText) === canonical;
+		const findMatchingRecord = (
+			candidateClean: string,
+			candidateCanonical: string,
+		): PersistedPromptChipsPayload | undefined => {
+			const matches = (rec: PersistedPromptChipsPayload): boolean =>
+				rec.expandedText === candidateClean ||
+				rec.expandedText === normalizedRaw ||
+				rec.displayText === candidateClean ||
+				canonicalizePromptLookupText(rec.expandedText) === candidateCanonical ||
+				canonicalizePromptLookupText(rec.displayText) === candidateCanonical;
 
-		if (messageId !== undefined) {
-			const byId = this.submittedByMessageId.get(String(messageId));
-			if (byId && matchesRecordText(byId)) {
-				return { displayText: byId.displayText, chips: byId.chips };
+			if (messageId !== undefined) {
+				const byId = this.submittedByMessageId.get(String(messageId));
+				if (byId && matches(byId)) return byId;
+			}
+			if (timestamp !== undefined) {
+				const byTs = this.submittedByTimestamp.get(String(timestamp));
+				if (byTs && matches(byTs)) return byTs;
+			}
+			return (
+				this.submittedByExpanded.get(candidateClean) ??
+				this.submittedByExpanded.get(normalizedRaw) ??
+				this.submittedByExpanded.get(candidateCanonical)
+			);
+		};
+
+		const buildFallbackImageChip = (number: number, filePath = ""): SerializedPromptChip => ({
+			id: `fallback-image-${number}`,
+			kind: "image",
+			number,
+			token: `[🖼 Image #${number}]`,
+			filePath,
+			fileName: filePath ? basename(filePath) || `image-${number}.png` : `Image #${number}`,
+			mimeType: filePath ? inferImageMimeTypeFromPath(filePath) : "image/png",
+			byteLength: 0,
+		});
+
+		const appendExtraImagePills = (
+			baseDisplay: string,
+			baseChips: readonly SerializedPromptChip[],
+			extraNumbers: readonly number[],
+		): ReconstructedSubmittedPrompt => {
+			if (extraNumbers.length === 0) {
+				return { displayText: baseDisplay, chips: baseChips };
+			}
+			const extraChips = extraNumbers.map((n) => buildFallbackImageChip(n));
+			const suffix = extraChips.map((c) => c.token).join(" ");
+			return {
+				displayText: baseDisplay ? `${baseDisplay} ${suffix}` : suffix,
+				chips: [...baseChips, ...extraChips],
+			};
+		};
+
+		const directRecord = findMatchingRecord(clean, canonical);
+		if (directRecord) {
+			const recImageCount = directRecord.chips.filter((c) => c.kind === "image").length;
+			const extraCount = Math.max(0, placeholderCount - recImageCount);
+			if (extraCount === 0) {
+				return { displayText: directRecord.displayText, chips: directRecord.chips };
+			}
+			const maxImgNum = directRecord.chips.reduce(
+				(max, c) => (c.kind === "image" && c.number > max ? c.number : max),
+				0,
+			);
+			const extraNums = Array.from({ length: extraCount }, (_, idx) => maxImgNum + idx + 1);
+			return appendExtraImagePills(directRecord.displayText, directRecord.chips, extraNums);
+		}
+
+		const trailingPillMatch = TRAILING_SYNTHETIC_IMAGE_PILLS_RE.exec(clean);
+		if (trailingPillMatch && trailingPillMatch.index > 0) {
+			const strippedClean = clean.slice(0, trailingPillMatch.index).trim();
+			const strippedCanonical = canonicalizePromptLookupText(strippedClean);
+			const strippedRecord = findMatchingRecord(strippedClean, strippedCanonical);
+			if (strippedRecord) {
+				const trailingNums = [...trailingPillMatch[1]!.matchAll(SYNTHETIC_IMAGE_PILL_RE)].map((m) =>
+					Number.parseInt(m[1]!, 10),
+				);
+				return appendExtraImagePills(strippedRecord.displayText, strippedRecord.chips, trailingNums);
 			}
 		}
 
-		if (timestamp !== undefined) {
-			const byTs = this.submittedByTimestamp.get(String(timestamp));
-			if (byTs && matchesRecordText(byTs)) {
-				return { displayText: byTs.displayText, chips: byTs.chips };
+		const fallbackChips: SerializedPromptChip[] = [];
+		let rebuilt = clean.includes("[Image #")
+			? clean.replace(LEGACY_IMAGE_MARKER_RE, (_full, numStr: string, rawPath: string) => {
+					const number = Number.parseInt(numStr, 10);
+					const chip = buildFallbackImageChip(number, rawPath.trim());
+					fallbackChips.push(chip);
+					return chip.token;
+				})
+			: clean;
+
+		if (placeholderCount > 0) {
+			let existingImageCount = 0;
+			let maxImageNum = 0;
+			for (const span of findPromptChipSpans(rebuilt)) {
+				if (span.kind === "image") {
+					existingImageCount += 1;
+					if (span.number > maxImageNum) maxImageNum = span.number;
+				}
+			}
+			const missingImages = placeholderCount - existingImageCount;
+			if (missingImages > 0) {
+				const added = Array.from({ length: missingImages }, (_, idx) =>
+					buildFallbackImageChip(maxImageNum + idx + 1),
+				);
+				fallbackChips.push(...added);
+				const suffix = added.map((c) => c.token).join(" ");
+				rebuilt = rebuilt ? `${rebuilt} ${suffix}` : suffix;
 			}
 		}
 
-		const byExpanded =
-			this.submittedByExpanded.get(clean) ??
-			this.submittedByExpanded.get(normalizedRaw) ??
-			this.submittedByExpanded.get(canonical);
-		if (byExpanded) {
-			return { displayText: byExpanded.displayText, chips: byExpanded.chips };
+		if (fallbackChips.length > 0 && findPromptChipSpans(rebuilt).length === fallbackChips.length) {
+			return { displayText: rebuilt, chips: fallbackChips };
 		}
 
-		if (clean.includes("[Image #")) {
-			const fallbackChips: SerializedPromptChip[] = [];
-			const rebuilt = clean.replace(LEGACY_IMAGE_MARKER_RE, (_full, numStr: string, rawPath: string) => {
-				const number = Number.parseInt(numStr, 10);
-				const filePath = rawPath.trim();
-				const fileName = basename(filePath) || `image-${number}.png`;
-				const token = `[🖼 Image #${number}]`;
-				fallbackChips.push({
-					id: `fallback-image-${number}`,
-					kind: "image",
-					number,
-					token,
-					filePath,
-					fileName,
-					mimeType: inferImageMimeTypeFromPath(filePath),
-					byteLength: 0,
-				});
-				return token;
-			});
-			if (fallbackChips.length > 0) {
-				return { displayText: rebuilt, chips: fallbackChips };
-			}
-		}
-
-		const inlineSpans = findPromptChipSpans(normalizedRaw);
+		const inlineSpans = findPromptChipSpans(rebuilt);
 		if (inlineSpans.length > 0) {
+			const fallbackByNum = new Map<number, SerializedPromptChip>(
+				fallbackChips.map((c) => [c.number, c]),
+			);
 			const inlineChips: SerializedPromptChip[] = inlineSpans.map((span) => {
 				const key = makeChipBindingKey(span.kind, span.number);
 				const chipId =
@@ -1000,7 +1082,7 @@ export class PromptChipRegistry {
 					return serializePromptChip(known, span.number, MAX_PERSISTED_PREVIEW_CHARS);
 				}
 				if (span.kind === "image") {
-					return {
+					return fallbackByNum.get(span.number) ?? {
 						id: `inline-image-${span.number}`,
 						kind: "image",
 						number: span.number,
@@ -1036,10 +1118,10 @@ export class PromptChipRegistry {
 					previewText: span.token,
 				};
 			});
-			return { displayText: normalizedRaw, chips: inlineChips };
+			return { displayText: rebuilt, chips: inlineChips };
 		}
 
-		return { displayText: normalizedRaw, chips: [] };
+		return { displayText: rebuilt, chips: [] };
 	}
 
 	clearSession(): void {
@@ -1053,6 +1135,8 @@ export class PromptChipRegistry {
 		this.submittedByMessageId.clear();
 		this.submittedByTimestamp.clear();
 		this.submittedByExpanded.clear();
+		this.lastHydratedEntries = undefined;
+		this.lastHydratedLength = -1;
 	}
 }
 
@@ -1076,18 +1160,11 @@ export function reconstructTurnPromptText(
 ): string {
 	if (!rawPrompt) return "";
 	const registry = getActivePromptChipRegistry();
-	let reconstructed = registry.reconstructSubmittedPrompt(
+	registry.ensurePersistedEntriesHydrated(options?.entries);
+	const reconstructed = registry.reconstructSubmittedPrompt(
 		rawPrompt,
 		options?.timestamp,
 		options?.messageId,
 	);
-	if (reconstructed.chips.length === 0 && options?.entries && options.entries.length > 0) {
-		registry.restorePersistedEntries(options.entries);
-		reconstructed = registry.reconstructSubmittedPrompt(
-			rawPrompt,
-			options?.timestamp,
-			options?.messageId,
-		);
-	}
 	return reconstructed.displayText;
 }
