@@ -7,7 +7,6 @@ import {
 	extractPlanSteps,
 	getSessionWorkflow,
 	MODE_META,
-	WRITE_TOOLS,
 	type PlanStep,
 	type SessionMode,
 } from "../../shared/session-workflow.ts";
@@ -15,20 +14,6 @@ import { requestRender } from "../../shared/ui-action-bridge.ts";
 import { confirmSafeToolCall, showPlanStudio } from "./studio-overlay.ts";
 
 export { extractPlanSteps };
-
-const DESTRUCTIVE_BASH_RE =
-	/(?:^|[;&|]\s*)(?:rm|mv|cp|mkdir|touch|chmod|chown|ln|dd|mkfs|kill|pkill|killall|sudo|brew|apt|yum|pacman|npm\s+(?:i|install|un|uninstall|publish|ci)|pnpm\s+(?:add|i|install|remove)|yarn\s+(?:add|remove)|git\s+(?:add|commit|push|pull|merge|rebase|reset|checkout|switch|restore|clean|stash|cherry-pick|tag)|sed\s+-i|perl\s+-i|tee\b)/i;
-
-const REDIRECT_WRITE_RE = /(?:^|[^<>])>(?!&)/;
-
-function isReadOnlyBash(command: string): boolean {
-	const trimmed = command.trim();
-	if (!trimmed) return true;
-	if (DESTRUCTIVE_BASH_RE.test(trimmed)) return false;
-	const strippedRedirects = trimmed.replace(/\d*>&\d+/g, "").replace(/2>\/dev\/null/g, "");
-	if (REDIRECT_WRITE_RE.test(strippedRedirects)) return false;
-	return true;
-}
 
 function isAssistantMessage(m: AgentMessage): m is AssistantMessage {
 	return m.role === "assistant" && Array.isArray(m.content);
@@ -325,40 +310,14 @@ export function registerPlanStudioFeature(pi: ExtensionAPI): void {
 
 	pi.on("tool_call", async (event, ctx) => {
 		const st = getSessionWorkflow();
-		if (st.mode === "plan") {
-			if (WRITE_TOOLS.has(event.toolName)) {
-				return {
-					block: true,
-					reason: "В режиме Plan запись в файлы отключена. Сначала заверши план и утверди его с пользователем.",
-				};
-			}
-			if (event.toolName === "bash") {
-				const cmd = String((event.input as any)?.command ?? "");
-				if (!isReadOnlyBash(cmd)) {
-					return { block: true, reason: `В режиме Plan разрешены только команды чтения. Заблокировано: ${cmd}` };
-				}
-			}
-			return undefined;
-		}
-
-		if (st.mode === "safe" && !st.safeAllowTurn) {
-			if (WRITE_TOOLS.has(event.toolName)) {
-				const targetPath = String((event.input as any)?.path ?? "");
-				const decision = await confirmSafeToolCall(ctx, event.toolName, `Изменение файла: ${targetPath}`);
-				if (decision === "allow-turn") st.safeAllowTurn = true;
-				if (decision === "block") return { block: true, reason: "Отклонено пользователем в режиме Auto-Safe" };
-				return undefined;
-			}
-			if (event.toolName === "bash") {
-				const cmd = String((event.input as any)?.command ?? "");
-				if (!isReadOnlyBash(cmd)) {
-					const decision = await confirmSafeToolCall(ctx, "bash", cmd);
-					if (decision === "allow-turn") st.safeAllowTurn = true;
-					if (decision === "block") return { block: true, reason: "Команда отклонена пользователем в режиме Auto-Safe" };
-				}
-			}
-		}
-		return undefined;
+		return await st.preflightToolCall(
+			{
+				toolName: event.toolName,
+				input: (event.input as Record<string, unknown> | undefined) ?? undefined,
+				tools: pi,
+			},
+			(toolName, summary) => confirmSafeToolCall(ctx, toolName, summary),
+		);
 	});
 
 	pi.on("context", async (event) => {

@@ -1,3 +1,5 @@
+import { classifyShellEffect, type ShellDialect } from "./shell-analysis.ts";
+
 export type SessionMode = "code" | "plan" | "safe";
 
 export interface PlanStep {
@@ -15,11 +17,36 @@ export interface PersistedSessionWorkflowState {
 	withheldWriteTools?: string[];
 }
 
+export interface ToolMetadata {
+	name: string;
+	annotations?: {
+		destructiveHint?: boolean;
+	};
+	destructiveHint?: boolean;
+}
+
 export interface ToolAccessPort {
 	getActiveTools(): string[];
 	setActiveTools(tools: string[]): void;
-	getAllTools?(): Array<{ name: string }>;
+	getAllTools?(): readonly ToolMetadata[];
 }
+
+export type SafeConfirmationDecision = "allow" | "allow-turn" | "block";
+
+export type SafeConfirmationPrompt = (
+	toolName: string,
+	summary: string,
+) => Promise<SafeConfirmationDecision>;
+
+export interface ToolCallPreflightRequest {
+	toolName: string;
+	input?: Record<string, unknown>;
+	tools?: ToolAccessPort;
+}
+
+export type ToolCallPreflightResult =
+	| { block: true; reason: string }
+	| undefined;
 
 export interface EntryPersistencePort {
 	appendEntry(customType: string, data: unknown): void;
@@ -130,6 +157,57 @@ function inferAvailableWriteTools(tools: ToolAccessPort): string[] {
 	return [...WRITE_TOOL_NAMES];
 }
 
+function isDestructiveAnnotatedTool(toolName: string, tools?: ToolAccessPort): boolean {
+	if (!tools || typeof tools.getAllTools !== "function") return false;
+	const meta = tools.getAllTools().find((t) => t.name === toolName);
+	if (!meta) return false;
+	return meta.annotations?.destructiveHint === true || meta.destructiveHint === true;
+}
+
+type ToolMutationClassification =
+	| { mutating: false }
+	| { mutating: true; planReason: string; confirmSummary: string; safeBlockReason: string };
+
+function classifyToolMutation(req: ToolCallPreflightRequest): ToolMutationClassification {
+	const { toolName, input, tools } = req;
+
+	if (WRITE_TOOLS.has(toolName)) {
+		const targetPath = String(input?.path ?? "");
+		return {
+			mutating: true,
+			planReason: "В режиме Plan запись в файлы отключена. Сначала заверши план и утверди его с пользователем.",
+			confirmSummary: `Изменение файла: ${targetPath}`,
+			safeBlockReason: "Отклонено пользователем в режиме Auto-Safe",
+		};
+	}
+
+	if (toolName === "bash" || toolName === "powershell") {
+		const dialect: ShellDialect = toolName === "powershell" ? "powershell" : "bash";
+		const cmd = String(input?.command ?? "");
+		const effect = classifyShellEffect(cmd, dialect);
+		if (effect.kind === "read-only") {
+			return { mutating: false };
+		}
+		return {
+			mutating: true,
+			planReason: `В режиме Plan разрешены только команды чтения (${effect.reason}). Заблокировано: ${cmd}`,
+			confirmSummary: cmd,
+			safeBlockReason: "Команда отклонена пользователем в режиме Auto-Safe",
+		};
+	}
+
+	if (isDestructiveAnnotatedTool(toolName, tools)) {
+		return {
+			mutating: true,
+			planReason: `В режиме Plan деструктивный инструмент "${toolName}" заблокирован.`,
+			confirmSummary: `Деструктивный инструмент: ${toolName}`,
+			safeBlockReason: `Инструмент "${toolName}" отклонён пользователем в режиме Auto-Safe`,
+		};
+	}
+
+	return { mutating: false };
+}
+
 export class SessionWorkflow {
 	mode: SessionMode = "code";
 	planRaw = "";
@@ -140,6 +218,8 @@ export class SessionWorkflow {
 	safeAllowTurn = false;
 	isStreaming = false;
 	withheldWriteTools: string[] | undefined = undefined;
+	private safeConfirmActive = false;
+	private safeConfirmWaiters: Array<() => void> = [];
 
 	reset(defaultPlanFlag = false): void {
 		this.mode = defaultPlanFlag ? "plan" : "code";
@@ -151,6 +231,8 @@ export class SessionWorkflow {
 		this.safeAllowTurn = false;
 		this.isStreaming = false;
 		this.withheldWriteTools = undefined;
+		this.safeConfirmActive = false;
+		this.safeConfirmWaiters = [];
 	}
 
 	hasPlan(): boolean {
@@ -169,6 +251,65 @@ export class SessionWorkflow {
 	endAgentTurn(): void {
 		this.isStreaming = false;
 		this.safeAllowTurn = false;
+	}
+
+	private async enqueueSafeConfirmation<T>(task: () => Promise<T>): Promise<T> {
+		if (this.safeConfirmActive) {
+			await new Promise<void>((resolve) => {
+				this.safeConfirmWaiters.push(resolve);
+			});
+		}
+		this.safeConfirmActive = true;
+		try {
+			return await task();
+		} finally {
+			const next = this.safeConfirmWaiters.shift();
+			if (next) {
+				next();
+			} else {
+				this.safeConfirmActive = false;
+			}
+		}
+	}
+
+	async preflightToolCall(
+		req: ToolCallPreflightRequest,
+		confirmSafe: SafeConfirmationPrompt,
+	): Promise<ToolCallPreflightResult> {
+		if (this.mode === "code") return undefined;
+
+		const classification = classifyToolMutation(req);
+		if (!classification.mutating) return undefined;
+
+		if (this.mode === "plan") {
+			return { block: true, reason: classification.planReason };
+		}
+
+		if (this.safeAllowTurn) return undefined;
+
+		return await this.enqueueSafeConfirmation(async () => {
+			if (this.mode === "code") return undefined;
+			if (this.mode === "plan") {
+				return { block: true, reason: classification.planReason };
+			}
+			if (this.safeAllowTurn) return undefined;
+
+			let decision: SafeConfirmationDecision;
+			try {
+				decision = await confirmSafe(req.toolName, classification.confirmSummary);
+			} catch {
+				return { block: true, reason: classification.safeBlockReason };
+			}
+
+			if (decision === "allow-turn") {
+				this.safeAllowTurn = true;
+				return undefined;
+			}
+			if (decision === "allow") {
+				return undefined;
+			}
+			return { block: true, reason: classification.safeBlockReason };
+		});
 	}
 
 	syncActiveTools(tools: ToolAccessPort, options?: { inferMissingOnPlanRestore?: boolean }): void {
