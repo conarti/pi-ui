@@ -10,7 +10,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { fgRgb, isLightTheme } from "../../shared/ansi.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
-import { collectPromptRowOffsets, type OutlineTurn } from "./turn-tracker.ts";
+import type { IndexedTurn, TranscriptTurnIndex } from "../../shared/turn-index.ts";
 
 export const RAIL_WIDTH = 2;
 export const MIN_TERMINAL_WIDTH_FOR_RAIL = 64;
@@ -212,11 +212,6 @@ export class OutlineRailComponent implements Component {
 
 	private refHeight = 0;
 	private refKey = "";
-	private cacheTurns?: OutlineTurn[];
-	private cacheWidth = -1;
-	private cacheHeight = -1;
-	private cacheYs: number[] = [];
-	private cacheHeights: number[] = [];
 	private lastRenderedHeight = -1;
 	private syncScheduled = false;
 
@@ -224,10 +219,14 @@ export class OutlineRailComponent implements Component {
 		private readonly tui: TUI,
 		private readonly scroll: ScrollView,
 		private readonly getTheme: () => Theme,
-		private readonly getTurns: () => OutlineTurn[],
+		private readonly turnIndex: TranscriptTurnIndex,
 		private readonly isEnabled: () => boolean,
-		private readonly onHoverChange: (hit: RailHit | undefined, turn: OutlineTurn | undefined, screenY: number) => void,
-		private readonly onSelectTurn: (turn: OutlineTurn, targetRow: number) => void,
+		private readonly onHoverChange: (hit: RailHit | undefined, turn: IndexedTurn | undefined, screenY: number) => void,
+		private readonly onSelectTurn: (
+			turn: IndexedTurn,
+			turnIndex: number,
+			direction: "prev" | "next" | "jump",
+		) => void,
 	) {}
 
 	invalidate(): void {}
@@ -236,7 +235,7 @@ export class OutlineRailComponent implements Component {
 		if (!this.isEnabled() || viewport.width < MIN_TERMINAL_WIDTH_FOR_RAIL || viewport.height < 4) {
 			return false;
 		}
-		return this.getTurns().length >= MIN_TURNS_FOR_RAIL;
+		return this.turnIndex.getTurnCount() >= MIN_TURNS_FOR_RAIL;
 	};
 
 	clearHover(): void {
@@ -247,7 +246,7 @@ export class OutlineRailComponent implements Component {
 	}
 
 	offsetOf(turnIndex: number): number {
-		return this.cacheYs[turnIndex] ?? 0;
+		return this.turnIndex.getTurns()[turnIndex]?.start ?? 0;
 	}
 
 	handleMouse(e: TuiMouseEvent): TuiMouseEventResult | undefined {
@@ -267,8 +266,8 @@ export class OutlineRailComponent implements Component {
 			});
 			if (hitKey(hit) === hitKey(this.hovered)) return undefined;
 			this.hovered = hit;
-			const turns = this.getTurns();
-			let turn: OutlineTurn | undefined;
+			const turns = this.turnIndex.getTurns();
+			let turn: IndexedTurn | undefined;
 			if (hit?.kind === "tick") turn = turns[hit.turn];
 			else if (hit?.kind === "up" && this.geometry?.upTarget !== undefined) turn = turns[this.geometry.upTarget];
 			else if (hit?.kind === "down" && this.geometry?.downTarget !== undefined) turn = turns[this.geometry.downTarget];
@@ -279,9 +278,10 @@ export class OutlineRailComponent implements Component {
 
 		if (e.type === "click" && e.button === "left") {
 			const targetIdx = this.geometry ? resolveRailHitTarget(this.geometry, hit) : undefined;
-			const turns = this.getTurns();
+			const turns = this.turnIndex.getTurns();
 			if (targetIdx === undefined || !turns[targetIdx]) return undefined;
-			this.onSelectTurn(turns[targetIdx]!, this.offsetOf(targetIdx));
+			const direction = hit?.kind === "up" ? "prev" : hit?.kind === "down" ? "next" : "jump";
+			this.onSelectTurn(turns[targetIdx]!, targetIdx, direction);
 			return { handled: true, render: true };
 		}
 
@@ -290,7 +290,7 @@ export class OutlineRailComponent implements Component {
 
 	render(width: number): string[] {
 		const w = Math.max(1, Math.min(width, RAIL_WIDTH));
-		const turns = this.getTurns();
+		const turns = this.turnIndex.getTurns();
 		const height = Math.max(0, this.scroll.viewportHeight ?? 0);
 
 		if (height === 0 && turns.length >= MIN_TURNS_FOR_RAIL && !this.syncScheduled) {
@@ -312,29 +312,10 @@ export class OutlineRailComponent implements Component {
 		const th = this.getTheme();
 		const lines = Array.from({ length: height }, () => " ".repeat(w));
 		const termW = this.tui.terminal?.columns ?? 80;
-		const transcriptAvail = Math.max(1, termW - RAIL_WIDTH);
-		const contentWidth = Math.max(1, this.scroll.getContentWidth(transcriptAvail));
-		const doc = this.scroll.children[0];
 		const contentHeight = (this.scroll as any).contentHeight ?? 0;
 
-		let promptYs: number[];
-		const promptHeights: number[] = [];
-		if (
-			doc &&
-			this.cacheTurns === turns &&
-			this.cacheWidth === contentWidth &&
-			this.cacheHeight === contentHeight
-		) {
-			promptYs = this.cacheYs;
-			promptHeights.push(...this.cacheHeights);
-		} else {
-			promptYs = doc ? collectPromptRowOffsets(doc, turns, contentWidth, promptHeights) : turns.map(() => 0);
-			this.cacheTurns = turns;
-			this.cacheWidth = contentWidth;
-			this.cacheHeight = contentHeight;
-			this.cacheYs = promptYs;
-			this.cacheHeights = promptHeights.slice();
-		}
+		const promptYs = turns.map((turn) => turn.start);
+		const promptHeights = turns.map((turn) => turn.height);
 
 		const vp = computeRailViewport(
 			this.scroll.scrollTop ?? 0,
