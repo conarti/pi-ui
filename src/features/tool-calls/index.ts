@@ -230,6 +230,9 @@ function renderRowCall(name: string, args: ToolArgs, theme: Theme, ctx: RenderCo
 }
 
 function renderRowCallContent(name: string, args: ToolArgs, theme: Theme, ctx: RenderContext): Component {
+	if (name === "write" && runtime.canRun(ctx.toolCallId)) {
+		runtime.captureWriteBaseline(ctx.toolCallId, args, ctx.cwd);
+	}
 	const state = runtime.syncRow(ctx);
 	runtime.syncExpansion(state, ctx.expanded, name);
 	if (isGrok()) {
@@ -242,6 +245,13 @@ function renderRowCallContent(name: string, args: ToolArgs, theme: Theme, ctx: R
 			syncRunning: (running) => {
 				runtime.syncIndicator(ctx.toolCallId, running, () => ctx.invalidate());
 			},
+			getNestedSummary:
+				name === "codemode"
+					? () =>
+							state.finished === true
+								? nestedSummaries.format(ctx.toolCallId, theme, state.expanded === true)
+								: undefined
+					: undefined,
 		});
 	}
 	const kind = rowKind(name);
@@ -478,6 +488,7 @@ function renderRowResult(
 			},
 			author,
 			nestedSummary,
+			previousWriteContent: name === "write" ? runtime.writeBaseline(ctx.toolCallId) : undefined,
 		});
 	} else if (isCodex()) {
 		component = renderCodexResult({
@@ -554,7 +565,8 @@ function createCustomRenderers(name: string, author: ToolDefinition<any, any, an
 	return {
 		renderCall: (args, theme, ctx) => renderRowCall(name, asToolArgs(args), theme, own(ctx)),
 		renderResult: (result, options, theme, ctx) => {
-			const authorRenderer = author?.renderResult;
+			/* Встроенный codemode рендерится напрямую через Grok, чтобы при раскрытии не терять исходный JS-скрипт. */
+			const authorRenderer = hasAuthorRenderers(name, author) ? author?.renderResult : undefined;
 			const renderAuthorResult = authorRenderer
 				? (expanded: boolean) => {
 					const value = slot(ctx);
@@ -601,8 +613,23 @@ function resolveCustomRow(row: ToolRow): RowRenderers | undefined {
 		compactRendererDefinitions.add(renderers.renderResult);
 		return renderers;
 	}
-	if (!customTools.enabled || customTools.exclude.includes(row.toolName)) return undefined;
-	return createCustomRenderers(row.toolName, row.toolDefinition);
+	const isBuiltInCodemode =
+		row.toolName === "codemode" &&
+		!customTools.exclude.includes("codemode") &&
+		(!row.toolDefinition ||
+			compactRendererDefinitions.has(row.toolDefinition) ||
+			(row.toolDefinition.renderResult !== undefined &&
+				compactRendererDefinitions.has(row.toolDefinition.renderResult)) ||
+			!hasAuthorRenderers("codemode", row.toolDefinition));
+	if (!isBuiltInCodemode && (!customTools.enabled || customTools.exclude.includes(row.toolName))) {
+		return undefined;
+	}
+	const renderers = createCustomRenderers(row.toolName, row.toolDefinition);
+	if (isBuiltInCodemode) {
+		compactRendererDefinitions.add(renderers);
+		compactRendererDefinitions.add(renderers.renderResult);
+	}
+	return renderers;
 }
 
 type RendererAPI = ExtensionAPI & {
@@ -876,10 +903,13 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 	pi.on("message_end", (event) => {
 		if (nestedSummaries.restore(event.message)) runtime.repaint();
 	});
-	pi.on("tool_execution_start", (event) => {
+	pi.on("tool_execution_start", (event, ctx) => {
 		if (madeByTool(event)) {
 			nestedSummaries.note(event, false);
 			return;
+		}
+		if (event.toolName === "write") {
+			runtime.captureWriteBaseline(event.toolCallId, (event as { args?: unknown }).args, ctx?.cwd);
 		}
 		nestedSummaries.begin(event.toolCallId, event.toolName);
 		runtime.noteCall(event.toolCallId);

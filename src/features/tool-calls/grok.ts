@@ -1,4 +1,4 @@
-import type { AgentToolResult, Theme } from "@earendil-works/pi-coding-agent";
+import { generateUnifiedPatch, type AgentToolResult, type Theme } from "@earendil-works/pi-coding-agent";
 import {
 	stripTerminalSequences,
 	truncateToWidth,
@@ -7,10 +7,10 @@ import {
 } from "@earendil-works/pi-tui";
 import {
 	getAnimationElapsedMs,
-	paintRunningCommandBar,
-	paintRunningToolDiamond,
+	sampleBreathingWaveRgb,
 } from "../../shared/animation-scheduler.ts";
-import { fgRgb, getActiveGlobalTheme, isLightTheme } from "../../shared/ansi.ts";
+import { getActiveGlobalTheme, isLightTheme, type RgbTuple } from "../../shared/ansi.ts";
+import { colorizeRgb } from "./color.ts";
 import {
 	analyzeShell,
 	isHarmlessRedirect,
@@ -48,6 +48,18 @@ export const COMMAND_PREVIEW_TAIL = 3;
 
 const CODEMODE_SCRIPT_HEADER = /^Script (?:completed|failed)\nWall time [\d.]+ seconds\nOutput:\n?/u;
 
+function rawCodemodeOutputFromBlocks(result: AgentToolResult<unknown>, fallbackOutput: string): string {
+	const [first, ...rest] = result.content;
+	if (first?.type === "text" && /^Script (?:completed|failed)\nWall time [\d.]+ seconds\nOutput:\n$/u.test(normalizeLineEndings(first.text))) {
+		return rest
+			.filter((item): item is { type: "text"; text: string } => item.type === "text")
+			.map((item) => normalizeLineEndings(item.text))
+			.join("\n")
+			.trimEnd();
+	}
+	return fallbackOutput;
+}
+
 export interface HeadTailPreview {
 	readonly head: string[];
 	readonly omitted: number;
@@ -79,40 +91,60 @@ export interface ExtractedCommandOutput {
 	readonly exitCode?: number;
 }
 
+function formatCodemodeCallLines(
+	detailsCalls?: readonly { name?: unknown; args?: unknown; status?: unknown }[],
+): string[] {
+	if (!Array.isArray(detailsCalls) || detailsCalls.length === 0) return [];
+	return detailsCalls.map((call) => {
+		const icon =
+			call.status === "ok"
+				? "✓"
+				: call.status === "error"
+					? "✗"
+					: call.status === "cancelled"
+						? "⊘"
+						: "…";
+		const tool = typeof call.name === "string" ? call.name : "tool";
+		const args = typeof call.args === "string" && call.args ? ` ${call.args}` : "";
+		return `${icon} ${tool}${args}`;
+	});
+}
+
 export function extractCommandOutput(
 	name: string,
 	rawOutput: string,
 	isError: boolean,
 	detailsCalls?: readonly { name?: unknown; args?: unknown; status?: unknown }[],
+	truncationMeta?: { truncated?: boolean; fullOutputPath?: string },
 ): ExtractedCommandOutput {
 	let text = normalizeLineEndings(rawOutput);
 	let exitCode: number | undefined;
 
 	if (name === "codemode") {
 		text = text.replace(CODEMODE_SCRIPT_HEADER, "");
-	} else if ((name === "bash" || name === "powershell") && isError) {
-		const outcome = shellOutcome(text);
-		exitCode = outcome.exitCode;
-		text = outcome.output;
+	} else if (name === "bash" || name === "powershell") {
+		if (isError) {
+			const outcome = shellOutcome(text);
+			exitCode = outcome.exitCode;
+			text = outcome.output;
+		}
+		if ((truncationMeta?.truncated || truncationMeta?.fullOutputPath) && text.trimEnd().endsWith("]")) {
+			const trimmed = text.trimEnd();
+			const footerStart = trimmed.lastIndexOf("\n\n[");
+			if (
+				footerStart !== -1 &&
+				(!truncationMeta.fullOutputPath || trimmed.slice(footerStart).includes(truncationMeta.fullOutputPath))
+			) {
+				text = trimmed.slice(0, footerStart);
+			}
+		}
 	}
 
 	const cleaned = stripTerminalSequences(text).replace(/\n+$/u, "");
 	if (isEmptyOutput(cleaned)) {
-		if (name === "codemode" && Array.isArray(detailsCalls) && detailsCalls.length > 0) {
-			const callLines = detailsCalls.map((call) => {
-				const icon =
-					call.status === "ok"
-						? "✓"
-						: call.status === "error"
-							? "✗"
-							: call.status === "cancelled"
-								? "⊘"
-								: "…";
-				const tool = typeof call.name === "string" ? call.name : "tool";
-				const args = typeof call.args === "string" && call.args ? ` ${call.args}` : "";
-				return `${icon} ${tool}${args}`;
-			});
-			return { lines: callLines, exitCode };
+		if (name === "codemode") {
+			const callLines = formatCodemodeCallLines(detailsCalls);
+			if (callLines.length > 0) return { lines: callLines, exitCode };
 		}
 		return { lines: [], exitCode };
 	}
@@ -125,14 +157,10 @@ const GROK_NEUTRAL_COMMANDS = new Set([
 	"cd",
 	"pushd",
 	"popd",
-	"pwd",
-	"dirs",
 	"set-location",
 	"sl",
 	"push-location",
 	"pop-location",
-	"get-location",
-	"gl",
 	"echo",
 	"printf",
 	"write-output",
@@ -158,60 +186,22 @@ const GROK_SEARCH_COMMANDS = new Set([
 	"whereis",
 	"select-string",
 	"sls",
+	"get-command",
+	"gcm",
 ]);
 
-const GROK_LIST_COMMANDS = new Set(["ls", "dir", "tree", "du", "get-childitem", "gci"]);
-
-const GROK_READ_COMMANDS = new Set([
-	"cat",
-	"head",
-	"tail",
-	"less",
-	"more",
-	"bat",
-	"batcat",
-	"nl",
-	"sed",
-	"awk",
-	"gawk",
-	"mawk",
-	"nawk",
-	"jq",
-	"yq",
-	"wc",
-	"stat",
-	"file",
-	"strings",
-	"cut",
-	"sort",
-	"uniq",
-	"tr",
-	"diff",
-	"cmp",
-	"comm",
-	"readlink",
-	"realpath",
-	"get-content",
-	"gc",
-	"type",
-	"get-item",
-	"gi",
-	"get-itemproperty",
-	"gp",
-	"test-path",
-	"where-object",
-	"where",
-	"?",
-	"select-object",
-	"select",
-	"sort-object",
-	"measure-object",
-	"measure",
-	"format-table",
-	"ft",
-	"format-list",
-	"fl",
-	"out-string",
+const GROK_LIST_COMMANDS = new Set([
+	"ls",
+	"dir",
+	"tree",
+	"du",
+	"df",
+	"pwd",
+	"dirs",
+	"get-childitem",
+	"gci",
+	"get-location",
+	"gl",
 ]);
 
 function normalizeProgramName(raw: string, dialect: ShellDialect): string {
@@ -230,22 +220,10 @@ function classifyReadOnlyGitExploration(args: readonly string[]): LookKind | und
 		}
 	}
 	const sub = args[idx];
-	if (!sub) return undefined;
+	if (!sub) return "read";
 	if (sub === "grep") return "search";
 	if (sub === "ls-files" || sub === "ls-tree") return "list";
-	if (
-		sub === "show" ||
-		sub === "cat-file" ||
-		sub === "blame" ||
-		sub === "status" ||
-		sub === "diff" ||
-		sub === "log" ||
-		sub === "rev-parse" ||
-		sub === "describe"
-	) {
-		return "read";
-	}
-	return undefined;
+	return "read";
 }
 
 export function classifyGrokShellExploration(
@@ -279,13 +257,17 @@ export function classifyGrokShellExploration(
 			hasList = true;
 			continue;
 		}
-		if (GROK_SEARCH_COMMANDS.has(program)) hasSearch = true;
-		else if (GROK_LIST_COMMANDS.has(program)) hasList = true;
-		else if (GROK_READ_COMMANDS.has(program)) hasRead = true;
-		else return undefined;
+		if (GROK_SEARCH_COMMANDS.has(program) || (dialect === "bash" && program === "type")) {
+			hasSearch = true;
+		} else if (GROK_LIST_COMMANDS.has(program)) {
+			hasList = true;
+		} else {
+			/* Все остальные команды в этой ветке уже прошли строгую проверку read-only через Shell Effect. */
+			hasRead = true;
+		}
 	}
 
-	return hasList ? "list" : hasSearch ? "search" : hasRead ? "read" : undefined;
+	return hasSearch ? "search" : hasList ? "list" : hasRead ? "read" : undefined;
 }
 
 export function classifyGrokExploration(toolName: string, args: ToolArgs): LookKind | undefined {
@@ -374,10 +356,20 @@ export interface GrokPalette {
 	rail(text: string): string;
 }
 
+function paintGrokRgb(theme: Theme, rgb: RgbTuple, text: string): string {
+	return colorizeRgb(theme, { r: rgb[0], g: rgb[1], b: rgb[2] }, text);
+}
+
+function paintGrokWaveGlyph(theme: Theme, light: boolean, row: number, glyph: string): string {
+	const rgb = sampleBreathingWaveRgb(row, { theme, light });
+	return paintGrokRgb(theme, rgb, glyph);
+}
+
 export function grokPalette(fallbackTheme: Theme): GrokPalette {
 	const theme = getActiveGlobalTheme(fallbackTheme);
 	const light = isLightTheme(theme);
-	const key = `${light ? "light" : "dark"}:${(theme as { name?: string })?.name ?? ""}:${theme.getFgAnsi?.("text") ?? ""}`;
+	const colorMode = theme.getColorMode?.() ?? "truecolor";
+	const key = `${light ? "light" : "dark"}:${colorMode}:${(theme as { name?: string })?.name ?? ""}:${theme.getFgAnsi?.("text") ?? ""}`;
 
 	return {
 		theme,
@@ -385,40 +377,48 @@ export function grokPalette(fallbackTheme: Theme): GrokPalette {
 		key,
 		diamond(status: RowStatus, expanded: boolean): string {
 			if (status === "running") {
-				return paintRunningToolDiamond({ theme, light, row: 0 });
+				return paintGrokWaveGlyph(theme, light, 0, GROK_DIAMOND);
 			}
 			if (status === "error") {
 				return theme.fg("error", GROK_DIAMOND);
 			}
 			if (expanded && status === "success") {
-				return light ? fgRgb(37, 99, 235, GROK_DIAMOND) : fgRgb(97, 175, 239, GROK_DIAMOND);
+				return paintGrokRgb(theme, light ? [37, 99, 235] : [97, 175, 239], GROK_DIAMOND);
 			}
-			return light ? fgRgb(112, 128, 152, GROK_DIAMOND) : fgRgb(92, 110, 136, GROK_DIAMOND);
+			return paintGrokRgb(theme, light ? [112, 128, 152] : [92, 110, 136], GROK_DIAMOND);
 		},
 		title(text: string, status: RowStatus, expanded: boolean): string {
 			if (status === "error") {
 				return theme.fg("error", expanded ? theme.bold(text) : text);
 			}
 			if (status === "running" || expanded) {
-				const painted = light ? fgRgb(24, 48, 82, text) : fgRgb(172, 194, 222, text);
+				const painted = paintGrokRgb(theme, light ? [24, 48, 82] : [172, 194, 222], text);
 				return theme.bold(painted);
 			}
-			return light ? fgRgb(68, 86, 112, text) : fgRgb(136, 154, 178, text);
+			return paintGrokRgb(theme, light ? [68, 86, 112] : [136, 154, 178], text);
 		},
 		target(text: string, expanded: boolean): string {
 			if (!text) return "";
-			return light
-				? fgRgb(expanded ? [29, 78, 216] : [56, 78, 108], text)
-				: fgRgb(expanded ? [145, 195, 248] : [148, 168, 196], text);
+			return paintGrokRgb(
+				theme,
+				light
+					? expanded
+						? [29, 78, 216]
+						: [56, 78, 108]
+					: expanded
+						? [145, 195, 248]
+						: [148, 168, 196],
+				text,
+			);
 		},
 		dim(text: string): string {
-			return light ? fgRgb(124, 140, 164, text) : fgRgb(84, 100, 124, text);
+			return paintGrokRgb(theme, light ? [124, 140, 164] : [84, 100, 124], text);
 		},
 		body(text: string): string {
-			return light ? fgRgb(72, 90, 116, text) : fgRgb(128, 144, 168, text);
+			return paintGrokRgb(theme, light ? [72, 90, 116] : [128, 144, 168], text);
 		},
 		rail(text: string): string {
-			return light ? fgRgb(124, 140, 164, text) : fgRgb(84, 100, 124, text);
+			return paintGrokRgb(theme, light ? [124, 140, 164] : [84, 100, 124], text);
 		},
 	};
 }
@@ -482,6 +482,7 @@ function formatParentheticalMeta(
 	status: RowStatus,
 	state: RowState,
 	name: string,
+	liveNestedSummary?: string,
 ): string {
 	const running = status === "running";
 	const duration = durationFromState(state, running);
@@ -509,7 +510,8 @@ function formatParentheticalMeta(
 	if (grokMeta?.lineSummary) parts.push(grokMeta.lineSummary);
 	if (duration) parts.push(duration);
 	const base = parts.length > 0 ? ` ${pal.dim(`(${parts.join(" · ")})`)}` : "";
-	const nested = grokMeta?.nestedSummary ? `${pal.dim(" · ")}${grokMeta.nestedSummary}` : "";
+	const resolvedNested = liveNestedSummary ?? grokMeta?.nestedSummary;
+	const nested = resolvedNested ? `${pal.dim(" · ")}${resolvedNested}` : "";
 	return base + nested;
 }
 
@@ -621,8 +623,9 @@ export function renderGrokCall(options: {
 	state: RowState;
 	getStatus: () => RowStatus;
 	syncRunning: (running: boolean) => void;
+	getNestedSummary?: () => string | undefined;
 }): Component {
-	const { name, args, theme, state, getStatus, syncRunning } = options;
+	const { name, args, theme, state, getStatus, syncRunning, getNestedSummary } = options;
 	/* Активируем подписку на 30 fps таймер сразу при создании строки для активного вызова. */
 	syncRunning(getStatus() === "running");
 
@@ -633,16 +636,20 @@ export function renderGrokCall(options: {
 			const expanded = state.expanded === true;
 			const elapsedBucket = status === "running" ? String(getAnimationElapsedMs()) : "settled";
 			const g = state.grok;
+			const { verb, target } = buildHeaderParts(name, args, status);
+			const liveNested = getNestedSummary?.() ?? g?.nestedSummary ?? "";
 			return [
 				status,
 				expanded ? "1" : "0",
 				elapsedBucket,
+				verb,
+				target,
 				state.durationMs ?? "",
 				state.endedAt ?? "",
 				g?.exitCode ?? "",
 				g?.changes ? `${g.changes.added}/${g.changes.removed}` : "",
 				g?.lineSummary ?? "",
-				g?.nestedSummary ?? "",
+				liveNested,
 			].join("|");
 		},
 		(width, pal) => {
@@ -652,7 +659,7 @@ export function renderGrokCall(options: {
 			const { verb, target } = buildHeaderParts(name, args, status);
 			const styledVerb = pal.title(verb, status, expanded);
 			const styledTarget = target ? ` ${pal.target(target, expanded)}` : "";
-			const meta = formatParentheticalMeta(pal, status, state, name);
+			const meta = formatParentheticalMeta(pal, status, state, name, getNestedSummary?.());
 			const head = ` ${diamond} ${styledVerb}${styledTarget}${meta}`;
 			const lines = [truncateToWidth(head, width, "…")];
 
@@ -671,6 +678,7 @@ export function countDiffChangesFromResult(
 	name: string,
 	args: ToolArgs,
 	result: AgentToolResult<unknown>,
+	previousWriteContent?: string,
 ): { lines: CodeDiffLine[]; changes: { added: number; removed: number } } {
 	const patch = getEditPatch(result);
 	const displayDiff = getEditDiff(result);
@@ -689,6 +697,22 @@ export function countDiffChangesFromResult(
 			lines: [],
 			changes: countEditChanges(result) ?? { added: 0, removed: 0 },
 		};
+	}
+	if (name === "write" && previousWriteContent !== undefined) {
+		const oldNorm = normalizeLineEndings(previousWriteContent);
+		const newNorm = typeof args.content === "string" ? normalizeLineEndings(args.content) : "";
+		if (oldNorm === newNorm) {
+			return { lines: [], changes: { added: 0, removed: 0 } };
+		}
+		const generatedPatch = generateUnifiedPatch(pathOf(args) || "file", oldNorm, newNorm, 4);
+		const parsedWrite = parseCodeDiff(generatedPatch);
+		let added = 0;
+		let removed = 0;
+		for (const line of parsedWrite) {
+			if (line.kind === "add") added += 1;
+			else if (line.kind === "remove") removed += 1;
+		}
+		return { lines: parsedWrite, changes: { added, removed } };
 	}
 	const content = typeof args.content === "string" ? normalizeLineEndings(args.content).replace(/\n$/u, "") : "";
 	const writeLines: CodeDiffLine[] = content
@@ -719,6 +743,7 @@ export function renderGrokResult(options: {
 	syncRunning: (running: boolean) => void;
 	author?: (expanded: boolean) => Component | undefined;
 	nestedSummary?: string;
+	previousWriteContent?: string;
 }): Component {
 	const {
 		name,
@@ -734,14 +759,32 @@ export function renderGrokResult(options: {
 		syncRunning,
 		author,
 		nestedSummary,
+		previousWriteContent,
 	} = options;
 
 	const cmdLike = isCommandLikeTool(name);
-	const detailsCalls = (result.details as { calls?: readonly { name?: unknown; args?: unknown; status?: unknown }[] } | undefined)?.calls;
-	const extractedCmd = cmdLike ? extractCommandOutput(name, output, isError, detailsCalls) : undefined;
+	const rawDetails = result.details as
+		| {
+				calls?: readonly { name?: unknown; args?: unknown; status?: unknown }[];
+				fullOutputPath?: unknown;
+				truncation?: { truncated?: unknown };
+		  }
+		| undefined;
+	const detailsCalls = rawDetails?.calls;
+	const truncationMeta =
+		!isPartial && (rawDetails?.fullOutputPath !== undefined || rawDetails?.truncation?.truncated === true)
+			? {
+					truncated: rawDetails?.truncation?.truncated === true,
+					fullOutputPath: typeof rawDetails?.fullOutputPath === "string" ? rawDetails.fullOutputPath : undefined,
+				}
+			: undefined;
+	const effectiveOutput = name === "codemode" ? rawCodemodeOutputFromBlocks(result, output) : output;
+	const extractedCmd = cmdLike
+		? extractCommandOutput(name, effectiveOutput, isError, detailsCalls, truncationMeta)
+		: undefined;
 	const diffInfo =
 		!isPartial && !isError && (name === "edit" || name === "write")
-			? countDiffChangesFromResult(name, args, result)
+			? countDiffChangesFromResult(name, args, result, previousWriteContent)
 			: undefined;
 
 	let lineSummary: string | undefined;
@@ -782,7 +825,7 @@ export function renderGrokResult(options: {
 				if (!cmdLike) return [];
 				const lines = extractedCmd?.lines ?? [];
 				if (lines.length === 0) {
-					const bar = paintRunningCommandBar(1, { theme: pal.theme, light: pal.light });
+					const bar = paintGrokWaveGlyph(pal.theme, pal.light, 1, "▎");
 					return [`   ${bar} ${pal.dim(truncateToWidth("Running…", avail, "…"))}`];
 				}
 				const sliced = expanded
@@ -794,7 +837,7 @@ export function renderGrokResult(options: {
 					...sliced.tail.map((t) => ({ text: t })),
 				];
 				return entries.map((entry, idx) => {
-					const bar = paintRunningCommandBar(idx + 1, { theme: pal.theme, light: pal.light });
+					const bar = paintGrokWaveGlyph(pal.theme, pal.light, idx + 1, "▎");
 					const painted = entry.dim
 						? pal.dim("…")
 						: pal.body(truncateToWidth(entry.text, avail, "…"));
@@ -806,18 +849,16 @@ export function renderGrokResult(options: {
 				if ((name === "edit" || name === "write") && !isError) {
 					if (density === "compact") return [];
 					const allLines = diffInfo?.lines ?? [];
-					const contextual = name === "edit" ? trimDiffContext(allLines, 2) : allLines;
+					const hasContext = allLines.some((line) => line.kind === "context");
+					const contextual = hasContext ? trimDiffContext(allLines, 2) : allLines;
 					if (contextual.length === 0) return [];
 					const maxPreview = 12;
-					const rendered = [
-						...(renderCodexDiff(contextual, pathOf(args), pal.theme, rail, maxPreview)?.render(
-							width,
-						) ?? []),
-					];
-					if (contextual.length > maxPreview) {
-						rendered.push(`${rail}${pal.dim("…")}`);
+					const fullPreview =
+						renderCodexDiff(contextual, pathOf(args), pal.theme, rail)?.render(width) ?? [];
+					if (fullPreview.length > maxPreview) {
+						return [...fullPreview.slice(0, maxPreview), `${rail}${pal.dim("…")}`];
 					}
-					return rendered;
+					return [...fullPreview];
 				}
 
 				if (cmdLike) {
@@ -848,7 +889,10 @@ export function renderGrokResult(options: {
 			if (author) {
 				try {
 					const comp = author(true);
-					if (comp) return [...railComponent(comp, pal.theme, rail).render(width)];
+					if (comp) {
+						const rendered = railComponent(comp, pal.theme, rail).render(width);
+						if (rendered.length > 0) return [...rendered];
+					}
 				} catch {
 					/* При сбое стороннего рендерера падаем обратно на текстовый вывод. */
 				}
@@ -880,12 +924,22 @@ export function renderGrokResult(options: {
 						outRows.push(`${rail}${pal.target(`$ ${cmdLine}`, true)}`);
 					}
 				}
+				const nestedCallLines = name === "codemode" ? formatCodemodeCallLines(detailsCalls) : [];
 				const lines = extractedCmd?.lines ?? [];
+				const linesAlreadyAreCalls =
+					nestedCallLines.length > 0 &&
+					lines.length === nestedCallLines.length &&
+					lines.every((line, idx) => line === nestedCallLines[idx]);
+				if (nestedCallLines.length > 0 && !linesAlreadyAreCalls) {
+					for (const callLine of nestedCallLines) {
+						outRows.push(`${rail}${pal.dim(truncateToWidth(callLine, avail, "…"))}`);
+					}
+				}
 				if (lines.length > 0) {
 					const fullText = lines.join("\n");
 					const renderedOut = renderOutput(fullText, pal.theme, isError, rail);
 					if (renderedOut) outRows.push(...renderedOut.render(width));
-				} else if (!isError) {
+				} else if (!isError && nestedCallLines.length === 0) {
 					outRows.push(`${rail}${pal.dim("(no output)")}`);
 				}
 				return outRows;

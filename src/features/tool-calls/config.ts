@@ -152,7 +152,7 @@ export function mergeConfig(base: CompactToolsConfig, value: unknown, path: stri
 	}
 	if (rawDensity !== undefined) {
 		density = rawDensity;
-		if (rawStyle === undefined && style !== "claude" && style !== "codex") {
+		if (rawStyle === undefined) {
 			style = "grok";
 		}
 	}

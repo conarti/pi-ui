@@ -5,7 +5,7 @@ import {
 	type ExtensionContext,
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Spacer, Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
+import { Container, Spacer, Text, stripTerminalSequences, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { CLAUDE_RESULT_PREFIX, claudeFailure, lookHint, lookKind, pathOf, type LookKind } from "./claude.ts";
 import {
 	CODEX_BULLET,
@@ -178,6 +178,7 @@ type HeaderCache = {
 	hostExpanded: boolean;
 	rows: readonly ToolRowLike[];
 	args: unknown[];
+	fingerprints: string[];
 	results: unknown[];
 	lines: string[];
 };
@@ -190,10 +191,18 @@ type Paint = { theme: Theme; chrome: (text: string) => string; key: string };
 /** Theme colors a group line uses; a theme that changes any of them draws the lines anew. */
 const PAINT_COLORS = ["toolTitle", "error", "success", "muted", "dim", "text", "borderMuted", "accent"] as const;
 
+function rowArgsFingerprint(row: ToolRowLike): string {
+	const a = argsOf(row);
+	const cmd = typeof a.command === "string" ? a.command : "";
+	const pat = typeof a.pattern === "string" ? a.pattern : "";
+	return `${pathOf(a)}\0${cmd}\0${pat}`;
+}
+
 function headerStill(cache: HeaderCache, rows: readonly ToolRowLike[], paint: string, width: number, expanded: boolean): boolean {
 	if (cache.paint !== paint || cache.width !== width || cache.expanded !== expanded
 		|| cache.hostExpanded !== rows[0]?.expanded || cache.rows.length !== rows.length) return false;
 	return rows.every((row, index) => row === cache.rows[index] && row.args === cache.args[index]
+		&& rowArgsFingerprint(row) === cache.fingerprints[index]
 		&& row.result === cache.results[index]);
 }
 
@@ -217,27 +226,50 @@ export class ToolGroupComponent extends Container {
 			state.lastHostExpanded = hostExpanded;
 			state.expanded = hostExpanded;
 		}
-		const handleMouse = (event: { type?: string; button?: string }) => {
-			if (event.type !== "click" || event.button !== "left") return undefined;
+		let lastHeaderLines: string[] = [];
+		const toggleGroup = () => {
 			captureViewport();
 			this.state.expanded = !this.state.expanded;
 			this.onToggle(this.state.expanded);
 			return { handled: true };
 		};
-		this.addChild({ render: (width) => this.draw(this.rows, width, this.state.expanded), invalidate() {}, handleMouse } as Component);
+		const handleHeaderMouse = (event: { type?: string; button?: string; y?: number }) => {
+			if (event.type !== "click" || event.button !== "left") return undefined;
+			if (
+				event.y === 0 &&
+				lastHeaderLines.length > 1 &&
+				stripTerminalSequences(lastHeaderLines[0] ?? "").trim() === ""
+			) {
+				return undefined;
+			}
+			return toggleGroup();
+		};
+		const handleFooterMouse = (event: { type?: string; button?: string }) => {
+			if (event.type !== "click" || event.button !== "left") return undefined;
+			return toggleGroup();
+		};
+		this.addChild({
+			render: (width) => {
+				lastHeaderLines = this.draw(this.rows, width, this.state.expanded);
+				return lastHeaderLines;
+			},
+			invalidate() {},
+			handleMouse: handleHeaderMouse,
+		} as Component);
 		if (!state.expanded) return;
 		for (const member of members) this.addChild(member as Component);
-		if (footer) this.addChild({ render: footer, invalidate() {}, handleMouse } as Component);
+		if (footer) this.addChild({ render: footer, invalidate() {}, handleMouse: handleFooterMouse } as Component);
 	}
 }
 
-const grokKinds = new WeakMap<object, { args: unknown; kind: LookKind | undefined }>();
+const grokKinds = new WeakMap<object, { args: unknown; fingerprint: string; kind: LookKind | undefined }>();
 
 function grokKindOf(row: ToolRowLike): LookKind | undefined {
+	const fingerprint = rowArgsFingerprint(row);
 	const cached = grokKinds.get(row);
-	if (cached && cached.args === row.args) return cached.kind;
+	if (cached && cached.args === row.args && cached.fingerprint === fingerprint) return cached.kind;
 	const kind = classifyGrokExploration(row.toolName, argsOf(row));
-	grokKinds.set(row, { args: row.args, kind });
+	grokKinds.set(row, { args: row.args, fingerprint, kind });
 	return kind;
 }
 
@@ -432,6 +464,7 @@ export class ToolGroupController {
 			hostExpanded: rows[0]!.expanded,
 			rows: [...rows],
 			args: rows.map((row) => row.args),
+			fingerprints: rows.map(rowArgsFingerprint),
 			results: rows.map((row) => row.result),
 			lines,
 		};

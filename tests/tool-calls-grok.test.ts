@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -82,7 +82,12 @@ describe("Grok tool-calls: command & codemode output slicing (pure seam)", () =>
 		expect(classifyGrokExploration("bash", { command: "env LC_ALL=C sed -n '1,30p' src/index.ts" })).toBe("read");
 		expect(classifyGrokExploration("bash", { command: "git grep 'ToolDensity'" })).toBe("search");
 		expect(classifyGrokExploration("bash", { command: "git ls-files src" })).toBe("list");
+		expect(classifyGrokExploration("bash", { command: "git branch --show-current" })).toBe("read");
+		expect(classifyGrokExploration("bash", { command: "shasum package.json" })).toBe("read");
+		expect(classifyGrokExploration("bash", { command: "pwd" })).toBe("list");
+		expect(classifyGrokExploration("bash", { command: "ls -la src | grep grok" })).toBe("search");
 		expect(classifyGrokExploration("powershell", { command: "Get-Content src/index.ts" })).toBe("read");
+		expect(classifyGrokExploration("powershell", { command: "Resolve-Path src" })).toBe("read");
 		expect(classifyGrokExploration("powershell", { command: "Select-String -Pattern foo src/a.ts" })).toBe("search");
 
 		for (const mutating of [
@@ -942,6 +947,437 @@ describe("Grok tool-calls: ExtensionHarness integration", () => {
 			} finally {
 				rmSync(untrustedDir, { recursive: true, force: true });
 			}
+		} finally {
+			rmSync(projDir, { recursive: true, force: true });
+		}
+	});
+
+	it("routes through registerToolRenderer (publicRendering = true) with real host tool definitions, preserves JS script view on expanded real codemode, updates late nested summaries on header rows, and switches /density mid-stream", async () => {
+		vi.useFakeTimers();
+		const projDir = mkdtempSync(join(tmpdir(), "pi-ui-ticket13-pub-"));
+		try {
+			mkdirSync(join(projDir, ".pi"), { recursive: true });
+			writeFileSync(
+				join(projDir, ".pi", "compact-tools.json"),
+				JSON.stringify({ custom_tools: { enabled: false } }, null, 2),
+				"utf8",
+			);
+
+			harness = createExtensionHarness({
+				theme: "dark",
+				width: 100,
+				height: 32,
+				cwd: projDir,
+				projectTrusted: true,
+				enableToolRendererRegistry: true,
+			});
+			harness.mount(conartiPiUi);
+			await harness.startSession();
+
+			await harness.emit("agent_start", {});
+			await harness.emit("tool_execution_start", {
+				toolCallId: "pub-cm-1",
+				toolName: "codemode",
+				args: { code: "const total = 42;\nreturn await tools.read({ path: 'src/a.ts' });" },
+			});
+
+			const cmDef = harness.resolveToolDefinition("codemode");
+			expect(cmDef).toBeDefined();
+
+			const cmRow = new ToolExecutionComponent(
+				"codemode",
+				"pub-cm-1",
+				{ code: "const total = 42;\nreturn await tools.read({ path: 'src/a.ts' });" },
+				undefined,
+				cmDef,
+				harness.tui.asTui(),
+				projDir,
+			);
+			harness.tui.chatContainer.addChild(cmRow);
+			(cmRow as any).markExecutionStarted();
+
+			await harness.emit("tool_execution_end", {
+				toolCallId: "pub-cm-1",
+				toolName: "codemode",
+				durationMs: 140,
+			});
+			(cmRow as any).updateResult(
+				{
+					content: [
+						{ type: "text", text: "Script completed\nWall time 0.14 seconds\nOutput:\n" },
+						{ type: "text", text: Array.from({ length: 7 }, (_, i) => `res-${i + 1}`).join("\n") },
+					],
+					details: {
+						calls: [{ id: "pub-cm-1/1", name: "read", args: '{"path":"src/a.ts"}', status: "ok" }],
+					},
+					durationMs: 140,
+				},
+				false,
+			);
+
+			const settledBeforeLate = cmRow.render(96).map(stripTerminalSequences).join("\n");
+			expect(settledBeforeLate).toContain("◆ Ran codemode");
+			expect(settledBeforeLate).toContain("(7 lines · 140ms)");
+			expect(settledBeforeLate).toContain("res-1");
+			expect(settledBeforeLate).toContain("res-2");
+			expect(settledBeforeLate).toContain("res-7");
+			expect(settledBeforeLate).not.toContain("res-4");
+
+			/* Поздняя доставка вложенной сводки через message_end сразу обновляет заголовок (Child 0) */
+			await harness.emit("message_end", {
+				message: {
+					role: "toolResult",
+					toolCallId: "pub-cm-1",
+					toolName: "codemode",
+					nestedCalls: {
+						calls: [{ id: "pub-cm-1/1", name: "read", status: "ok" }],
+						complete: true,
+					},
+				},
+			});
+			const settledAfterLate = cmRow.render(96).map(stripTerminalSequences).join("\n");
+			expect(settledAfterLate).toContain("read 1");
+
+			/* Раскрытие реального codemode показывает исходный JS-скрипт, вложенные вызовы и полный вывод без нативного Took */
+			(cmRow as any).setExpanded(true);
+			const expandedCm = cmRow.render(96).map(stripTerminalSequences).join("\n");
+			expect(expandedCm).toContain("const total = 42;");
+			expect(expandedCm).toContain('✓ read {"path":"src/a.ts"}');
+			expect(expandedCm).toContain("res-4");
+			expect(expandedCm).not.toContain("Took ");
+			(cmRow as any).setExpanded(false);
+
+			/* Быстрое переключение /density прямо во время стриминга параллельных инструментов */
+			await harness.emit("tool_execution_start", {
+				toolCallId: "pub-bash-stream",
+				toolName: "bash",
+				args: { command: "npm run build" },
+			});
+			const bashStream = new ToolExecutionComponent(
+				"bash",
+				"pub-bash-stream",
+				{ command: "npm run build" },
+				undefined,
+				harness.resolveToolDefinition("bash"),
+				harness.tui.asTui(),
+				projDir,
+			);
+			harness.tui.chatContainer.addChild(bashStream);
+			(bashStream as any).markExecutionStarted();
+			(bashStream as any).updateResult(
+				{ content: [{ type: "text", text: "b1\nb2\nb3\nb4\nb5\nb6\nb7" }] },
+				true,
+			);
+
+			await harness.runCommand("density", "diff-focus");
+			expect(cmRow.render(96).filter((l) => l.trim().length > 0)).toHaveLength(1);
+			expect(bashStream.render(96).map(stripTerminalSequences).join("\n")).toContain("▎ b1");
+
+			await harness.runCommand("density", "compact");
+			expect(bashStream.render(96).map(stripTerminalSequences).join("\n")).toContain("▎ b7");
+
+			await harness.emit("tool_execution_end", {
+				toolCallId: "pub-bash-stream",
+				toolName: "bash",
+				durationMs: 250,
+			});
+			(bashStream as any).updateResult(
+				{ content: [{ type: "text", text: "b1\nb2\nb3\nb4\nb5\nb6\nb7" }], durationMs: 250 },
+				false,
+			);
+			expect(bashStream.render(96).filter((l) => l.trim().length > 0)).toHaveLength(1);
+
+			await harness.runCommand("compact-tools", "off");
+			expect(stripTerminalSequences(cmRow.render(96).join("\n"))).not.toContain("◆");
+
+			await harness.runCommand("density", "detailed");
+			expect(stripTerminalSequences(cmRow.render(96).join("\n"))).toContain("◆ Ran codemode");
+			expect(stripTerminalSequences(bashStream.render(96).join("\n"))).toContain("b7");
+
+			await harness.emit("agent_end", { messages: [] });
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			rmSync(projDir, { recursive: true, force: true });
+		}
+	});
+
+	it("computes real +N -M contextual diffs when write overwrites an existing file, shows … when wrapped diff rows exceed preview cap, and strips bash truncation footers from tail preview", async () => {
+		const projDir = mkdtempSync(join(tmpdir(), "pi-ui-ticket13-write-"));
+		try {
+			mkdirSync(join(projDir, "src"), { recursive: true });
+			const targetFile = join(projDir, "src", "existing.ts");
+			const beforeLines = [
+				"export const LINE_1 = 1;",
+				"export const LINE_2 = 2;",
+				"export const LINE_3 = 3;",
+				"export const LINE_4 = 4;",
+				"export const LINE_5 = 5;",
+				"export const PORT = 3000;",
+				"export const LINE_7 = 7;",
+				"export const LINE_8 = 8;",
+				"export const LINE_9 = 9;",
+				"export const LINE_10 = 10;",
+			];
+			writeFileSync(targetFile, `${beforeLines.join("\n")}\n`, "utf8");
+
+			harness = createExtensionHarness({
+				theme: "dark",
+				width: 100,
+				height: 32,
+				cwd: projDir,
+				projectTrusted: true,
+				enableToolRendererRegistry: true,
+			});
+			harness.mount(conartiPiUi);
+			await harness.startSession();
+
+			const afterContent = `${[
+				...beforeLines.slice(0, 5),
+				"export const PORT = 8080;",
+				"export const HOST = '0.0.0.0';",
+				...beforeLines.slice(6),
+			].join("\n")}\n`;
+
+			await harness.emit("agent_start", {});
+			await harness.emit("tool_call", {
+				toolCallId: "write-overwrite-1",
+				toolName: "write",
+				input: { path: "src/existing.ts", content: afterContent },
+			});
+			await harness.emit("tool_execution_start", {
+				toolCallId: "write-overwrite-1",
+				toolName: "write",
+				args: { path: "src/existing.ts", content: afterContent },
+			});
+			/* Имитируем запись файла на диск инструментом write до завершения вызова */
+			writeFileSync(targetFile, afterContent, "utf8");
+
+			const writeRow = new ToolExecutionComponent(
+				"write",
+				"write-overwrite-1",
+				{ path: "src/existing.ts", content: afterContent },
+				undefined,
+				harness.resolveToolDefinition("write"),
+				harness.tui.asTui(),
+				projDir,
+			);
+			await harness.emit("tool_execution_end", {
+				toolCallId: "write-overwrite-1",
+				toolName: "write",
+				durationMs: 35,
+			});
+			(writeRow as any).updateResult(
+				{
+					content: [{ type: "text", text: "Successfully wrote to src/existing.ts" }],
+					details: undefined,
+					durationMs: 35,
+				},
+				false,
+			);
+			await harness.emit("agent_end", { messages: [] });
+
+			const collapsedWrite = writeRow.render(96).map(stripTerminalSequences).join("\n");
+			expect(collapsedWrite).toContain("◆ Wrote src/existing.ts (+2 -1 · 35ms)");
+			expect(collapsedWrite).toContain("-export const PORT = 3000;");
+			expect(collapsedWrite).toContain("+export const PORT = 8080;");
+			expect(collapsedWrite).toContain("+export const HOST = '0.0.0.0';");
+			expect(collapsedWrite).not.toContain("LINE_3 = 3");
+
+			(writeRow as any).setExpanded(true);
+			const expandedWrite = writeRow.render(96).map(stripTerminalSequences).join("\n");
+			expect(expandedWrite).toContain("LINE_3 = 3");
+
+			/* Длинные строки диффа, превышающие 12 визуальных строк при переносе, показывают индикатор … */
+			const wrappedEdit = new ToolExecutionComponent(
+				"edit",
+				"edit-wrap-1",
+				{ path: "src/long.ts" },
+				undefined,
+				harness.resolveToolDefinition("edit"),
+				harness.tui.asTui(),
+				projDir,
+			);
+			const longExpr = "veryLongIdentifierName_".repeat(6);
+			(wrappedEdit as any).updateResult(
+				{
+					content: [{ type: "text", text: "Updated src/long.ts" }],
+					details: {
+						patch: [
+							"@@ -1,4 +1,4 @@",
+							`-${longExpr}1;`,
+							`-${longExpr}2;`,
+							`+${longExpr}3;`,
+							`+${longExpr}4;`,
+						].join("\n"),
+					},
+					durationMs: 20,
+				},
+				false,
+			);
+			const narrowEditLines = wrappedEdit.render(34).map(stripTerminalSequences);
+			expect(narrowEditLines.at(-1)?.trim()).toBe("│ …");
+
+			/* Сгенерированный хостом футер усечения bash не вытесняет реальные хвостовые строки из 3 tail */
+			const truncBash = new ToolExecutionComponent(
+				"bash",
+				"bash-trunc-1",
+				{ command: "seq 1 5000" },
+				undefined,
+				harness.resolveToolDefinition("bash"),
+				harness.tui.asTui(),
+				projDir,
+			);
+			(truncBash as any).updateResult(
+				{
+					content: [
+						{
+							type: "text",
+							text: "out-1\nout-2\nout-3\nout-4\nout-5\nout-6\nout-7\n\n[Showing lines 1-7 of 5000. Full output: /tmp/pi-bash-test.log]",
+						},
+					],
+					details: {
+						fullOutputPath: "/tmp/pi-bash-test.log",
+						truncation: { truncated: true, outputLines: 7, totalLines: 5000 },
+					},
+					durationMs: 90,
+				},
+				false,
+			);
+			const truncPlain = truncBash
+				.render(96)
+				.map(stripTerminalSequences)
+				.filter((l) => l.trim().length > 0)
+				.map((l) => l.trim());
+			expect(truncPlain.slice(1)).toEqual([
+				"│ out-1",
+				"│ out-2",
+				"│ …",
+				"│ out-5",
+				"│ out-6",
+				"│ out-7",
+			]);
+		} finally {
+			rmSync(projDir, { recursive: true, force: true });
+		}
+	});
+
+	it("handles in-place streaming args mutation without folding mutating commands, ignores blank spacer clicks above Explored groups, lets project density override global legacy style, and supports 256color themes", async () => {
+		vi.useFakeTimers();
+		const projDir = mkdtempSync(join(tmpdir(), "pi-ui-ticket13-edge2-"));
+		try {
+			writeFileSync(
+				join(agentDir, "compact-tools.json"),
+				JSON.stringify({ style: "claude" }, null, 2),
+				"utf8",
+			);
+			mkdirSync(join(projDir, ".pi"), { recursive: true });
+			writeFileSync(
+				join(projDir, ".pi", "compact-tools.json"),
+				JSON.stringify({ density: "diff-focus" }, null, 2),
+				"utf8",
+			);
+
+			harness = createExtensionHarness({
+				theme: "dark",
+				width: 100,
+				height: 32,
+				cwd: projDir,
+				projectTrusted: true,
+				enableToolRendererRegistry: true,
+			});
+			harness.mount(conartiPiUi);
+			await harness.startSession();
+
+			const mk = (id: string, name: string, args: Record<string, unknown>) =>
+				new ToolExecutionComponent(
+					name,
+					id,
+					args,
+					undefined,
+					harness!.resolveToolDefinition(name),
+					harness!.tui.asTui(),
+					projDir,
+				);
+
+			/* Проектный density: diff-focus перекрывает глобальный style: claude (активирует Grok diff-focus) */
+			const doneCmd = mk("cfg-bash", "bash", { command: "npm run lint" });
+			(doneCmd as any).updateResult(
+				{ content: [{ type: "text", text: "l1\nl2\nl3\nl4\nl5\nl6" }], durationMs: 50 },
+				false,
+			);
+			expect(stripTerminalSequences(doneCmd.render(90).join("\n"))).toContain("◆ Ran npm run lint");
+			expect(doneCmd.render(90).filter((l) => l.trim().length > 0)).toHaveLength(1);
+
+			/* Мутация объекта args на месте во время стриминга не оставляет устаревший read в кэше группы */
+			const r1 = mk("mut-r1", "read", { path: "src/a.ts" });
+			(r1 as any).updateResult({ content: [{ type: "text", text: "a" }], durationMs: 5 }, false);
+
+			const mutableArgs: Record<string, unknown> = { command: "cat src/b.ts" };
+			const rStream = mk("mut-stream", "bash", mutableArgs);
+			(rStream as any).updateResult({ content: [{ type: "text", text: "b" }], durationMs: 8 }, false);
+
+			harness.tui.chatContainer.addChild(r1);
+			harness.tui.chatContainer.addChild(rStream);
+
+			const beforeMutate = harness.tui.chatContainer.render(90);
+			expect(beforeMutate.map(stripTerminalSequences).join("\n")).toContain("◆ Explored 2 files");
+
+			/* Клик по пустой строке-спейсеру (y = 0) над ◆ Explored не должен раскрывать группу */
+			const spacerClick = harness.tui.chatContainer.handleMouse({
+				type: "click",
+				button: "left",
+				x: 4,
+				y: 0,
+				screenX: 4,
+				screenY: 0,
+				width: 90,
+				height: beforeMutate.length,
+				shift: false,
+				alt: false,
+				ctrl: false,
+			} as any);
+			expect(spacerClick).toBeUndefined();
+			expect(harness.tui.chatContainer.render(90).map(stripTerminalSequences).join("\n")).not.toContain(
+				"◆ Read src/a.ts",
+			);
+
+			/* Теперь тот же объект mutableArgs дописывается редиректом в файл: строка обязана выйти из группы */
+			mutableArgs.command = "cat src/b.ts > src/out.ts";
+			(rStream as any).updateArgs(mutableArgs);
+			const afterMutate = harness.tui.chatContainer.render(90).map(stripTerminalSequences).join("\n");
+			expect(afterMutate).not.toContain("◆ Explored");
+			expect(afterMutate).toContain("◆ Read src/a.ts");
+			expect(afterMutate).toContain("◆ Ran cat src/b.ts > src/out.ts");
+
+			/* Поддержка 256color-терминалов без 24-bit truecolor последовательностей */
+			const baseDark = harness.ctx.ui.theme;
+			const theme256 = {
+				...baseDark,
+				getColorMode: () => "256color" as const,
+			};
+			harness.setTheme(theme256 as any);
+
+			await harness.emit("agent_start", {});
+			await harness.emit("tool_execution_start", {
+				toolCallId: "c256-bash",
+				toolName: "bash",
+				args: { command: "npm test" },
+			});
+			const row256 = mk("c256-bash", "bash", { command: "npm test" });
+			(row256 as any).markExecutionStarted();
+			(row256 as any).updateResult({ content: [{ type: "text", text: "t1\nt2\nt3" }] }, true);
+
+			const ansi256Running = row256.render(90).join("\n");
+			expect(ansi256Running).toContain("\x1b[38;5;");
+			expect(ansi256Running).not.toContain("\x1b[38;2;");
+
+			await harness.emit("tool_execution_end", { toolCallId: "c256-bash", toolName: "bash", durationMs: 40 });
+			(row256 as any).updateResult({ content: [{ type: "text", text: "t1\nt2\nt3" }], durationMs: 40 }, false);
+			await harness.emit("agent_end", { messages: [] });
+
+			const ansi256Done = row256.render(90).join("\n");
+			expect(ansi256Done).toContain("\x1b[38;5;");
+			expect(ansi256Done).not.toContain("\x1b[38;2;");
 		} finally {
 			rmSync(projDir, { recursive: true, force: true });
 		}
