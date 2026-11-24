@@ -1,32 +1,20 @@
 import type { ExtensionContext, KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import {
 	Container,
-	HStack,
 	ScrollView,
 	TuiAltScreen,
-	VStack,
 	type Component,
 	type TUI,
 } from "@earendil-works/pi-tui";
+import {
+	composeFullscreenSlots,
+	type FullscreenShellContext,
+	type MountedViewportSlots,
+} from "./fullscreen-layout.ts";
 import { beginHoverMovePass, finishHoverMovePass, hookMethod } from "./runtime-hooks.ts";
 import { setRequestRender } from "./ui-action-bridge.ts";
 
-export interface FullscreenShellContext {
-	tui: TUI;
-	theme: () => Theme;
-	keybindings: KeybindingsManager;
-	scroll: ScrollView;
-	requestRender: () => void;
-}
-
-export interface MountedViewportSlots {
-	topSlot?: Component & { dispose?(): void };
-	rightRail?: Component & {
-		basisWidth: number;
-		isVisible: (viewport: { width: number; height: number }) => boolean;
-		dispose?(): void;
-	};
-}
+export type { FullscreenShellContext, MountedViewportSlots };
 
 export interface AcquiredHostTui {
 	tui: TUI;
@@ -115,6 +103,14 @@ function isPlainContainer(value: unknown): value is Container {
 	);
 }
 
+function resolveContainerCandidate(candidate: unknown): Container | undefined {
+	if (!candidate || typeof candidate !== "object") return undefined;
+	const children = (candidate as { children?: unknown }).children;
+	if (!Array.isArray(children)) return undefined;
+	const last = children.at(-1);
+	return isPlainContainer(last) ? last : (candidate as Container);
+}
+
 /**
  * Resolves the transcript chat container in both fullscreen and non-fullscreen modes,
  * supporting both Pi's nested document layout (`[header, ..., chatContainer]`) and
@@ -122,22 +118,11 @@ function isPlainContainer(value: unknown): value is Container {
  */
 export function findChatContainer(tui: unknown, scroll?: ScrollView): Container | undefined {
 	const scrollChild = (scroll as unknown as { child?: unknown } | undefined)?.child;
-	if (scrollChild && typeof scrollChild === "object" && Array.isArray((scrollChild as { children?: unknown }).children)) {
-		const children = (scrollChild as { children: unknown[] }).children;
-		const last = children.at(-1);
-		if (isPlainContainer(last)) return last;
-		return scrollChild as Container;
-	}
+	const fromScroll = resolveContainerCandidate(scrollChild);
+	if (fromScroll) return fromScroll;
 
 	const rootChildren = (tui as { children?: unknown[] } | undefined)?.children;
-	const doc = Array.isArray(rootChildren) ? rootChildren[0] : undefined;
-	if (doc && typeof doc === "object" && Array.isArray((doc as { children?: unknown }).children)) {
-		const docChildren = (doc as { children: unknown[] }).children;
-		const last = docChildren.at(-1);
-		if (isPlainContainer(last)) return last;
-		return doc as Container;
-	}
-	return undefined;
+	return resolveContainerCandidate(Array.isArray(rootChildren) ? rootChildren[0] : undefined);
 }
 
 function hasLayoutHost(tui: unknown): tui is TUI & LayoutHost {
@@ -309,43 +294,7 @@ export async function acquireHostRuntime(
 			};
 
 			const slots = buildSlots(shellCtx);
-			const rootEntries: any[] | undefined = (originalRoot as any).entries;
-			const transcriptIdx = Array.isArray(rootEntries)
-				? rootEntries.findIndex((e) => e?.component === scroll)
-				: -1;
-
-			let customRoot: VStack;
-			if (transcriptIdx !== -1 && Array.isArray(rootEntries)) {
-				const middleRow = slots.rightRail
-					? new HStack([
-							{ component: scroll, basis: 0, grow: 1, shrink: 1, minSize: 1 },
-							{
-								component: slots.rightRail,
-								basis: slots.rightRail.basisWidth,
-								grow: 0,
-								shrink: 0,
-								visible: slots.rightRail.isVisible,
-							},
-						])
-					: scroll;
-
-				const nextEntries = [
-					...(slots.topSlot
-						? [{ component: slots.topSlot, basis: "auto" as const, grow: 0, shrink: 0 }]
-						: []),
-					...rootEntries.slice(0, transcriptIdx),
-					{ component: middleRow, basis: 0, grow: 1, shrink: 1, minSize: 1 },
-					...rootEntries.slice(transcriptIdx + 1),
-				];
-				customRoot = new VStack(nextEntries);
-			} else {
-				customRoot = new VStack([
-					...(slots.topSlot
-						? [{ component: slots.topSlot, basis: "auto" as const, grow: 0, shrink: 0 }]
-						: []),
-					{ component: originalRoot, basis: 0, grow: 1, shrink: 1, minSize: 1 },
-				]);
-			}
+			const customRoot = composeFullscreenSlots(originalRoot, scroll, slots);
 
 			layoutHost.setLayoutRoot(customRoot);
 

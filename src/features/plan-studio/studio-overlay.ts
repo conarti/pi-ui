@@ -25,25 +25,25 @@ function stylePlanLine(raw: string, theme: Theme): string {
 	const indent = raw.slice(0, raw.length - trimmed.length);
 	if (/^#{1,6}\s+/.test(trimmed)) {
 		const clean = trimmed.replace(/^#{1,6}\s+/, "");
-		return indent + fgRgb(palette.accentBright[0], palette.accentBright[1], palette.accentBright[2], theme.bold(clean));
+		return indent + fgRgb(palette.accentBright, theme.bold(clean));
 	}
 	const stepMatch = trimmed.match(/^(\d+[.)])\s+(.*)$/);
 	if (stepMatch) {
-		return `${indent}${fgRgb(palette.warning[0], palette.warning[1], palette.warning[2], theme.bold(stepMatch[1]!))} ${theme.fg("text", stepMatch[2]!)}`;
+		return `${indent}${fgRgb(palette.warning, theme.bold(stepMatch[1]!))} ${theme.fg("text", stepMatch[2]!)}`;
 	}
 	if (/^[-*•]\s+/.test(trimmed)) {
 		const clean = trimmed.slice(2);
-		return `${indent}${fgRgb(palette.accent[0], palette.accent[1], palette.accent[2], "•")} ${theme.fg("text", clean)}`;
+		return `${indent}${fgRgb(palette.accent, "•")} ${theme.fg("text", clean)}`;
 	}
 	return raw ? theme.fg("text", raw) : "";
 }
 
 export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
 	if (ctx.mode !== "tui") return;
-	const st = getSessionWorkflow();
+	const wf = getSessionWorkflow();
 
-	if (st.planLines.length === 0) {
-		if (st.mode !== "plan") {
+	if (wf.planLines.length === 0) {
+		if (wf.mode !== "plan") {
 			setSessionMode(pi, ctx, "plan");
 		} else {
 			ctx.ui.notify("План пока пуст — отправь запрос, и после ответа откроется ревью плана", "info");
@@ -63,17 +63,17 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 			let rowToPlanLine = new Map<number, number>();
 
 			const startCommentEdit = (lineIdx: number) => {
-				cursorIdx = Math.max(0, Math.min(st.planLines.length - 1, lineIdx));
+				cursorIdx = Math.max(0, Math.min(wf.planLines.length - 1, lineIdx));
 				editingLine = cursorIdx;
-				commentInput.setValue(st.planComments[cursorIdx] ?? "");
+				commentInput.setValue(wf.planComments[cursorIdx] ?? "");
 			};
 
 			const saveCommentEdit = () => {
 				if (editingLine === null) return;
-				st.setPlanComment(editingLine, commentInput.getValue());
+				wf.setPlanComment(editingLine, commentInput.getValue());
 				editingLine = null;
 				commentInput.clear();
-				st.persist(pi);
+				wf.persist(pi);
 			};
 
 			const comp: Component & Focusable = {
@@ -92,10 +92,10 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 						scrollTop = Math.max(0, cursorIdx - Math.floor(maxBodyRows * 0.6));
 					}
 
-					const commentCount = Object.keys(st.planComments).length;
+					const commentCount = Object.keys(wf.planComments).length;
 					const subHeader = `${theme.fg("muted", "Кликни по любой строке (или Enter / c), чтобы оставить комментарий прямо под ней")}${
 						commentCount > 0
-							? `  ${fgRgb(palette.warning[0], palette.warning[1], palette.warning[2], theme.bold(`· 💬 ${commentCount}`))}`
+							? `  ${fgRgb(palette.warning, theme.bold(`· 💬 ${commentCount}`))}`
 							: ""
 					}`;
 
@@ -105,19 +105,19 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 					];
 					let currentBodyRow = 3;
 
-					for (let i = scrollTop; i < st.planLines.length && body.length < maxBodyRows; i++) {
-						const raw = st.planLines[i] ?? "";
+					for (let i = scrollTop; i < wf.planLines.length && body.length < maxBodyRows; i++) {
+						const raw = wf.planLines[i] ?? "";
 						const isSelected = i === cursorIdx;
 						const isHovered = i === hoveredRowLine;
-						const hasComment = Boolean(st.planComments[i]);
+						const hasComment = Boolean(wf.planComments[i]);
 						const numStr = String(i + 1).padStart(3, " ");
 						const marker = hasComment
-							? fgRgb(palette.warning[0], palette.warning[1], palette.warning[2], "💬")
+							? fgRgb(palette.warning, "💬")
 							: isSelected
-								? fgRgb(palette.accent[0], palette.accent[1], palette.accent[2], "▸ ")
+								? fgRgb(palette.accent, "▸ ")
 								: "  ";
 						const numStyled = isSelected
-							? fgRgb(palette.accentBright[0], palette.accentBright[1], palette.accentBright[2], theme.bold(numStr))
+							? fgRgb(palette.accentBright, theme.bold(numStr))
 							: theme.fg("dim", numStr);
 
 						const contentAvail = Math.max(8, innerWidth - 8);
@@ -127,9 +127,9 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 						lineOut += pad;
 
 						if (isSelected) {
-							lineOut = bgRgb(palette.selectedRowBg[0], palette.selectedRowBg[1], palette.selectedRowBg[2], lineOut);
+							lineOut = bgRgb(palette.selectedRowBg, lineOut);
 						} else if (isHovered) {
-							lineOut = bgRgb(palette.hoveredRowBg[0], palette.hoveredRowBg[1], palette.hoveredRowBg[2], lineOut);
+							lineOut = bgRgb(palette.hoveredRowBg, lineOut);
 						}
 
 						rowToPlanLine.set(currentBodyRow, i);
@@ -137,7 +137,7 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 						currentBodyRow++;
 
 						if (editingLine === i && body.length < maxBodyRows) {
-							const editPrefix = `      ${fgRgb(palette.warning[0], palette.warning[1], palette.warning[2], "↳ 💬 ")}`;
+							const editPrefix = `      ${fgRgb(palette.warning, "↳ 💬 ")}`;
 							const editHint = theme.fg("dim", "  [Enter сохр · Esc отмена]");
 							const maxDraft = Math.max(6, innerWidth - visibleWidth(editPrefix) - visibleWidth(editHint));
 							const renderedInput = commentInput.render({
@@ -148,24 +148,15 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 							});
 							const editRow = truncateToWidth(`${editPrefix}${renderedInput}${editHint}`, innerWidth, "…");
 							const editPad = " ".repeat(Math.max(0, innerWidth - visibleWidth(editRow)));
-							body.push(
-								bgRgb(
-									palette.noteEditRowBg[0],
-									palette.noteEditRowBg[1],
-									palette.noteEditRowBg[2],
-									editRow + editPad,
-								),
-							);
+							body.push(bgRgb(palette.noteEditRowBg, editRow + editPad));
 							currentBodyRow++;
 						} else if (hasComment && body.length < maxBodyRows) {
-							const notePrefix = `      ${fgRgb(palette.warning[0], palette.warning[1], palette.warning[2], "↳ 💬 ")}`;
-							const noteText = fgRgb(palette.noteText[0], palette.noteText[1], palette.noteText[2], st.planComments[i]!);
+							const notePrefix = `      ${fgRgb(palette.warning, "↳ 💬 ")}`;
+							const noteText = fgRgb(palette.noteText, wf.planComments[i]!);
 							const noteRow = truncateToWidth(`${notePrefix}${noteText}`, innerWidth, "…");
 							const notePad = " ".repeat(Math.max(0, innerWidth - visibleWidth(noteRow)));
 							rowToPlanLine.set(currentBodyRow, i);
-							body.push(
-								bgRgb(palette.noteRowBg[0], palette.noteRowBg[1], palette.noteRowBg[2], noteRow + notePad),
-							);
+							body.push(bgRgb(palette.noteRowBg, noteRow + notePad));
 							currentBodyRow++;
 						}
 					}
@@ -198,8 +189,8 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 							label: "🗑 Сбросить комменты",
 							variant: "neutral",
 							onClick: () => {
-								st.clearPlanComments();
-								st.persist(pi);
+								wf.clearPlanComments();
+								wf.persist(pi);
 							},
 						});
 					}
@@ -214,8 +205,8 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 					});
 
 					return card.render(width, theme, {
-						title: fgRgb(palette.warning[0], palette.warning[1], palette.warning[2], theme.bold("◈ Plan Studio")),
-						headerMeta: theme.fg("muted", `${cursorIdx + 1}/${st.planLines.length}`),
+						title: fgRgb(palette.warning, theme.bold("◈ Plan Studio")),
+						headerMeta: theme.fg("muted", `${cursorIdx + 1}/${wf.planLines.length}`),
 						onClose: () => {
 							if (editingLine !== null) saveCommentEdit();
 							done("close");
@@ -257,7 +248,7 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 						return;
 					}
 					if (matchesKey(data, "down") || data === "j") {
-						cursorIdx = Math.min(st.planLines.length - 1, cursorIdx + 1);
+						cursorIdx = Math.min(wf.planLines.length - 1, cursorIdx + 1);
 						return;
 					}
 					if (matchesKey(data, "pageUp")) {
@@ -265,12 +256,12 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 						return;
 					}
 					if (matchesKey(data, "pageDown")) {
-						cursorIdx = Math.min(st.planLines.length - 1, cursorIdx + 8);
+						cursorIdx = Math.min(wf.planLines.length - 1, cursorIdx + 8);
 						return;
 					}
 					if (matchesKey(data, "backspace") || matchesKey(data, "delete") || data === "d") {
-						if (st.deletePlanComment(cursorIdx)) {
-							st.persist(pi);
+						if (wf.deletePlanComment(cursorIdx)) {
+							wf.persist(pi);
 						}
 						return;
 					}
@@ -281,8 +272,8 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 				handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 					if (event.type === "wheel" && event.wheelDelta) {
 						const delta = event.wheelDelta < 0 ? -2 : 2;
-						scrollTop = Math.max(0, Math.min(Math.max(0, st.planLines.length - 4), scrollTop + delta));
-						cursorIdx = Math.max(0, Math.min(st.planLines.length - 1, cursorIdx + (delta < 0 ? -1 : 1)));
+						scrollTop = Math.max(0, Math.min(Math.max(0, wf.planLines.length - 4), scrollTop + delta));
+						cursorIdx = Math.max(0, Math.min(wf.planLines.length - 1, cursorIdx + (delta < 0 ? -1 : 1)));
 						return { handled: true, render: true };
 					}
 					const cardOutcome = card.handleMouse(event);
@@ -338,12 +329,12 @@ export async function confirmSafeToolCall(
 					const palette = getThemeSurfacePalette(theme);
 					const inner = Math.max(24, width - 4);
 					const body = [
-						`${theme.fg("muted", "Инструмент:")} ${fgRgb(palette.info[0], palette.info[1], palette.info[2], theme.bold(toolName))}`,
+						`${theme.fg("muted", "Инструмент:")} ${fgRgb(palette.info, theme.bold(toolName))}`,
 						truncateToWidth(theme.fg("text", summary), inner, "…"),
 					];
 
 					return card.render(width, theme, {
-						title: fgRgb(palette.info[0], palette.info[1], palette.info[2], theme.bold("🛡 Auto-Safe Confirmation")),
+						title: fgRgb(palette.info, theme.bold("🛡 Auto-Safe Confirmation")),
 						onClose: () => done("block"),
 						bodyLines: body,
 						borderVariant: "info",

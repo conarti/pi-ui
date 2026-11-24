@@ -9,12 +9,34 @@ export interface HitBox {
 	onClick: () => void;
 }
 
-export function fgRgb(r: number, g: number, b: number, text: string): string {
-	return `\x1b[38;2;${r};${g};${b}m${text}\x1b[39m`;
+export function fgRgb(rgb: RgbTuple, text: string): string;
+export function fgRgb(r: number, g: number, b: number, text: string): string;
+export function fgRgb(
+	rOrRgb: number | RgbTuple,
+	gOrText: number | string,
+	b?: number,
+	text?: string,
+): string {
+	if (Array.isArray(rOrRgb)) {
+		const [r, g, bVal] = rOrRgb;
+		return `\x1b[38;2;${r};${g};${bVal}m${gOrText as string}\x1b[39m`;
+	}
+	return `\x1b[38;2;${rOrRgb as number};${gOrText as number};${b!}m${text!}\x1b[39m`;
 }
 
-export function bgRgb(r: number, g: number, b: number, text: string): string {
-	return `\x1b[48;2;${r};${g};${b}m${text}\x1b[49m`;
+export function bgRgb(rgb: RgbTuple, text: string): string;
+export function bgRgb(r: number, g: number, b: number, text: string): string;
+export function bgRgb(
+	rOrRgb: number | RgbTuple,
+	gOrText: number | string,
+	b?: number,
+	text?: string,
+): string {
+	if (Array.isArray(rOrRgb)) {
+		const [r, g, bVal] = rOrRgb;
+		return `\x1b[48;2;${r};${g};${bVal}m${gOrText as string}\x1b[49m`;
+	}
+	return `\x1b[48;2;${rOrRgb as number};${gOrText as number};${b!}m${text!}\x1b[49m`;
 }
 
 export function isLightTheme(theme: unknown): boolean {

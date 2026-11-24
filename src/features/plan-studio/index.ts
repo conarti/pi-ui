@@ -90,11 +90,11 @@ export function clearPlanState(pi: ExtensionAPI, ctx: ExtensionContext, notify =
 
 export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	if (!ctx.hasUI || ctx.mode !== "tui") return;
-	const st = getSessionWorkflow();
-	const hasPlan = st.hasPlan();
-	const commentCount = st.getCommentCount();
+	const wf = getSessionWorkflow();
+	const hasPlan = wf.hasPlan();
+	const commentCount = wf.getCommentCount();
 
-	if (st.mode !== "plan" && !st.executingPlan && !hasPlan) {
+	if (wf.mode !== "plan" && !wf.executingPlan && !hasPlan) {
 		ctx.ui.setWidget("conarti-plan", undefined);
 		return;
 	}
@@ -107,9 +107,9 @@ export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void 
 			invalidate() {},
 			render(width: number): string[] {
 				boxes = [];
-				if (st.executingPlan && st.planSteps.length > 0) {
-					const doneCount = st.planSteps.filter((s) => s.completed).length;
-					const total = st.planSteps.length;
+				if (wf.executingPlan && wf.planSteps.length > 0) {
+					const doneCount = wf.planSteps.filter((s) => s.completed).length;
+					const total = wf.planSteps.length;
 					const barW = 12;
 					const filled = Math.round((doneCount / Math.max(1, total)) * barW);
 					const bar = fgRgb(97, 175, 239, "━".repeat(filled)) + fgRgb(58, 68, 86, "─".repeat(barW - filled));
@@ -121,7 +121,7 @@ export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void 
 						theme,
 					});
 					const btnClear = renderPill("✕ Скрыть", { hovered: hovered === "clear", theme });
-					const nextStep = st.planSteps.find((s) => !s.completed);
+					const nextStep = wf.planSteps.find((s) => !s.completed);
 					const stepPreview = nextStep
 						? theme.fg("muted", ` · Сейчас: ${nextStep.step}. ${nextStep.text}`)
 						: fgRgb(140, 194, 101, " · Все шаги выполнены ✓");
@@ -154,7 +154,7 @@ export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void 
 					const btnReview = renderPill(
 						commentCount > 0
 							? `📋 Открыть план · 💬 ${commentCount} комм.`
-							: `📋 Открыть план (${st.planSteps.length || st.planLines.length} стр.)`,
+							: `📋 Открыть план (${wf.planSteps.length || wf.planLines.length} стр.)`,
 						{ hovered: hovered === "review", active: true, rgb: [229, 192, 123], theme },
 					);
 					const btnRun = renderPill("✓ В работу", {
@@ -282,8 +282,8 @@ export function registerPlanStudioFeature(pi: ExtensionAPI): void {
 	});
 
 	pi.on("before_agent_start", async () => {
-		const st = getSessionWorkflow();
-		if (st.mode === "plan") {
+		const wf = getSessionWorkflow();
+		if (wf.mode === "plan") {
 			return {
 				message: {
 					customType: "conarti-plan-context",
@@ -292,8 +292,8 @@ export function registerPlanStudioFeature(pi: ExtensionAPI): void {
 				},
 			};
 		}
-		if (st.executingPlan && st.planSteps.length > 0) {
-			const remaining = st.planSteps.filter((s) => !s.completed);
+		if (wf.executingPlan && wf.planSteps.length > 0) {
+			const remaining = wf.planSteps.filter((s) => !s.completed);
 			if (remaining.length > 0) {
 				const list = remaining.map((s) => `${s.step}. ${s.text}`).join("\n");
 				return {
@@ -309,8 +309,8 @@ export function registerPlanStudioFeature(pi: ExtensionAPI): void {
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
-		const st = getSessionWorkflow();
-		return await st.preflightToolCall(
+		const wf = getSessionWorkflow();
+		return await wf.preflightToolCall(
 			{
 				toolName: event.toolName,
 				input: (event.input as Record<string, unknown> | undefined) ?? undefined,
@@ -321,8 +321,8 @@ export function registerPlanStudioFeature(pi: ExtensionAPI): void {
 	});
 
 	pi.on("context", async (event) => {
-		const st = getSessionWorkflow();
-		if (st.mode === "plan") return undefined;
+		const wf = getSessionWorkflow();
+		if (wf.mode === "plan") return undefined;
 		return {
 			messages: event.messages.filter((m: any) => m.customType !== "conarti-plan-context"),
 		};

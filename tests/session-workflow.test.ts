@@ -109,6 +109,48 @@ describe("Session Workflow via extension harness", () => {
 
 		await harness.shutdownSession();
 
+		// 1b. Fresh --plan start followed immediately by /reload (with persisted entries carried over)
+		harness = createExtensionHarness({
+			flags: { plan: true },
+			activeTools: ["read", "bash", "edit", "write", "grep"],
+		});
+		harness.mount(conartiPiUi);
+		await harness.startSession();
+		expect(harness.getActiveTools()).toEqual(["read", "bash", "grep"]);
+
+		const reloadEntries = harness.ctx.sessionManager.getEntries();
+		const reloadActiveTools = harness.getActiveTools();
+		await harness.emit("session_shutdown", { reason: "reload" });
+
+		harness = createExtensionHarness({
+			flags: { plan: true },
+			activeTools: reloadActiveTools,
+			entries: reloadEntries,
+		});
+		harness.mount(conartiPiUi);
+		await harness.emit("session_start", { reason: "reload" });
+
+		// Mid-session tool change after reload while still in Plan mode
+		harness.pi.setActiveTools(["read", "bash", "mcp_docs"]);
+		await harness.runCommand("mode", "code");
+		expect(harness.getActiveTools()).toEqual(["read", "bash", "mcp_docs", "edit", "write"]);
+
+		await harness.shutdownSession();
+
+		// 1c. Reload with --plan set and NO persisted entries (activeTools already lack edit/write)
+		harness = createExtensionHarness({
+			flags: { plan: true },
+			activeTools: ["read", "bash", "mcp_docs"],
+			entries: [],
+		});
+		harness.mount(conartiPiUi);
+		await harness.emit("session_start", { reason: "reload" });
+
+		await harness.runCommand("mode", "code");
+		expect(harness.getActiveTools()).toEqual(["read", "bash", "mcp_docs", "edit", "write"]);
+
+		await harness.shutdownSession();
+
 		// 2. Reload a session whose persisted state is already in Plan mode AND host activeTools already lack edit/write
 		harness = createExtensionHarness({
 			activeTools: ["read", "bash", "mcp_docs"],

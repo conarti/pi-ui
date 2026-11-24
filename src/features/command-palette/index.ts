@@ -47,7 +47,7 @@ function fuzzyMatch(query: string, target: string): boolean {
 
 export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
 	if (ctx.mode !== "tui") return;
-	const st = getSessionWorkflow();
+	const wf = getSessionWorkflow();
 	const stickyCfg = getStickyConfig();
 	const outlineCfg = getOutlineSettings();
 
@@ -60,18 +60,18 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 			id: "mode-plan",
 			group: "Режим",
 			icon: "◈",
-			label: st.mode === "plan" ? "Выключить Plan Mode → Code" : "Включить Plan Mode (планирование без воды)",
+			label: wf.mode === "plan" ? "Выключить Plan Mode → Code" : "Включить Plan Mode (планирование без воды)",
 			hint: "Alt+M",
 			keywords: "plan mode план планирование",
-			run: () => setSessionMode(pi, ctx, st.mode === "plan" ? "code" : "plan"),
+			run: () => setSessionMode(pi, ctx, wf.mode === "plan" ? "code" : "plan"),
 		},
 		{
 			id: "plan-studio",
 			group: "Режим",
 			icon: "📋",
 			label:
-				st.planLines.length > 0
-					? `Открыть Plan Studio (${st.planLines.length} стр., комментарии к строкам)`
+				wf.planLines.length > 0
+					? `Открыть Plan Studio (${wf.planLines.length} стр., комментарии к строкам)`
 					: "Открыть Plan Studio",
 			hint: "/plan",
 			keywords: "plan studio review comments ревью комментарии план",
@@ -81,10 +81,10 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 			id: "mode-safe",
 			group: "Режим",
 			icon: "🛡",
-			label: st.mode === "safe" ? "Выключить Auto-Safe → Code" : "Включить Auto-Safe (подтверждение правок/риска)",
+			label: wf.mode === "safe" ? "Выключить Auto-Safe → Code" : "Включить Auto-Safe (подтверждение правок/риска)",
 			hint: "/mode safe",
 			keywords: "auto safe confirm локальные модели безопасность",
-			run: () => setSessionMode(pi, ctx, st.mode === "safe" ? "code" : "safe"),
+			run: () => setSessionMode(pi, ctx, wf.mode === "safe" ? "code" : "safe"),
 		},
 		{
 			id: "context",
@@ -304,7 +304,7 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 					if (selectedIdx >= scrollOffset + maxVisible) scrollOffset = selectedIdx - maxVisible + 1;
 					scrollOffset = Math.max(0, Math.min(scrollOffset, Math.max(0, filtered.length - maxVisible)));
 
-					const searchPrompt = fgRgb(palette.accent[0], palette.accent[1], palette.accent[2], theme.bold("⌕ "));
+					const searchPrompt = fgRgb(palette.accent, theme.bold("⌕ "));
 					const inputRendered = searchInput.render({
 						theme,
 						focused: Boolean(comp.focused),
@@ -330,16 +330,14 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 							const rightHint = item.hint ? theme.fg("muted", ` ${item.hint} `) : "";
 							const iconRgb = isSelected ? palette.accentBright : palette.accent;
 							const iconPart = fgRgb(
-								iconRgb[0],
-								iconRgb[1],
-								iconRgb[2],
+								iconRgb,
 								isSelected ? theme.bold(`${item.icon} `) : `${item.icon} `,
 							);
 
 							const availLeft = Math.max(10, innerWidth - visibleWidth(rightHint) - visibleWidth(badge) - 5);
 							const mainText = truncateToWidth(
 								isSelected
-									? fgRgb(palette.selectedText[0], palette.selectedText[1], palette.selectedText[2], theme.bold(item.label))
+									? fgRgb(palette.selectedText, theme.bold(item.label))
 									: theme.fg("text", item.label),
 								availLeft,
 								"…",
@@ -351,9 +349,9 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 							fullRow += pad;
 
 							if (isSelected) {
-								fullRow = bgRgb(palette.selectedRowBg[0], palette.selectedRowBg[1], palette.selectedRowBg[2], fullRow);
+								fullRow = bgRgb(palette.selectedRowBg, fullRow);
 							} else if (isHovered) {
-								fullRow = bgRgb(palette.hoveredRowBg[0], palette.hoveredRowBg[1], palette.hoveredRowBg[2], fullRow);
+								fullRow = bgRgb(palette.hoveredRowBg, fullRow);
 							}
 
 							rowMap.set(renderRowIdx, itemIndex);
@@ -362,13 +360,13 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 						}
 					}
 
-					const modeMeta = MODE_META[st.mode];
+					const modeMeta = MODE_META[wf.mode];
 					const modeRgb =
-						st.mode === "plan" ? palette.warning : st.mode === "safe" ? palette.info : palette.accent;
-					const footer = `${fgRgb(modeRgb[0], modeRgb[1], modeRgb[2], `${modeMeta.icon} ${modeMeta.label}`)}  ${theme.fg("dim", "·  ↑↓ / колесо выбор  ·  Enter / клик запуск  ·  Esc закрыть")}`;
+						wf.mode === "plan" ? palette.warning : wf.mode === "safe" ? palette.info : palette.accent;
+					const footer = `${fgRgb(modeRgb, `${modeMeta.icon} ${modeMeta.label}`)}  ${theme.fg("dim", "·  ↑↓ / колесо выбор  ·  Enter / клик запуск  ·  Esc закрыть")}`;
 
 					return card.render(width, theme, {
-						title: fgRgb(palette.accentBright[0], palette.accentBright[1], palette.accentBright[2], theme.bold("⌘ Command Palette")),
+						title: fgRgb(palette.accentBright, theme.bold("⌘ Command Palette")),
 						headerMeta: theme.fg("muted", `${filtered.length}`),
 						onClose: () => done(null),
 						bodyLines: body,
