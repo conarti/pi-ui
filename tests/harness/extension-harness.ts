@@ -299,9 +299,20 @@ export function createExtensionHarness(options: ExtensionHarnessOptions = {}): E
 			tui.requestRender();
 		},
 		getEditorComponent: () => editorFactory,
+		getEditorText: () => editorComponent?.getText?.() ?? editorText,
 		setEditorText: (text: string) => {
 			editorText = text;
 			editorComponent?.setText?.(text);
+		},
+		pasteToEditor: (text: string) => {
+			const ed = editorComponent as (Component & { insertTextAtCursor?: (t: string) => void }) | undefined;
+			if (ed?.insertTextAtCursor) {
+				ed.insertTextAtCursor(text);
+			} else {
+				const base = editorComponent?.getText?.() ?? editorText;
+				editorText = `${base}${text}`;
+				editorComponent?.setText?.(editorText);
+			}
 		},
 		setWorkingIndicator: () => {},
 		setWorkingVisible: () => {},

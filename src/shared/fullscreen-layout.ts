@@ -623,7 +623,7 @@ export class ViewportChromeCompositor {
 			this.activePress = undefined;
 			return false;
 		}
-		if (self.mouseCapture || self.mousePressTarget || self.scrollbarDrag) {
+		if (self.mouseCapture || self.mousePressTarget || self.scrollbarDrag || self.selectionPressActive) {
 			return false;
 		}
 
@@ -754,7 +754,7 @@ export class ViewportChromeCompositor {
 				);
 				return true;
 			}
-			return true;
+			return false;
 		}
 
 		if (isCoveredByScrollToEndIndicator(self, raw.x, raw.y)) {
@@ -805,7 +805,7 @@ export class ViewportChromeCompositor {
 				);
 				return true;
 			}
-			return true;
+			return false;
 		}
 
 		return false;

@@ -9,6 +9,7 @@ import {
 	getImageDimensions,
 	isKeyRelease,
 	matchesKey,
+	ScrollView,
 	TuiAltScreen,
 	visibleWidth,
 	type TUI,
@@ -770,7 +771,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 		for (let idx = 0; idx < spans.length; idx++) {
 			const span = spans[idx]!;
 			const chip = chipByKindAndNum.get(`${span.kind}:${span.number}`);
-			formatted += reconstructed.displayText.slice(pos, span.start);
+			formatted += reconstructed.displayText.slice(pos, span.start).replace(/\t/g, "  ");
 			formatted += styleInlinePromptChip(span.token, {
 				kind: span.kind,
 				theme: context.theme,
@@ -783,7 +784,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 				onClick: chip ? (sx, sy) => toggleSentPillPreview(chip, sx, sy) : undefined,
 			});
 		}
-		formatted += reconstructed.displayText.slice(pos);
+		formatted += reconstructed.displayText.slice(pos).replace(/\t/g, "  ");
 
 		return {
 			text: formatted,
@@ -818,6 +819,30 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 			}
 			return res;
 		});
+
+		const scrollProto = (ScrollView as unknown as { prototype?: object } | undefined)?.prototype;
+		if (scrollProto) {
+			for (const methodName of ["scrollTo", "scrollBy", "scrollToStart", "scrollToEnd"] as const) {
+				hookMethod(
+					scrollProto,
+					methodName,
+					`promptChips.scrollDismiss.${methodName}`,
+					(self, args, original) => {
+						const prevTop = self.scrollTop;
+						const result = original.apply(self, args);
+						if (
+							overlayController.source === "sent-pill" &&
+							self.scrollTop !== prevTop &&
+							self === getActiveHostRuntime()?.scroll
+						) {
+							overlayController.hide(["sent-pill"]);
+							getActiveHostRuntime()?.requestRender();
+						}
+						return result;
+					},
+				);
+			}
+		}
 	};
 
 	ensureHooksInstalled();

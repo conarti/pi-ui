@@ -1,0 +1,265 @@
+import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { isKeyRelease, matchesKey } from "@earendil-works/pi-tui";
+import { getActiveGlobalTheme } from "../../shared/ansi.ts";
+import {
+	defaultHostClipboardProvider,
+	getActiveHostRuntime,
+	getHostClipboardProvider,
+} from "../../shared/host-runtime.ts";
+import { registerOptionShortcutChord } from "../../shared/keyboard-layout.ts";
+import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
+import { requestRender } from "../../shared/ui-action-bridge.ts";
+import { getActiveComposerEditor, type PiUiComposerEditor } from "../chrome/composer.ts";
+import {
+	getActivePromptChipRegistry,
+	insertQuoteChipInComposer,
+	type QuotePromptChipData,
+	type RegisteredPromptChip,
+} from "../prompt-chips/index.ts";
+import {
+	extractAssistantQuoteFromBranch,
+	normalizeQuoteText,
+} from "./quote-model.ts";
+import { handleQuotesCommand, showQuotesManagerModal } from "./quotes-modal.ts";
+import {
+	installSelectionQuoteRuntimeHooks,
+	QUOTE_SELECTION_POPUP_HEIGHT,
+	QUOTE_SELECTION_POPUP_LABEL,
+	QUOTE_SELECTION_POPUP_WIDTH,
+	QuoteSelectionPopup,
+	SelectionQuoteOverlayController,
+} from "./selection-popup.ts";
+import {
+	installQuoteBlocksSuperseder,
+	scrubExternalQuoteBlocksUi,
+	withConartiInternalRegistration,
+} from "./supersede-quote-blocks.ts";
+
+export * from "./quote-model.ts";
+export { handleQuotesCommand, showQuotesManagerModal } from "./quotes-modal.ts";
+export {
+	installSelectionQuoteRuntimeHooks,
+	QUOTE_SELECTION_POPUP_HEIGHT,
+	QUOTE_SELECTION_POPUP_LABEL,
+	QUOTE_SELECTION_POPUP_WIDTH,
+	QuoteSelectionPopup,
+	SelectionQuoteOverlayController,
+} from "./selection-popup.ts";
+export {
+	installQuoteBlocksSuperseder,
+	isSupersededQuoteBlocksExtension,
+	scrubExternalQuoteBlocksUi,
+	withConartiInternalRegistration,
+} from "./supersede-quote-blocks.ts";
+
+function resolveClipboardProvider() {
+	return (
+		getActiveHostRuntime()?.clipboard ??
+		getHostClipboardProvider() ??
+		defaultHostClipboardProvider
+	);
+}
+
+function resolveComposerEditor(): PiUiComposerEditor | undefined {
+	return getActiveComposerEditor();
+}
+
+export function insertQuoteIntoDraft(
+	ctx: ExtensionContext,
+	rawQuoteText: string,
+	sourceLabel?: string,
+): RegisteredPromptChip<QuotePromptChipData> | undefined {
+	const cleaned = normalizeQuoteText(rawQuoteText);
+	if (!cleaned) return undefined;
+
+	const editor = resolveComposerEditor();
+	if (editor) {
+		const tui = getActiveHostRuntime()?.tui;
+		if (tui && !hasBlockingModalOverlay(tui)) {
+			tui.setFocus(editor);
+			editor.focused = true;
+		}
+		const chip = insertQuoteChipInComposer(editor, cleaned, sourceLabel);
+		requestRender();
+		return chip;
+	}
+
+	const registry = getActivePromptChipRegistry();
+	const chip = registry.registerQuote(cleaned, sourceLabel);
+	const ui = ctx.ui as ExtensionUIContext & {
+		pasteToEditor?: (text: string) => void;
+		getEditorText?: () => string;
+	};
+	if (typeof ui.pasteToEditor === "function") {
+		ui.pasteToEditor(chip.token);
+	} else {
+		const prev = ui.getEditorText?.() ?? "";
+		ctx.ui.setEditorText(prev ? `${prev} ${chip.token}` : chip.token);
+	}
+	requestRender();
+	return chip;
+}
+
+export function registerQuotesFeature(pi: ExtensionAPI): void {
+	installQuoteBlocksSuperseder(pi);
+	registerOptionShortcutChord("alt+q");
+
+	let activeCtx: ExtensionContext | undefined;
+	let unsubscribeInput: (() => void) | undefined;
+
+	const getTheme = () => activeCtx?.ui.theme ?? getActiveGlobalTheme();
+	const selectionController = new SelectionQuoteOverlayController(
+		getTheme,
+		(selectedText, tui) => {
+			const ctx = activeCtx ?? getActiveHostRuntime()?.ctx;
+			if (!ctx) return;
+			const selTui = tui as unknown as {
+				resetTextSelection?: () => void;
+				clearTextSelection?: () => void;
+				requestRender?: () => void;
+			};
+			selTui.resetTextSelection?.();
+			selTui.clearTextSelection?.();
+			insertQuoteIntoDraft(ctx, selectedText, "selection");
+			const editor = resolveComposerEditor();
+			if (editor && !hasBlockingModalOverlay(tui)) {
+				tui.setFocus(editor);
+				editor.focused = true;
+			}
+			selTui.requestRender?.();
+		},
+	);
+
+	const quoteSelectionOrClipboard = async (ctx: ExtensionContext): Promise<void> => {
+		if (!ctx.hasUI || ctx.mode !== "tui") return;
+		const runtime = getActiveHostRuntime();
+		const tui = runtime?.tui;
+		if (tui && hasBlockingModalOverlay(tui)) {
+			selectionController.hide();
+			return;
+		}
+
+		const selectionTui = tui as unknown as
+			| {
+					getActiveSelectionText?: () => string | undefined;
+					resetTextSelection?: () => void;
+					clearTextSelection?: () => void;
+					requestRender?: () => void;
+			  }
+			| undefined;
+
+		const rawSelected =
+			selectionTui?.getActiveSelectionText?.() || selectionController.snapshottedText;
+		const selected = typeof rawSelected === "string" ? normalizeQuoteText(rawSelected) : "";
+		selectionController.hide();
+		if (selected) {
+			insertQuoteIntoDraft(ctx, selected, "selection");
+			selectionTui?.resetTextSelection?.();
+			selectionTui?.clearTextSelection?.();
+			selectionTui?.requestRender?.();
+			return;
+		}
+
+		const clipRaw = await resolveClipboardProvider().readText?.();
+		const clipText = typeof clipRaw === "string" ? normalizeQuoteText(clipRaw) : "";
+		if (clipText) {
+			insertQuoteIntoDraft(ctx, clipText, "clipboard");
+			return;
+		}
+
+		ctx.ui.notify(
+			"Выдели текст в транскрипте или скопируй его в буфер обмена перед нажатием Alt+Q",
+			"warning",
+		);
+	};
+
+	const quoteAssistantReply = async (rawArgs: string, ctx: ExtensionContext): Promise<void> => {
+		if (!ctx.hasUI) return;
+		selectionController.hide();
+		const branch = ctx.sessionManager.getBranch?.() ?? ctx.sessionManager.getEntries?.() ?? [];
+		const extracted = extractAssistantQuoteFromBranch(branch, rawArgs);
+		if (!extracted.ok) {
+			if (extracted.reason === "empty_history") {
+				ctx.ui.notify("В этой сессии пока нет ответов ассистента", "info");
+			} else if (extracted.reason === "out_of_range") {
+				ctx.ui.notify(
+					`В сессии доступно ответов ассистента: ${extracted.totalReplies} (запрошен #${extracted.requested})`,
+					"warning",
+				);
+			} else {
+				ctx.ui.notify("Использование: /quote [n] (n >= 1, по умолчанию 1)", "warning");
+			}
+			return;
+		}
+
+		insertQuoteIntoDraft(ctx, extracted.text, extracted.sourceLabel);
+	};
+
+	withConartiInternalRegistration(() => {
+		pi.registerShortcut("alt+q", {
+			description: "Вставить выделенный фрагмент или буфер обмена как чип цитаты",
+			handler: async (ctx) => {
+				await quoteSelectionOrClipboard(ctx);
+			},
+		});
+
+		pi.registerCommand("quote", {
+			description: "Процитировать ответ ассистента из истории (/quote [n], по умолчанию 1)",
+			handler: async (args, ctx) => {
+				await quoteAssistantReply(args, ctx);
+			},
+		});
+
+		pi.registerCommand("quotes", {
+			description: "Инспектор, редактирование и очистка активных цитат черновика",
+			handler: async (args, ctx) => {
+				selectionController.hide();
+				await handleQuotesCommand(args, ctx);
+			},
+		});
+	});
+
+	pi.on("session_start", async (_event, ctx) => {
+		unsubscribeInput?.();
+		unsubscribeInput = undefined;
+		activeCtx = ctx;
+		selectionController.hide();
+		scrubExternalQuoteBlocksUi(ctx);
+		installSelectionQuoteRuntimeHooks(selectionController);
+
+		if (ctx.mode === "tui" && ctx.hasUI) {
+			unsubscribeInput = ctx.ui.onTerminalInput((data) => {
+				const tui = getActiveHostRuntime()?.tui;
+				if (
+					!isKeyRelease(data) &&
+					(data === "\x1b" || matchesKey(data, "escape")) &&
+					selectionController.isShowing &&
+					!(tui && hasBlockingModalOverlay(tui))
+				) {
+					selectionController.hide();
+					requestRender();
+					return { consume: true };
+				}
+				queueMicrotask(() => {
+					const curTui = getActiveHostRuntime()?.tui;
+					if (curTui && hasBlockingModalOverlay(curTui) && selectionController.isShowing) {
+						selectionController.hide();
+					}
+				});
+				return undefined;
+			});
+		}
+	});
+
+	pi.on("input", async () => {
+		selectionController.hide();
+		return { action: "continue" };
+	});
+
+	pi.on("session_shutdown", async () => {
+		unsubscribeInput?.();
+		unsubscribeInput = undefined;
+		selectionController.hide();
+		activeCtx = undefined;
+	});
+}
