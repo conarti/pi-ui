@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerAskUserFeature } from "./features/ask-user/index.ts";
 import { mountComposer } from "./features/chrome/composer.ts";
+import { registerComposerWorkingAnimation } from "./features/chrome/working-indicator.ts";
 import { mountSessionHeader } from "./features/chrome/header.ts";
 import { registerCommandPaletteFeature } from "./features/command-palette/index.ts";
 import { showContextInspector } from "./features/context-inspector/index.ts";
@@ -22,11 +23,14 @@ import {
 import { registerToolCallsFeature } from "./features/tool-calls/index.ts";
 import { registerTranscriptFeature } from "./features/transcript/index.ts";
 import { acquireHostRuntime, disposeActiveHostRuntime } from "./shared/host-runtime.ts";
+import { installKeyboardLayoutSupport } from "./shared/keyboard-layout.ts";
 import { getSessionWorkflow } from "./shared/session-workflow.ts";
 import { requestRender, resetUiActionBridge } from "./shared/ui-action-bridge.ts";
 import { TranscriptTurnIndex } from "./shared/turn-index.ts";
 
 export default function conartiPiUi(pi: ExtensionAPI): void {
+	installKeyboardLayoutSupport(pi);
+
 	// 0. Acquire shared Host Runtime once at session_start before feature listeners bind
 	pi.on("session_start", async (_event, ctx) => {
 		await acquireHostRuntime(ctx);
@@ -34,6 +38,7 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 
 	// 1. Transcript cards: user prompts (`┃ ›`), two-tone code cards + Copy, wave Thinking, clean headings
 	registerTranscriptFeature(pi);
+	registerComposerWorkingAnimation(pi);
 
 	// 2. Compact / Claude / Codex tool call renderers, codemode summaries & silent mode
 	registerToolCallsFeature(pi);

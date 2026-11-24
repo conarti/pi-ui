@@ -171,14 +171,11 @@ export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void 
 					x += wRev + 2;
 					const wRun = visibleWidth(btnRun);
 					boxes.push({ id: "run", xStart: x, xEnd: x + wRun, y: 0, onClick: () => approveAndExecutePlan(pi, ctx) });
-					const hint = theme.fg("dim", "кликни для построчных комментариев");
-					const leftPart = ` ${btnReview}  ${btnRun}  `;
-					const availHint = Math.max(0, width - visibleWidth(leftPart) - visibleWidth(btnDismiss) - 2);
-					const showHint = availHint > 16 ? truncateToWidth(hint, availHint, "…") : "";
+					const leftPart = ` ${btnReview}  ${btnRun}`;
 					const gap = " ".repeat(
-						Math.max(1, width - visibleWidth(leftPart) - visibleWidth(showHint) - visibleWidth(btnDismiss) - 1),
+						Math.max(1, width - visibleWidth(leftPart) - visibleWidth(btnDismiss) - 1),
 					);
-					const xDismiss = visibleWidth(leftPart) + visibleWidth(showHint) + gap.length;
+					const xDismiss = visibleWidth(leftPart) + gap.length;
 					boxes.push({
 						id: "dismiss",
 						xStart: xDismiss,
@@ -186,7 +183,7 @@ export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void 
 						y: 0,
 						onClick: () => clearPlanState(pi, ctx),
 					});
-					return [truncateToWidth(`${leftPart}${showHint}${gap}${btnDismiss}`, width, "…")];
+					return [truncateToWidth(`${leftPart}${gap}${btnDismiss}`, width, "…")];
 				}
 
 				const badge = renderPill("◈ Plan Mode", {

@@ -1,9 +1,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { stopAllAnimations } from "../../shared/animation-scheduler.ts";
 import { clearHoverExcept } from "../../shared/runtime-hooks.ts";
 import { installMarkdownCardsAndHeadings } from "./markdown-cards.ts";
 import {
+	clearRecordedThinkingTimings,
 	installAssistantTranscriptBlocks,
-	startThinkingWave,
+	observeAssistantThinkingMessage,
 	stopThinkingWave,
 } from "./thinking-block.ts";
 import {
@@ -18,32 +20,44 @@ export function registerTranscriptFeature(pi: ExtensionAPI): void {
 	installUserPromptCards();
 	installAssistantTranscriptBlocks();
 
+	pi.on("session_start", async (event) => {
+		if (event.reason !== "reload") {
+			clearRecordedThinkingTimings();
+		}
+	});
+
 	pi.on("message_start", async (event: any) => {
 		if (event?.message?.role === "user") {
 			recordPendingUserMessageTimestamp(event.message.timestamp ?? Date.now());
 		}
+		observeAssistantThinkingMessage(event.message, true);
+	});
+
+	pi.on("message_update", async (event) => {
+		observeAssistantThinkingMessage(event.message, true, event.assistantMessageEvent);
 	});
 
 	pi.on("message_end", async (event: any) => {
 		if (event?.message?.role === "user") {
 			clearPendingUserMessageTimestamps();
 		}
-	});
-
-	pi.on("agent_start", async () => {
-		startThinkingWave();
+		observeAssistantThinkingMessage(event.message, false);
 	});
 
 	pi.on("agent_end", async () => {
 		stopThinkingWave();
+		stopAllAnimations();
 	});
 
 	pi.on("agent_settled", async () => {
 		stopThinkingWave();
+		stopAllAnimations();
 	});
 
 	pi.on("session_shutdown", async () => {
 		stopThinkingWave();
+		stopAllAnimations();
+		clearRecordedThinkingTimings();
 		clearPendingUserMessageTimestamps();
 		clearUserPromptCopyTimers();
 		clearHoverExcept(undefined);
