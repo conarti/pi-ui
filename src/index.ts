@@ -23,11 +23,14 @@ import {
 import { registerToolCallsFeature } from "./features/tool-calls/index.ts";
 import { registerTranscriptFeature } from "./features/transcript/index.ts";
 import { acquireHostRuntime, disposeActiveHostRuntime } from "./shared/host-runtime.ts";
+import { installKeyboardLayoutSupport } from "./shared/keyboard-layout.ts";
 import { getSessionWorkflow } from "./shared/session-workflow.ts";
 import { requestRender, resetUiActionBridge } from "./shared/ui-action-bridge.ts";
 import { TranscriptTurnIndex } from "./shared/turn-index.ts";
 
 export default function conartiPiUi(pi: ExtensionAPI): void {
+	installKeyboardLayoutSupport(pi);
+
 	// 0. Acquire shared Host Runtime once at session_start before feature listeners bind
 	pi.on("session_start", async (_event, ctx) => {
 		await acquireHostRuntime(ctx);
