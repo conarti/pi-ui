@@ -139,21 +139,43 @@ export function collectStructuralUserMetrics(doc: Component, width: number): Mou
 	return metrics;
 }
 
+function countMountedUserComponents(node: Component | undefined): number {
+	if (!node) return 0;
+	if (node instanceof UserMessageComponent) return 1;
+	if (isWalkableContainer(node)) {
+		let count = 0;
+		for (const child of node.children) {
+			count += countMountedUserComponents(child);
+		}
+		return count;
+	}
+	return 0;
+}
+
+export function selectStickyTurn(
+	turns: readonly IndexedTurn[],
+	scrollTop: number,
+	mode?: StickyDisplayMode,
+): IndexedTurn | undefined;
 export function selectStickyTurn(
 	turns: readonly IndexedTurn[],
 	scrollTop: number,
 	followingEnd: boolean,
 	mode: StickyDisplayMode,
+): IndexedTurn | undefined;
+export function selectStickyTurn(
+	turns: readonly IndexedTurn[],
+	scrollTop: number,
+	modeOrFollowingEnd: StickyDisplayMode | boolean = "auto",
+	maybeMode?: StickyDisplayMode,
 ): IndexedTurn | undefined {
+	const mode: StickyDisplayMode =
+		typeof modeOrFollowingEnd === "string" ? modeOrFollowingEnd : (maybeMode ?? "auto");
 	const mounted = turns.filter((t) => t.mounted);
 	if (mounted.length === 0) return undefined;
-	if (followingEnd) {
-		const last = mounted.at(-1)!;
-		return mode === "always" ? last : scrollTop >= last.end - 1 ? last : undefined;
-	}
-	const turn = mounted.findLast((item) => item.start <= scrollTop);
-	if (!turn) return mode === "always" ? mounted[0] : undefined;
-	return mode === "always" || scrollTop >= turn.end - 1 ? turn : undefined;
+	const above = mounted.findLast((item) => item.start < scrollTop);
+	if (above) return above;
+	return mode === "always" ? mounted[0] : undefined;
 }
 
 /**
@@ -213,7 +235,9 @@ export class TranscriptTurnIndex {
 	}
 
 	getTurnCount(): number {
-		return this.getBranchTurns().length;
+		const branchCount = this.getBranchTurns().length;
+		if (branchCount > 0) return branchCount;
+		return countMountedUserComponents(this.shell.scroll.children[0]);
 	}
 
 	getContentWidth(viewportWidth?: number): number {

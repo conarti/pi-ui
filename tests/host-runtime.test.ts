@@ -71,10 +71,12 @@ describe("Host Runtime seam", () => {
 		expect(runtime!.scroll?.scrollbar).toBe("auto");
 		expect(runtime!.chatContainer).toBe(harness.tui.chatContainer);
 
-		// Fullscreen VStack + HStack composition preserved
+		/* Первичный layoutRoot сохраняется без HStack-обертки, а композитные слоты активны */
 		expect(harness.tui.layoutRoot).toBeInstanceOf(VStack);
 		const entries = (harness.tui.layoutRoot as unknown as { entries?: Array<{ component: unknown }> }).entries ?? [];
-		expect(entries.some((entry) => entry.component instanceof HStack)).toBe(true);
+		expect(entries.some((entry) => entry.component instanceof HStack)).toBe(false);
+		expect(runtime!.viewportSlots?.topSlot).toBeDefined();
+		expect(runtime!.viewportSlots?.rightRail).toBeDefined();
 	});
 
 	it("falls back gracefully in non-fullscreen TUI mode without a ScrollView or layoutRoot", async () => {

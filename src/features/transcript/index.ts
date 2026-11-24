@@ -6,12 +6,22 @@ import {
 	startThinkingWave,
 	stopThinkingWave,
 } from "./thinking-block.ts";
-import { installUserPromptCards } from "./user-prompt.ts";
+import {
+	clearPendingUserMessageTimestamps,
+	installUserPromptCards,
+	recordPendingUserMessageTimestamp,
+} from "./user-prompt.ts";
 
 export function registerTranscriptFeature(pi: ExtensionAPI): void {
 	installMarkdownCardsAndHeadings();
 	installUserPromptCards();
 	installAssistantTranscriptBlocks();
+
+	pi.on("message_start", async (event: any) => {
+		if (event?.message?.role === "user") {
+			recordPendingUserMessageTimestamp(event.message.timestamp ?? Date.now());
+		}
+	});
 
 	pi.on("agent_start", async () => {
 		startThinkingWave();
@@ -27,6 +37,7 @@ export function registerTranscriptFeature(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", async () => {
 		stopThinkingWave();
+		clearPendingUserMessageTimestamps();
 		clearHoverExcept(undefined);
 	});
 }
