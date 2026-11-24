@@ -4,7 +4,8 @@ import { mountComposer } from "./features/chrome/composer.ts";
 import { mountSessionHeader } from "./features/chrome/header.ts";
 import { registerCommandPaletteFeature } from "./features/command-palette/index.ts";
 import { showContextInspector } from "./features/context-inspector/index.ts";
-import { createOutlineRailSlot, registerOutlineCommands } from "./features/outline-rail/index.ts";
+import { createOutlineRailSlot, getOutlineSettings, registerOutlineCommands } from "./features/outline-rail/index.ts";
+import { MIN_TERMINAL_WIDTH_FOR_RAIL, MIN_TURNS_FOR_RAIL, RAIL_WIDTH } from "./features/outline-rail/rail-view.ts";
 import {
 	applyModeTools,
 	cycleSessionMode,
@@ -23,6 +24,7 @@ import { registerToolCallsFeature } from "./features/tool-calls/index.ts";
 import { registerTranscriptFeature } from "./features/transcript/index.ts";
 import { acquireHostRuntime, disposeActiveHostRuntime } from "./shared/host-runtime.ts";
 import { getStore, restoreSessionStore } from "./shared/session-store.ts";
+import { TranscriptTurnIndex } from "./shared/turn-index.ts";
 
 export default function conartiPiUi(pi: ExtensionAPI): void {
 	// 0. Acquire shared Host Runtime once at session_start before feature listeners bind
@@ -114,17 +116,27 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 
 		const hostRuntime = await acquireHostRuntime(ctx);
 		disposeShell = hostRuntime?.mountViewportSlots((shell) => {
-			const stickyBar = new StickyPromptBar(
+			const turnIndex = new TranscriptTurnIndex({
 				shell,
-				() => ctx.sessionManager.getBranch(),
-				getStickyConfig(),
-			);
+				getBranch: () => ctx.sessionManager.getBranch(),
+				getTranscriptWidth: (viewportWidth) => {
+					const termW = viewportWidth ?? shell.tui.terminal?.columns ?? 80;
+					const railVisible =
+						getOutlineSettings().enabled &&
+						termW >= MIN_TERMINAL_WIDTH_FOR_RAIL &&
+						turnIndex.getTurnCount() >= MIN_TURNS_FOR_RAIL;
+					return Math.max(1, termW - (railVisible ? RAIL_WIDTH : 0));
+				},
+			});
+
+			const stickyBar = new StickyPromptBar(shell, turnIndex, getStickyConfig());
 			activeStickyBar = stickyBar;
 			unsubscribeStickyKey = bindStickyExpandKey(ctx, shell, stickyBar);
 
 			const outlineRail = createOutlineRailSlot(
 				ctx,
 				shell,
+				turnIndex,
 				() => stickyBar.lastRenderedHeight,
 			);
 

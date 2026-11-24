@@ -14,13 +14,12 @@ import { fgRgb, isLightTheme, paintSurfaceRow } from "../../shared/ansi.ts";
 import type { FullscreenShellContext } from "../../shared/fullscreen-layout.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import {
-	collectTranscriptPrompts,
-	formatShort24hTime,
-	sanitizePromptText,
-	selectStickyPrompt,
-	type LocatedPrompt,
+	sanitizeTurnText,
+	selectStickyTurn,
+	type IndexedTurn,
 	type StickyDisplayMode,
-} from "./prompt-locator.ts";
+	type TranscriptTurnIndex,
+} from "../../shared/turn-index.ts";
 
 export interface StickyPromptConfig {
 	enabled: boolean;
@@ -45,10 +44,10 @@ export function getStickyConfig(): StickyPromptConfig {
 }
 
 export class StickyPromptBar implements Component {
-	private prompts: LocatedPrompt[] = [];
-	private active: LocatedPrompt | undefined;
-	private navigated: { component: Component; scrollTop: number } | undefined;
-	private expanded = new Set<Component>();
+	private turns: readonly IndexedTurn[] = [];
+	private active: IndexedTurn | undefined;
+	private navigated: { turnId: string; scrollTop: number } | undefined;
+	private expanded = new Set<string>();
 	private prevCol?: number;
 	private nextCol?: number;
 	private hoveredZone: "prev" | "next" | "body" | null = null;
@@ -57,18 +56,21 @@ export class StickyPromptBar implements Component {
 
 	constructor(
 		private readonly shell: FullscreenShellContext,
-		private readonly getBranch: ExtensionContext["sessionManager"]["getBranch"],
+		private readonly turnIndex: TranscriptTurnIndex,
 		readonly config: StickyPromptConfig,
 	) {}
 
-	invalidate(): void {}
+	invalidate(): void {
+		this.shell.requestRender();
+	}
 
 	reset(): void {
-		this.prompts = [];
+		this.turns = [];
 		this.active = undefined;
 		this.navigated = undefined;
 		this.expanded.clear();
 		this.lastRenderedHeight = 0;
+		this.turnIndex.invalidate();
 	}
 
 	dispose(): void {
@@ -76,32 +78,41 @@ export class StickyPromptBar implements Component {
 		this.reset();
 	}
 
-	getActivePrompt(): LocatedPrompt | undefined {
+	getActivePrompt(): IndexedTurn | undefined {
 		return this.active;
 	}
 
 	toggleExpanded(): void {
 		if (!this.active) return;
-		const key = this.active.component;
+		const key = this.active.id;
 		if (this.expanded.has(key)) this.expanded.delete(key);
 		else this.expanded.add(key);
 		this.shell.requestRender();
 	}
 
+	private findAdjacentMountedTurn(direction: "prev" | "next"): IndexedTurn | undefined {
+		if (!this.active) return undefined;
+		if (direction === "prev") {
+			for (let i = this.active.index - 1; i >= 0; i--) {
+				if (this.turns[i]?.mounted) return this.turns[i];
+			}
+			return undefined;
+		}
+		for (let i = this.active.index + 1; i < this.turns.length; i++) {
+			if (this.turns[i]?.mounted) return this.turns[i];
+		}
+		return undefined;
+	}
+
 	navigate(direction: "prev" | "next"): void {
-		if (!this.active) return;
-		const target = this.prompts[this.active.index + (direction === "prev" ? -1 : 1)];
+		const target = this.findAdjacentMountedTurn(direction);
 		if (!target) return;
-		this.shell.scroll.scrollTo(target.start, { disableFollow: true });
-		if (this.shell.scroll.scrollTop < target.start) {
-			this.navigated = { component: target.component, scrollTop: this.shell.scroll.scrollTop };
+		this.turnIndex.jumpToTurn(target.index, { direction });
+		if (!this.shell.scroll.isFollowingEnd && this.shell.scroll.scrollTop < target.start) {
+			this.navigated = { turnId: target.id, scrollTop: this.shell.scroll.scrollTop };
 		} else {
 			this.navigated = undefined;
 		}
-		if (direction === "next" && target.index === this.prompts.length - 1) {
-			this.shell.scroll.scrollToEnd();
-		}
-		this.shell.requestRender();
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
@@ -163,52 +174,46 @@ export class StickyPromptBar implements Component {
 		}
 
 		const { scroll } = this.shell;
-		const doc = scroll.children[0];
-		if (!doc) {
+		if (!scroll.children[0]) {
 			this.lastRenderedHeight = 0;
 			return [];
 		}
 
-		const contentWidth = scroll.getContentWidth(width);
-		this.prompts = collectTranscriptPrompts(doc, contentWidth);
+		this.turns = this.turnIndex.getTurns(width);
 
-		const mounted = new Set<Component>(this.prompts.map((p) => p.component));
+		const mountedIds = new Set<string>(this.turns.filter((t) => t.mounted).map((t) => t.id));
 		for (const key of this.expanded) {
-			if (!mounted.has(key)) this.expanded.delete(key);
+			if (!mountedIds.has(key)) this.expanded.delete(key);
 		}
 
 		if (
 			this.navigated &&
-			(scroll.isFollowingEnd || scroll.scrollTop !== this.navigated.scrollTop || !mounted.has(this.navigated.component))
+			(scroll.isFollowingEnd || scroll.scrollTop !== this.navigated.scrollTop || !mountedIds.has(this.navigated.turnId))
 		) {
 			this.navigated = undefined;
 		}
 
 		this.active = this.navigated
-			? this.prompts.find((p) => p.component === this.navigated?.component)
-			: selectStickyPrompt(this.prompts, scroll.scrollTop, scroll.isFollowingEnd, this.config.mode);
+			? this.turns.find((t) => t.id === this.navigated?.turnId)
+			: selectStickyTurn(this.turns, scroll.scrollTop, scroll.isFollowingEnd, this.config.mode);
 
 		if (!this.active) {
 			this.lastRenderedHeight = 0;
 			return [];
 		}
 
-		const users = this.config.showTimestamp
-			? this.getBranch().filter((entry: any) => entry.type === "message" && entry.message.role === "user")
-			: [];
-		const branchOffset = Math.max(0, users.length - this.prompts.length);
-		const entry: any = users[branchOffset + this.active.index];
-		const timestamp = entry?.type === "message" ? entry.message.timestamp : undefined;
+		const hasPrev = Boolean(this.findAdjacentMountedTurn("prev"));
+		const hasNext = Boolean(this.findAdjacentMountedTurn("next"));
 
 		const lines = this.renderStyledSticky(width, this.shell.theme(), {
-			text: this.active.text,
-			index: this.active.index + 1,
-			total: this.prompts.length,
-			time: formatShort24hTime(timestamp),
+			text: this.active.prompt,
+			index: this.active.ordinal,
+			total: this.turns.length,
+			time: this.config.showTimestamp ? this.active.formattedTime : "",
 			navigation: this.config.showNavigation,
-			hasPrev: this.active.index > 0,
-			hasNext: this.active.index < this.prompts.length - 1,
-			expanded: this.expanded.has(this.active.component),
+			hasPrev,
+			hasNext,
+			expanded: this.expanded.has(this.active.id),
 		});
 
 		this.lastRenderedHeight = lines.length;
@@ -259,7 +264,7 @@ export class StickyPromptBar implements Component {
 		const textAvail0 = Math.max(6, width - visibleWidth(prefix0) - rightWidth - 2);
 		const textAvailN = Math.max(6, width - visibleWidth(prefixN) - 2);
 
-		const raw = sanitizePromptText(opts.text).replace(/\t/g, "  ");
+		const raw = sanitizeTurnText(opts.text).replace(/\t/g, "  ");
 		let rows: string[];
 		if (opts.expanded) {
 			rows = raw.split("\n").flatMap((line, li) => wrapTextWithAnsi(line, li === 0 ? textAvail0 : textAvailN));
