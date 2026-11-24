@@ -21,6 +21,7 @@ import { showContextInspector } from "../context-inspector/index.ts";
 import { getOutlineSettings } from "../outline-rail/index.ts";
 import { setSessionMode } from "../plan-studio/index.ts";
 import { showPlanStudio } from "../plan-studio/studio-overlay.ts";
+import { handleQuotesCommand, insertQuoteIntoDraft, extractAssistantQuoteFromBranch } from "../quotes/index.ts";
 import { getStickyConfig } from "../sticky-prompt/index.ts";
 
 interface PaletteItem {
@@ -141,6 +142,32 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 			},
 		},
 		{
+			id: "quote-last-reply",
+			group: "Цитаты",
+			icon: "❝",
+			label: "Процитировать последний ответ ассистента в черновик",
+			hint: "/quote",
+			keywords: "quote reply цитата ответ ассистента",
+			run: () => {
+				const branch = ctx.sessionManager.getBranch?.() ?? ctx.sessionManager.getEntries?.() ?? [];
+				const extracted = extractAssistantQuoteFromBranch(branch, "");
+				if (extracted.ok) {
+					insertQuoteIntoDraft(ctx, extracted.text, extracted.sourceLabel);
+				} else {
+					ctx.ui.notify("В этой сессии пока нет ответов ассистента", "info");
+				}
+			},
+		},
+		{
+			id: "quotes-manager",
+			group: "Цитаты",
+			icon: "❝",
+			label: "Управление цитатами черновика (просмотр, правка, очистка)",
+			hint: "/quotes",
+			keywords: "quotes manage edit clear цитаты черновик",
+			run: () => handleQuotesCommand("", ctx),
+		},
+		{
 			id: "model-select",
 			group: "Модель",
 			icon: "✦",
@@ -258,7 +285,7 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 		},
 	];
 
-	const ownedCommands = new Set(["palette", "context", "plan", "mode", "sticky", "outline"]);
+	const ownedCommands = new Set(["palette", "context", "plan", "mode", "sticky", "outline", "quote", "quotes"]);
 	for (const cmd of pi.getCommands()) {
 		if (ownedCommands.has(cmd.name)) continue;
 		items.push({

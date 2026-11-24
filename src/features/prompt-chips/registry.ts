@@ -377,7 +377,8 @@ export class PromptChipRegistry {
 	}
 
 	registerQuote(rawText: string, sourceLabel?: string): RegisteredPromptChip<QuotePromptChipData> {
-		const normalizedText = normalizePastedPlainText(rawText);
+		const trimmedVertical = normalizePastedPlainText(rawText).replace(/^\n+|\n+$/g, "");
+		const normalizedText = trimmedVertical.trim().length === 0 ? "" : trimmedVertical;
 		const lineCount = Math.max(1, normalizedText.length === 0 ? 1 : normalizedText.split("\n").length);
 		const entry: QuotePromptChipData = {
 			kind: "quote",
@@ -388,6 +389,37 @@ export class PromptChipRegistry {
 			sourceLabel,
 		};
 		return this.bindEntry(entry);
+	}
+
+	replaceQuoteAtNumber(
+		number: number,
+		rawText: string,
+		sourceLabelOverride?: string,
+	): RegisteredPromptChip<QuotePromptChipData> | undefined {
+		const key = makeChipBindingKey("quote", number);
+		const existingId = this.activeBindings.get(key) ?? this.historyByBindingKey.get(key);
+		const existing = existingId ? this.sessionVault.get(existingId) : undefined;
+		const priorSourceLabel = existing?.kind === "quote" ? existing.sourceLabel : undefined;
+
+		const trimmedVertical = normalizePastedPlainText(rawText).replace(/^\n+|\n+$/g, "");
+		const normalizedText = trimmedVertical.trim().length === 0 ? "" : trimmedVertical;
+		if (!normalizedText) return undefined;
+
+		const lineCount = Math.max(1, normalizedText.split("\n").length);
+		const entry: QuotePromptChipData = {
+			kind: "quote",
+			id: this.allocateChipId(),
+			text: normalizedText,
+			lineCount,
+			charCount: normalizedText.length,
+			sourceLabel: sourceLabelOverride ?? priorSourceLabel,
+		};
+		const token = formatPromptChipToken(entry, number);
+		this.sessionVault.set(entry.id, entry);
+		this.activeBindings.set(key, entry.id);
+		this.historyByBindingKey.set(key, entry.id);
+		this.historyByToken.set(token, entry.id);
+		return { entry, number, token };
 	}
 
 	resolveChip(kind: PromptChipKind, number: number): PromptChipEntry | undefined {
@@ -680,16 +712,16 @@ export class PromptChipRegistry {
 			}
 
 			/* Для цитат вставляем Markdown blockquote с пустыми строками вокруг */
-			let combinedBefore = expanded + chunkBefore;
+			let combinedBefore = (expanded + chunkBefore).replace(/[ \t]+$/, "");
 			let quoteLead = "";
 			if (combinedBefore.length > 0) {
-				if (combinedBefore.endsWith("\n\n")) {
+				if (/\n[ \t]*\n$/.test(combinedBefore)) {
+					combinedBefore = combinedBefore.replace(/\n[ \t]*\n$/, "\n\n");
 					quoteLead = "";
 				} else if (combinedBefore.endsWith("\n")) {
 					quoteLead = "\n";
 				} else {
-					combinedBefore = combinedBefore.replace(/[ \t]+$/, "");
-					quoteLead = combinedBefore.length === 0 ? "" : "\n\n";
+					quoteLead = "\n\n";
 				}
 			}
 
@@ -697,7 +729,7 @@ export class PromptChipRegistry {
 			let skipAfterChars = 0;
 			let quoteTrail = "";
 			if (restAfter.length > 0) {
-				if (restAfter.startsWith("\n\n")) {
+				if (/^\n[ \t]*\n/.test(restAfter)) {
 					quoteTrail = "";
 				} else if (restAfter.startsWith("\n")) {
 					quoteTrail = "\n";
@@ -705,7 +737,7 @@ export class PromptChipRegistry {
 					const wsMatch = /^[ \t]+/.exec(restAfter);
 					skipAfterChars = wsMatch ? wsMatch[0].length : 0;
 					const afterTrimmed = restAfter.slice(skipAfterChars);
-					if (afterTrimmed.startsWith("\n\n")) {
+					if (/^\n[ \t]*\n/.test(afterTrimmed)) {
 						quoteTrail = "";
 					} else if (afterTrimmed.startsWith("\n")) {
 						quoteTrail = "\n";

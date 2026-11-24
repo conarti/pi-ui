@@ -63,8 +63,17 @@ export interface ComposerHooks {
 }
 
 const COMPOSER_HOOKS_KEY = Symbol.for("conarti.pi-ui.composer-hooks.v1");
+const ACTIVE_COMPOSER_KEY = Symbol.for("conarti.pi-ui.active-composer.v1");
 const COMPOSER_FACTORY_ORIGIN = Symbol.for("conarti.pi-ui.composer-factory-origin.v1");
 const UPSTREAM_EDITOR_FACTORIES = new WeakMap<object, ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>();
+
+export function getActiveComposerEditor(): PiUiComposerEditor | undefined {
+	return (globalThis as Record<symbol, PiUiComposerEditor | undefined>)[ACTIVE_COMPOSER_KEY];
+}
+
+export function setActiveComposerEditor(editor: PiUiComposerEditor | undefined): void {
+	(globalThis as Record<symbol, PiUiComposerEditor | undefined>)[ACTIVE_COMPOSER_KEY] = editor;
+}
 
 export function registerComposerHooks(hooks: ComposerHooks | undefined): void {
 	(globalThis as Record<symbol, ComposerHooks | undefined>)[COMPOSER_HOOKS_KEY] = hooks;
@@ -345,6 +354,15 @@ export class PiUiComposerEditor extends CustomEditor {
 		this.pendingUndoCapture = { hasValue: true, value: preCapturedSnapshot };
 		try {
 			this.internals().insertTextAtCursor(text);
+		} finally {
+			this.pendingUndoCapture = undefined;
+		}
+	}
+
+	setTextWithUndoSnapshot(text: string, preCapturedSnapshot?: unknown): void {
+		this.pendingUndoCapture = { hasValue: true, value: preCapturedSnapshot };
+		try {
+			this.setText(text);
 		} finally {
 			this.pendingUndoCapture = undefined;
 		}
@@ -718,6 +736,7 @@ export function mountComposer(pi: ExtensionAPI, ctx: ExtensionContext): void {
 			existing instanceof PiUiComposerEditor
 				? (existing.updateDeps(deps), existing)
 				: new PiUiComposerEditor(tui, editorTheme, keybindings, deps);
+		setActiveComposerEditor(editor);
 
 		setRequestRender(() => tui.requestRender());
 		setAppActionRunner((actionId: string): boolean => {

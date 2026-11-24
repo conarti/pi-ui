@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerAskUserFeature } from "./features/ask-user/index.ts";
-import { mountComposer } from "./features/chrome/composer.ts";
+import { mountComposer, setActiveComposerEditor } from "./features/chrome/composer.ts";
 import { registerComposerWorkingAnimation } from "./features/chrome/working-indicator.ts";
 import { mountSessionHeader } from "./features/chrome/header.ts";
 import { registerCommandPaletteFeature } from "./features/command-palette/index.ts";
@@ -22,6 +22,7 @@ import {
 } from "./features/sticky-prompt/index.ts";
 import { registerToolCallsFeature } from "./features/tool-calls/index.ts";
 import { registerPromptChipsFeature } from "./features/prompt-chips/index.ts";
+import { registerQuotesFeature } from "./features/quotes/index.ts";
 import { registerTranscriptFeature } from "./features/transcript/index.ts";
 import { acquireHostRuntime, disposeActiveHostRuntime } from "./shared/host-runtime.ts";
 import { installKeyboardLayoutSupport } from "./shared/keyboard-layout.ts";
@@ -41,6 +42,7 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 	registerTranscriptFeature(pi);
 	registerComposerWorkingAnimation(pi);
 	registerPromptChipsFeature(pi);
+	registerQuotesFeature(pi);
 
 	// 2. Compact / Claude / Codex tool call renderers, codemode summaries & silent mode
 	registerToolCallsFeature(pi);
@@ -150,6 +152,7 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 		disposeShell?.();
 		disposeShell = undefined;
 		activeStickyBar = undefined;
+		setActiveComposerEditor(undefined);
 		disposeActiveHostRuntime();
 		resetUiActionBridge();
 	});
