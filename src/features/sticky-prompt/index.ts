@@ -1,25 +1,27 @@
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	isKeyRelease,
 	isKeyRepeat,
-	stripTerminalSequences,
-	truncateToWidth,
-	visibleWidth,
-	wrapTextWithAnsi,
 	type Component,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
-import { fgRgb, isLightTheme, paintSurfaceRow } from "../../shared/ansi.ts";
-import type { FullscreenShellContext } from "../../shared/fullscreen-layout.ts";
+import {
+	computeStickyPushOffset,
+	type FullscreenShellContext,
+	type StickyOverlayRender,
+} from "../../shared/fullscreen-layout.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import {
-	sanitizeTurnText,
 	selectStickyTurn,
 	type IndexedTurn,
 	type StickyDisplayMode,
 	type TranscriptTurnIndex,
 } from "../../shared/turn-index.ts";
+import {
+	renderUserPromptCardLines,
+	type PromptPillHitTarget,
+} from "../transcript/user-prompt.ts";
 
 export interface StickyPromptConfig {
 	enabled: boolean;
@@ -29,6 +31,7 @@ export interface StickyPromptConfig {
 }
 
 const STICKY_CONFIG_KEY = Symbol.for("conarti.pi-ui.sticky-config.v1");
+const COLLAPSED_MAX_CONTENT_LINES = 3;
 
 export function getStickyConfig(): StickyPromptConfig {
 	const g = globalThis as Record<symbol, StickyPromptConfig | undefined>;
@@ -36,7 +39,7 @@ export function getStickyConfig(): StickyPromptConfig {
 		g[STICKY_CONFIG_KEY] = {
 			enabled: true,
 			showTimestamp: true,
-			showNavigation: true,
+			showNavigation: false,
 			mode: "auto",
 		};
 	}
@@ -46,13 +49,13 @@ export function getStickyConfig(): StickyPromptConfig {
 export class StickyPromptBar implements Component {
 	private turns: readonly IndexedTurn[] = [];
 	private active: IndexedTurn | undefined;
-	private navigated: { turnId: string; scrollTop: number } | undefined;
 	private expanded = new Set<string>();
-	private prevCol?: number;
-	private nextCol?: number;
-	private hoveredZone: "prev" | "next" | "body" | null = null;
+	private hovered = false;
+	private pillHits: readonly PromptPillHitTarget[] = [];
 	private disposed = false;
 	lastRenderedHeight = 0;
+	lastVisibleHeight = 0;
+	lastPushOffset = 0;
 
 	constructor(
 		private readonly shell: FullscreenShellContext,
@@ -67,9 +70,12 @@ export class StickyPromptBar implements Component {
 	reset(): void {
 		this.turns = [];
 		this.active = undefined;
-		this.navigated = undefined;
 		this.expanded.clear();
+		this.hovered = false;
+		this.pillHits = [];
 		this.lastRenderedHeight = 0;
+		this.lastVisibleHeight = 0;
+		this.lastPushOffset = 0;
 		this.turnIndex.invalidate();
 	}
 
@@ -83,60 +89,56 @@ export class StickyPromptBar implements Component {
 	}
 
 	toggleExpanded(): void {
-		if (!this.active) return;
-		const key = this.active.id;
+		const target = this.active ?? this.resolveCurrentTurn();
+		if (!target) return;
+		const key = target.id;
 		if (this.expanded.has(key)) this.expanded.delete(key);
 		else this.expanded.add(key);
 		this.shell.requestRender();
 	}
 
-	private findAdjacentMountedTurn(direction: "prev" | "next"): IndexedTurn | undefined {
-		if (!this.active) return undefined;
+	private resolveCurrentTurn(): IndexedTurn | undefined {
+		const turns = this.turnIndex.getTurns();
+		const mounted = turns.filter((t) => t.mounted);
+		if (mounted.length === 0) return undefined;
+		const scrollTop = this.shell.scroll.scrollTop ?? 0;
+		return mounted.findLast((t) => t.start <= scrollTop) ?? mounted[0];
+	}
+
+	private findAdjacentMountedTurn(fromTurn: IndexedTurn | undefined, direction: "prev" | "next"): IndexedTurn | undefined {
+		if (!fromTurn) return undefined;
 		if (direction === "prev") {
-			for (let i = this.active.index - 1; i >= 0; i--) {
+			for (let i = fromTurn.index - 1; i >= 0; i--) {
 				if (this.turns[i]?.mounted) return this.turns[i];
 			}
 			return undefined;
 		}
-		for (let i = this.active.index + 1; i < this.turns.length; i++) {
+		for (let i = fromTurn.index + 1; i < this.turns.length; i++) {
 			if (this.turns[i]?.mounted) return this.turns[i];
 		}
 		return undefined;
 	}
 
 	navigate(direction: "prev" | "next"): void {
-		const target = this.findAdjacentMountedTurn(direction);
+		this.turns = this.turnIndex.getTurns();
+		const reference = this.resolveCurrentTurn();
+		const target = this.findAdjacentMountedTurn(reference, direction);
 		if (!target) return;
 		this.turnIndex.jumpToTurn(target.index, { direction });
-		if (!this.shell.scroll.isFollowingEnd && this.shell.scroll.scrollTop < target.start) {
-			this.navigated = { turnId: target.id, scrollTop: this.shell.scroll.scrollTop };
-		} else {
-			this.navigated = undefined;
-		}
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-		if (!this.active || event.y < 0 || event.y >= this.lastRenderedHeight - 1) return undefined;
+		if (!this.active || event.y < 0 || event.y >= this.lastRenderedHeight) return undefined;
 
 		if (event.type === "move") {
-			let nextHover: "prev" | "next" | "body" = "body";
-			if (
-				event.y === 0 &&
-				this.prevCol !== undefined &&
-				this.nextCol !== undefined &&
-				event.x >= this.prevCol &&
-				event.x < this.nextCol + 2
-			) {
-				nextHover = event.x < this.nextCol ? "prev" : "next";
-			}
 			claimHover(this, () => {
-				if (this.hoveredZone !== null) {
-					this.hoveredZone = null;
+				if (this.hovered) {
+					this.hovered = false;
 					this.shell.requestRender();
 				}
 			});
-			if (nextHover !== this.hoveredZone) {
-				this.hoveredZone = nextHover;
+			if (!this.hovered) {
+				this.hovered = true;
 				return { handled: true, render: true };
 			}
 			return undefined;
@@ -150,25 +152,53 @@ export class StickyPromptBar implements Component {
 			return undefined;
 		}
 
-		if (
-			event.y === 0 &&
-			this.prevCol !== undefined &&
-			this.nextCol !== undefined &&
-			event.x >= this.prevCol &&
-			event.x < this.nextCol + 2
-		) {
-			this.navigate(event.x < this.nextCol ? "prev" : "next");
-		} else {
-			this.toggleExpanded();
+		const matchedPill = this.pillHits.find(
+			(hit) => event.y === hit.y && event.x >= hit.xStart && event.x < hit.xEnd,
+		);
+		if (matchedPill) {
+			matchedPill.onClick?.(event.screenX, event.screenY);
+			return { handled: true, render: true };
 		}
+
+		this.toggleExpanded();
 		return { handled: true, render: true };
 	}
 
+	renderStickyOverlay(width: number, viewportWidth?: number): StickyOverlayRender {
+		const lines = this.renderInternal(width, viewportWidth);
+		if (lines.length === 0 || !this.active) {
+			this.lastVisibleHeight = 0;
+			this.lastPushOffset = 0;
+			return {
+				lines: [],
+				visibleLines: [],
+				fullHeight: 0,
+				pushOffset: 0,
+			};
+		}
+
+		const nextTurn = this.findAdjacentMountedTurn(this.active, "next");
+		const scrollTop = this.shell.scroll.scrollTop ?? 0;
+		const push = computeStickyPushOffset(lines.length, scrollTop, nextTurn?.start);
+		const visibleLines = push.pushOffset > 0 ? lines.slice(push.pushOffset) : lines;
+		this.lastPushOffset = push.pushOffset;
+		this.lastVisibleHeight = visibleLines.length;
+		return {
+			lines,
+			visibleLines,
+			fullHeight: lines.length,
+			pushOffset: push.pushOffset,
+		};
+	}
+
 	render(width: number): string[] {
+		return [...this.renderStickyOverlay(width).visibleLines];
+	}
+
+	private renderInternal(cardWidth: number, viewportWidth?: number): string[] {
 		this.active = undefined;
-		this.prevCol = undefined;
-		this.nextCol = undefined;
-		if (this.disposed || !this.config.enabled || width < 20) {
+		this.pillHits = [];
+		if (this.disposed || !this.config.enabled || cardWidth < 16) {
 			this.lastRenderedHeight = 0;
 			return [];
 		}
@@ -179,142 +209,47 @@ export class StickyPromptBar implements Component {
 			return [];
 		}
 
-		this.turns = this.turnIndex.getTurns(width);
+		this.turns = this.turnIndex.getTurns(viewportWidth);
 
 		const mountedIds = new Set<string>(this.turns.filter((t) => t.mounted).map((t) => t.id));
 		for (const key of this.expanded) {
 			if (!mountedIds.has(key)) this.expanded.delete(key);
 		}
 
-		if (
-			this.navigated &&
-			(scroll.isFollowingEnd || scroll.scrollTop !== this.navigated.scrollTop || !mountedIds.has(this.navigated.turnId))
-		) {
-			this.navigated = undefined;
-		}
-
-		this.active = this.navigated
-			? this.turns.find((t) => t.id === this.navigated?.turnId)
-			: selectStickyTurn(this.turns, scroll.scrollTop, scroll.isFollowingEnd, this.config.mode);
-
+		this.active = selectStickyTurn(this.turns, scroll.scrollTop ?? 0, this.config.mode);
 		if (!this.active) {
 			this.lastRenderedHeight = 0;
 			return [];
 		}
 
-		const hasPrev = Boolean(this.findAdjacentMountedTurn("prev"));
-		const hasNext = Boolean(this.findAdjacentMountedTurn("next"));
+		const isExpanded = this.expanded.has(this.active.id);
+		const vpHeight = scroll.viewportHeight ?? 0;
+		const maxContentLines = isExpanded
+			? vpHeight > 0
+				? Math.max(1, vpHeight - 3)
+				: undefined
+			: vpHeight > 0 && vpHeight < COLLAPSED_MAX_CONTENT_LINES + 2
+				? Math.max(1, vpHeight - 2)
+				: COLLAPSED_MAX_CONTENT_LINES;
 
-		const lines = this.renderStyledSticky(width, this.shell.theme(), {
-			text: this.active.prompt,
-			index: this.active.ordinal,
-			total: this.turns.length,
-			time: this.config.showTimestamp ? this.active.formattedTime : "",
-			navigation: this.config.showNavigation,
-			hasPrev,
-			hasNext,
-			expanded: this.expanded.has(this.active.id),
-		});
+		const rendered = renderUserPromptCardLines(
+			this.active.prompt,
+			cardWidth,
+			this.shell.theme(),
+			{
+				formattedTime: this.config.showTimestamp ? this.active.formattedTime : "",
+				hovered: this.hovered,
+				showCopyBadge: false,
+				maxContentLines,
+				surface: "sticky",
+				messageId: this.active.id,
+				timestamp: this.active.timestamp,
+			},
+		);
 
-		this.lastRenderedHeight = lines.length;
-		return lines;
-	}
-
-	private renderStyledSticky(
-		width: number,
-		theme: Theme,
-		opts: {
-			text: string;
-			index: number;
-			total: number;
-			time: string;
-			navigation: boolean;
-			hasPrev: boolean;
-			hasNext: boolean;
-			expanded: boolean;
-		},
-	): string[] {
-		const light = isLightTheme(theme);
-		const bg: [number, number, number] = light
-			? this.hoveredZone
-				? [225, 236, 252]
-				: [234, 242, 253]
-			: this.hoveredZone
-				? [44, 53, 68]
-				: [37, 44, 57];
-
-		const spine = light ? fgRgb(37, 99, 235, "┃") : fgRgb(97, 175, 239, "┃");
-		const chevron = light ? fgRgb(37, 99, 235, "› ") : fgRgb(125, 207, 255, "› ");
-		const bodyColor = (s: string) => (light ? fgRgb(30, 41, 59, s) : fgRgb(220, 229, 242, s));
-		const dimColor = (s: string) => (light ? fgRgb(100, 116, 139, s) : fgRgb(124, 138, 160, s));
-
-		const navRaw = opts.navigation && width >= 24 ? "↑ ↓  " : "";
-		const stepBadge = `#${opts.index}/${opts.total}`;
-		const metaPlain = [opts.time, stepBadge].filter(Boolean).join(" · ");
-		const showMeta = metaPlain && width >= visibleWidth(metaPlain) + visibleWidth(navRaw) + 20;
-		const rightWidth = (showMeta ? visibleWidth(metaPlain) + 2 : 0) + visibleWidth(navRaw);
-
-		if (navRaw) {
-			this.prevCol = width - visibleWidth(navRaw);
-			this.nextCol = this.prevCol + 2;
-		}
-
-		const prefix0 = `  ${spine} ${chevron}`;
-		const prefixN = `  ${spine}   `;
-		const textAvail0 = Math.max(6, width - visibleWidth(prefix0) - rightWidth - 2);
-		const textAvailN = Math.max(6, width - visibleWidth(prefixN) - 2);
-
-		const raw = sanitizeTurnText(opts.text).replace(/\t/g, "  ");
-		let rows: string[];
-		if (opts.expanded) {
-			rows = raw.split("\n").flatMap((line, li) => wrapTextWithAnsi(line, li === 0 ? textAvail0 : textAvailN));
-		} else {
-			rows = [raw.replace(/\s+/g, " ").trim()];
-		}
-
-		const clipped = rows.slice(0, 8);
-		if (rows.length > clipped.length) {
-			clipped.push(`… (+${rows.length - clipped.length} стр.)`);
-		}
-
-		const out: string[] = [];
-		for (let i = 0; i < clipped.length; i++) {
-			const pfx = i === 0 ? prefix0 : prefixN;
-			const cleanText = stripTerminalSequences(
-				truncateToWidth(clipped[i] ?? "", i === 0 ? textAvail0 : textAvailN, "…"),
-			);
-
-			let rightStyled = "";
-			if (i === 0) {
-				if (showMeta) {
-					rightStyled += dimColor(`${metaPlain}  `);
-				}
-				if (navRaw) {
-					const upGlyph =
-						!opts.hasPrev
-							? dimColor("↑")
-							: this.hoveredZone === "prev"
-								? fgRgb(125, 207, 255, "↑")
-								: bodyColor("↑");
-					const downGlyph =
-						!opts.hasNext
-							? dimColor("↓")
-							: this.hoveredZone === "next"
-								? fgRgb(125, 207, 255, "↓")
-								: bodyColor("↓");
-					rightStyled += `${upGlyph} ${downGlyph}  `;
-				}
-			}
-
-			const gap = " ".repeat(
-				Math.max(0, width - visibleWidth(pfx) - visibleWidth(cleanText) - visibleWidth(rightStyled)),
-			);
-			out.push(paintSurfaceRow(`${pfx}${bodyColor(cleanText)}${gap}${rightStyled}`, width, bg[0], bg[1], bg[2]));
-		}
-
-		const sepColor = light ? fgRgb(203, 213, 225, "─".repeat(width)) : fgRgb(48, 57, 72, "─".repeat(width));
-		out.push(sepColor);
-		return out;
+		this.pillHits = rendered.pillHits;
+		this.lastRenderedHeight = rendered.lines.length;
+		return rendered.lines;
 	}
 }
 
@@ -322,7 +257,7 @@ export function registerStickyPromptCommands(
 	pi: ExtensionAPI,
 	getBar: () => StickyPromptBar | undefined,
 ): void {
-	const usage = "/sticky [toggle | prev | next | expand | nav | time | auto | always | status]";
+	const usage = "/sticky [toggle | prev | next | expand | time | auto | always | status]";
 
 	pi.registerCommand("sticky", {
 		description: `Закреплённый сверху активный промпт: ${usage}`,
@@ -367,7 +302,7 @@ export function registerStickyPromptCommands(
 					break;
 				case "status":
 					ctx.ui.notify(
-						`Sticky: ${cfg.enabled ? "on" : "off"} | mode=${cfg.mode} | nav=${cfg.showNavigation} | time=${cfg.showTimestamp}`,
+						`Sticky: ${cfg.enabled ? "on" : "off"} | mode=${cfg.mode} | time=${cfg.showTimestamp}`,
 						"info",
 					);
 					return;
@@ -375,7 +310,6 @@ export function registerStickyPromptCommands(
 					ctx.ui.notify(`Использование: ${usage}`, "info");
 					return;
 			}
-			ctx.ui.theme;
 			bar.invalidate();
 		},
 	});

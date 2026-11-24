@@ -2,15 +2,15 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
 	truncateToWidth,
 	visibleWidth,
+	wrapTextWithAnsi,
 	type Component,
 	type ScrollView,
 	type TUI,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
-import { fgRgb, isLightTheme } from "../../shared/ansi.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
-import type { IndexedTurn, TranscriptTurnIndex } from "../../shared/turn-index.ts";
+import { sanitizeTurnText, type IndexedTurn, type TranscriptTurnIndex } from "../../shared/turn-index.ts";
 
 export const RAIL_WIDTH = 2;
 export const MIN_TERMINAL_WIDTH_FOR_RAIL = 64;
@@ -84,12 +84,7 @@ export function computeOutlineGeometry(
 	height: number,
 	turnCount: number,
 	vp: RailViewport,
-	refHeight?: number,
 ): RailGeometry | undefined {
-	if (refHeight !== undefined) {
-		const stable = computeOutlineGeometry(refHeight - 1, turnCount, vp);
-		if (stable && stable.downY < height) return { ...stable, height };
-	}
 	if (turnCount < MIN_TURNS_FOR_RAIL) return undefined;
 	const maxTicks = height - 2;
 	if (maxTicks <= 0) return undefined;
@@ -144,29 +139,27 @@ export function resolveRailHitTarget(geo: RailGeometry, hit?: RailHit): number |
 	return geo.downTarget;
 }
 
-export function wrapPreviewLines(text: string, width: number): string[] {
-	const src = text.trim();
+export function wrapPreviewLines(text: string, width: number, maxLines = 4): string[] {
+	const src = sanitizeTurnText(text).replace(/\s+/g, " ").trim();
 	if (!src) return [];
 	const w = Math.max(1, width);
-	if (visibleWidth(src) <= w) return [src];
-	const chars = [...src];
-	const line1: string[] = [];
-	let used = 0;
-	let i = 0;
-	for (; i < chars.length; i++) {
-		const cw = Math.max(1, visibleWidth(chars[i]!));
-		if (used + cw > w && line1.length) break;
-		line1.push(chars[i]!);
-		used += cw;
+	const wrapped = wrapTextWithAnsi(src, w);
+	if (wrapped.length <= maxLines) return wrapped;
+	const clipped = wrapped.slice(0, maxLines);
+	const lastIdx = clipped.length - 1;
+	if (lastIdx >= 0) {
+		const trimmed = clipped[lastIdx]!.replace(/\s+$/, "");
+		clipped[lastIdx] =
+			visibleWidth(trimmed) + 1 <= w
+				? `${trimmed}…`
+				: `${truncateToWidth(trimmed, Math.max(1, w - 1), "")}…`;
 	}
-	const rest = chars.slice(i).join("").trim();
-	return rest ? [line1.join(""), truncateToWidth(rest, w, "…")] : [line1.join("")];
+	return clipped;
 }
 
 export class OutlinePreviewPopup implements Component {
 	preview = "";
-	meta = "";
-	note = "";
+	time = "";
 
 	constructor(private readonly getTheme: () => Theme) {}
 
@@ -174,34 +167,32 @@ export class OutlinePreviewPopup implements Component {
 
 	render(width: number): string[] {
 		const th = this.getTheme();
-		const light = isLightTheme(th);
-		const inner = Math.max(4, width - 2);
-		const textW = inner - 2;
-		const meta = this.meta.trim();
-		const note = this.note.trim();
+		const safeWidth = Math.max(6, width);
+		const inner = Math.max(4, safeWidth - 2);
+		const textW = Math.max(1, inner - 2);
+		const time = this.time.trim();
 		const body = wrapPreviewLines(this.preview, textW);
 		const lines = body.length ? body : [" "];
 
-		const edge = (s: string) => (light ? fgRgb(37, 99, 235, s) : fgRgb(97, 175, 239, s));
+		const edge = (s: string) => th.fg("borderMuted", s);
 		const fit = (s: string) => {
 			const clipped = truncateToWidth(s, textW, "");
 			return clipped + " ".repeat(Math.max(0, textW - visibleWidth(clipped)));
 		};
-		const row = (s: string, kind: "meta" | "body") => {
-			const styled =
-				kind === "meta"
-					? th.fg("muted", fit(truncateToWidth(s, textW, "…")))
-					: th.fg("text", fit(s));
-			return `${edge("│")} ${styled} ${edge("│")}`;
-		};
+		const bodyRow = (s: string) => `${edge("│")} ${th.fg("text", fit(s))} ${edge("│")}`;
 
-		return [
-			edge(`╭${"─".repeat(inner)}╮`),
-			...(meta ? [row(meta, "meta")] : []),
-			...(note ? [row(note, "meta")] : []),
-			...lines.map((line) => row(line, "body")),
-			edge(`╰${"─".repeat(inner)}╯`),
-		];
+		const out: string[] = [];
+		if (time) {
+			const clippedTime = truncateToWidth(time, safeWidth, "");
+			const padLeft = " ".repeat(Math.max(0, safeWidth - visibleWidth(clippedTime)));
+			out.push(`${padLeft}${th.fg("muted", clippedTime)}`);
+		}
+		out.push(edge(`╭${"─".repeat(inner)}╮`));
+		for (const line of lines) {
+			out.push(bodyRow(line));
+		}
+		out.push(edge(`╰${"─".repeat(inner)}╯`));
+		return out;
 	}
 }
 
@@ -210,8 +201,8 @@ export class OutlineRailComponent implements Component {
 	geometry?: RailGeometry;
 	hovered?: RailHit;
 
-	private refHeight = 0;
-	private refKey = "";
+	private lastPointer?: { x: number; y: number; screenY: number };
+	private lastHoverTurnId?: string;
 	private lastRenderedHeight = -1;
 	private syncScheduled = false;
 
@@ -221,7 +212,12 @@ export class OutlineRailComponent implements Component {
 		private readonly getTheme: () => Theme,
 		private readonly turnIndex: TranscriptTurnIndex,
 		private readonly isEnabled: () => boolean,
-		private readonly onHoverChange: (hit: RailHit | undefined, turn: IndexedTurn | undefined, screenY: number) => void,
+		private readonly onHoverChange: (
+			hit: RailHit | undefined,
+			turn: IndexedTurn | undefined,
+			screenY: number,
+			fromRender?: boolean,
+		) => void,
 		private readonly onSelectTurn: (
 			turn: IndexedTurn,
 			turnIndex: number,
@@ -238,11 +234,26 @@ export class OutlineRailComponent implements Component {
 		return this.turnIndex.getTurnCount() >= MIN_TURNS_FOR_RAIL;
 	};
 
-	clearHover(): void {
-		if (this.hovered) {
-			this.hovered = undefined;
-			this.onHoverChange(undefined, undefined, 0);
+	clearHover(fromRender = false): void {
+		const hadState = Boolean(this.hovered || this.lastPointer || this.lastHoverTurnId);
+		this.hovered = undefined;
+		this.lastPointer = undefined;
+		this.lastHoverTurnId = undefined;
+		if (hadState) {
+			this.onHoverChange(undefined, undefined, 0, fromRender);
 		}
+	}
+
+	private resolveTurnForHit(
+		geo: RailGeometry | undefined,
+		hit: RailHit | undefined,
+		turns: readonly IndexedTurn[],
+	): IndexedTurn | undefined {
+		if (!geo || !hit) return undefined;
+		if (hit.kind === "tick") return turns[hit.turn];
+		if (hit.kind === "up" && geo.upTarget !== undefined) return turns[geo.upTarget];
+		if (hit.kind === "down" && geo.downTarget !== undefined) return turns[geo.downTarget];
+		return undefined;
 	}
 
 	offsetOf(turnIndex: number): number {
@@ -255,25 +266,36 @@ export class OutlineRailComponent implements Component {
 			return { handled: true, render: true };
 		}
 
+		if ((this.tui as any).getTopmostVisibleOverlay?.()) {
+			this.clearHover();
+			return undefined;
+		}
+
 		const hit = this.geometry ? hitTestRail(this.geometry, e.x, e.y) : undefined;
 
 		if (e.type === "move") {
 			claimHover(this, () => {
-				if (this.hovered) {
+				if (this.hovered || this.lastPointer) {
 					this.clearHover();
 					this.tui.requestRender();
 				}
 			});
-			if (hitKey(hit) === hitKey(this.hovered)) return undefined;
-			this.hovered = hit;
+			this.lastPointer = { x: e.x, y: e.y, screenY: e.screenY };
 			const turns = this.turnIndex.getTurns();
-			let turn: IndexedTurn | undefined;
-			if (hit?.kind === "tick") turn = turns[hit.turn];
-			else if (hit?.kind === "up" && this.geometry?.upTarget !== undefined) turn = turns[this.geometry.upTarget];
-			else if (hit?.kind === "down" && this.geometry?.downTarget !== undefined) turn = turns[this.geometry.downTarget];
-
-			this.onHoverChange(hit, turn, e.screenY);
+			const turn = this.resolveTurnForHit(this.geometry, hit, turns);
+			const nextTurnId = turn?.id;
+			if (hitKey(hit) === hitKey(this.hovered) && nextTurnId === this.lastHoverTurnId) {
+				return undefined;
+			}
+			this.hovered = hit;
+			this.lastHoverTurnId = nextTurnId;
+			this.onHoverChange(hit, turn, e.screenY, false);
 			return { handled: true, render: true };
+		}
+
+		if (e.type === "press" && e.button === "left") {
+			const targetIdx = this.geometry ? resolveRailHitTarget(this.geometry, hit) : undefined;
+			return targetIdx !== undefined ? { handled: true, render: false } : undefined;
 		}
 
 		if (e.type === "click" && e.button === "left") {
@@ -288,10 +310,10 @@ export class OutlineRailComponent implements Component {
 		return undefined;
 	}
 
-	render(width: number): string[] {
+	render(width: number, explicitHeight?: number): string[] {
 		const w = Math.max(1, Math.min(width, RAIL_WIDTH));
 		const turns = this.turnIndex.getTurns();
-		const height = Math.max(0, this.scroll.viewportHeight ?? 0);
+		const height = Math.max(0, explicitHeight ?? this.scroll.viewportHeight ?? 0);
 
 		if (height === 0 && turns.length >= MIN_TURNS_FOR_RAIL && !this.syncScheduled) {
 			this.syncScheduled = true;
@@ -306,12 +328,12 @@ export class OutlineRailComponent implements Component {
 
 		if (!this.isEnabled() || turns.length < MIN_TURNS_FOR_RAIL || height < 3) {
 			this.geometry = undefined;
+			this.clearHover(true);
 			return [];
 		}
 
 		const th = this.getTheme();
 		const lines = Array.from({ length: height }, () => " ".repeat(w));
-		const termW = this.tui.terminal?.columns ?? 80;
 		const contentHeight = (this.scroll as any).contentHeight ?? 0;
 
 		const promptYs = turns.map((turn) => turn.start);
@@ -325,24 +347,29 @@ export class OutlineRailComponent implements Component {
 			turns.length,
 			promptHeights,
 		);
-		const sizeKey = `${termW}x${this.tui.terminal?.rows ?? 0}`;
-		if (sizeKey !== this.refKey || !this.refHeight || (this.scroll.isFollowingEnd ?? vp.atBottom)) {
-			this.refKey = sizeKey;
-			this.refHeight = height;
+		const geo = computeOutlineGeometry(height, turns.length, vp);
+		this.geometry = geo;
+		if (!geo) {
+			this.clearHover(true);
+			return lines;
 		}
 
-		const geo = computeOutlineGeometry(height, turns.length, vp, this.refHeight);
-		this.geometry = geo;
-		if (!geo) return lines;
+		if (this.lastPointer && !(this.tui as any).getTopmostVisibleOverlay?.()) {
+			const syncedHit = hitTestRail(geo, this.lastPointer.x, this.lastPointer.y);
+			const syncedTurn = this.resolveTurnForHit(geo, syncedHit, turns);
+			const syncedTurnId = syncedTurn?.id;
+			if (hitKey(syncedHit) !== hitKey(this.hovered) || syncedTurnId !== this.lastHoverTurnId) {
+				this.hovered = syncedHit;
+				this.lastHoverTurnId = syncedTurnId;
+				this.onHoverChange(syncedHit, syncedTurn, this.lastPointer.screenY, true);
+			}
+		}
 
-		const light = isLightTheme(th);
-		const paint = (y: number, glyph: string, tone: "dim" | "muted" | "active" | "hover") => {
+		const paint = (y: number, glyph: string, tone: "dim" | "muted" | "primary") => {
 			if (y < 0 || y >= height) return;
 			const padded = padRailCell(glyph);
-			if (tone === "hover") {
-				lines[y] = light ? fgRgb(29, 78, 216, padded) : fgRgb(125, 207, 255, padded);
-			} else if (tone === "active") {
-				lines[y] = light ? fgRgb(37, 99, 235, padded) : fgRgb(97, 175, 239, padded);
+			if (tone === "primary") {
+				lines[y] = th.fg("text", padded);
 			} else if (tone === "muted") {
 				lines[y] = th.fg("muted", padded);
 			} else {
@@ -352,8 +379,8 @@ export class OutlineRailComponent implements Component {
 
 		const upOn = geo.upTarget !== undefined;
 		const downOn = geo.downTarget !== undefined;
-		paint(geo.upY, "▲", this.hovered?.kind === "up" && upOn ? "hover" : upOn ? "muted" : "dim");
-		paint(geo.downY, "▼", this.hovered?.kind === "down" && downOn ? "hover" : downOn ? "muted" : "dim");
+		paint(geo.upY, "▲", this.hovered?.kind === "up" && upOn ? "primary" : upOn ? "muted" : "dim");
+		paint(geo.downY, "▼", this.hovered?.kind === "down" && downOn ? "primary" : downOn ? "muted" : "dim");
 
 		for (let i = 0; i < geo.windowEnd - geo.windowStart; i++) {
 			const turn = geo.windowStart + i;
@@ -362,8 +389,8 @@ export class OutlineRailComponent implements Component {
 			const isHovered = this.hovered?.kind === "tick" && this.hovered.turn === turn;
 			paint(
 				geo.ticksY + i,
-				isActive || isHovered ? "━━" : "─",
-				isHovered ? "hover" : isActive ? "active" : "dim",
+				isHovered ? "━━" : isActive ? "──" : "─",
+				isHovered || isActive ? "primary" : "dim",
 			);
 		}
 
