@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install host Pi runtime outside project node_modules
+        run: npm install -g @earendil-works/pi-coding-agent
+      - name: Install dev dependencies with peer isolation
+        run: npm ci --legacy-peer-deps
+      - name: Run standards lint, typecheck, and test suite
+        run: npm run check

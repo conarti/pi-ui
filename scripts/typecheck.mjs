@@ -1,5 +1,7 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveHostPiPeers } from "./resolve-host-pi.mjs";
@@ -7,7 +9,9 @@ import { resolveHostPiPeers } from "./resolve-host-pi.mjs";
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const { packages } = resolveHostPiPeers();
 
-const cacheDir = join(rootDir, "node_modules", ".cache", "conarti-pi-ui");
+/* Изолируем конфиг по хэшу rootDir в tmpdir, чтобы параллельные git worktree не затирали друг друга */
+const rootHash = createHash("sha256").update(rootDir).digest("hex").slice(0, 12);
+const cacheDir = join(tmpdir(), "conarti-pi-ui-typecheck", rootHash);
 mkdirSync(cacheDir, { recursive: true });
 
 const generatedConfigPath = join(cacheDir, "tsconfig.host.json");
@@ -15,6 +19,7 @@ const generatedConfigPath = join(cacheDir, "tsconfig.host.json");
 const hostConfig = {
 	extends: join(rootDir, "tsconfig.json"),
 	compilerOptions: {
+		typeRoots: [join(rootDir, "node_modules", "@types")],
 		paths: {
 			"@earendil-works/pi-coding-agent": [
 				join(packages["@earendil-works/pi-coding-agent"], "dist/index.d.ts"),

@@ -9,3 +9,11 @@ export {
 	type RegisteredFlag,
 	type RegisteredShortcut,
 } from "./extension-harness.ts";
+export {
+	captureTerminalScreen,
+	parseTerminalFrame,
+	type InlineImagePlacement,
+	type TerminalCell,
+	type TerminalColor,
+	type TerminalScreenSnapshot,
+} from "./terminal-screen.ts";

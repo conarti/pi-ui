@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+set -eu
+
+node scripts/check-standards.mjs --commit-msg "$1"

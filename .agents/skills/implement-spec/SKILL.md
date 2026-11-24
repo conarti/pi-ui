@@ -14,7 +14,7 @@ The tickets are not a list of steps. They are a **task graph** with blocking rel
 
 Start every subagent with a fresh context window.
 
-Communication to and from subagents should be sparse. Communicate primarily through **context pointers**: to the spec, tickets, research notes, and previous commits. Don't duplicate information already available via pointers.
+Communication to and from subagents should be sparse. Communicate primarily through **context pointers**: to the spec, tickets, research notes, and previous commits. Write exploration notes and review reports to files on disk and keep subagent completion messages under 250 words (commit SHA, changed files, check summary) so transport limits never truncate handoffs. Don't duplicate information already available via pointers.
 
 **Implementer subagents** should be run in the background where possible for maximum concurrency.
 
