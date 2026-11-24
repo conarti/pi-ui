@@ -8,7 +8,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { fgRgb, getActiveGlobalTheme, isLightTheme, paintSurfaceRow } from "../../shared/ansi.ts";
 import { claimHover, copyToClipboard, hookMethod } from "../../shared/runtime-hooks.ts";
-import { getStore } from "../../shared/session-store.ts";
+import { requestRender } from "../../shared/ui-action-bridge.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -115,7 +115,6 @@ export function installUserPromptCards(): void {
 		"transcript.userPromptMouse",
 		(self, args) => {
 			const event = args[0] as TuiMouseEvent;
-			const requestRender = () => getStore().requestRender?.();
 
 			if (event.type === "move") {
 				claimHover(self, () => {

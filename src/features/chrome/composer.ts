@@ -13,7 +13,8 @@ import {
 } from "@earendil-works/pi-tui";
 import { fgRgb, isLightTheme, renderPill, type HitBox } from "../../shared/ansi.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
-import { getStore, MODE_META } from "../../shared/session-store.ts";
+import { getSessionWorkflow, MODE_META } from "../../shared/session-workflow.ts";
+import { setAppActionRunner, setRequestRender } from "../../shared/ui-action-bridge.ts";
 import { setSessionMode } from "../plan-studio/index.ts";
 import { showPlanStudio } from "../plan-studio/studio-overlay.ts";
 
@@ -61,22 +62,16 @@ export function mountComposer(pi: ExtensionAPI, ctx: ExtensionContext): void {
 			baseEditor.setAutocompleteMaxVisible(10);
 		}
 
-		const st = getStore();
-		st.requestRender = () => tui.requestRender();
-		st.runAppAction = (actionId: string): boolean => {
+		const st = getSessionWorkflow();
+		setRequestRender(() => tui.requestRender());
+		setAppActionRunner((actionId: string): boolean => {
 			const handler = anyEditor.actionHandlers?.get?.(actionId);
 			if (typeof handler === "function") {
 				handler();
 				return true;
 			}
 			return false;
-		};
-		st.jumpPrompt = (delta: -1 | 1) => {
-			if (typeof (tui as any).scrollToPrompt === "function") {
-				(tui as any).scrollToPrompt(delta);
-				tui.requestRender();
-			}
-		};
+		});
 
 		let editorHovered = false;
 		let hoveredBadge: string | null = null;
@@ -98,12 +93,6 @@ export function mountComposer(pi: ExtensionAPI, ctx: ExtensionContext): void {
 				return;
 			}
 			origHandleInput(data);
-		};
-
-		st.submitPrompt = () => {
-			if (baseEditor.getText().trim().length > 0) {
-				origHandleInput("\r");
-			}
 		};
 
 		const origRender = baseEditor.render.bind(baseEditor);

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { CURSOR_MARKER, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import conartiPiUi from "../src/index.ts";
-import { getStore } from "../src/shared/session-store.ts";
+import { getSessionWorkflow } from "../src/shared/session-workflow.ts";
 import { createExtensionHarness, type ExtensionHarness } from "./harness/index.ts";
 
 const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b_[^\x07\x1b]*(?:\x07|\x1b\\)/g;
@@ -193,7 +193,7 @@ describe("Modal Card dialogs and adaptive theme surfaces", () => {
 		harness.mount(conartiPiUi);
 		await harness.startSession();
 
-		const st = getStore();
+		const st = getSessionWorkflow();
 		st.planLines = ["# Plan", "1. Refactor modal card", "2. Add tests"];
 		st.planComments = { 1: "Existing note" };
 
@@ -270,7 +270,7 @@ describe("Modal Card dialogs and adaptive theme surfaces", () => {
 		expect(harness.tui.overlayStack.filter((e) => !e.options?.nonCapturing)).toHaveLength(1);
 
 		// Triggering Context Inspector or Plan Studio while Command Palette is visible is a quiet no-op
-		const st = getStore();
+		const st = getSessionWorkflow();
 		st.planLines = ["1. Step one"];
 		const notifBefore = harness.notifications.length;
 

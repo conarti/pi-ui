@@ -23,7 +23,8 @@ import {
 import { registerToolCallsFeature } from "./features/tool-calls/index.ts";
 import { registerTranscriptFeature } from "./features/transcript/index.ts";
 import { acquireHostRuntime, disposeActiveHostRuntime } from "./shared/host-runtime.ts";
-import { getStore, restoreSessionStore } from "./shared/session-store.ts";
+import { getSessionWorkflow } from "./shared/session-workflow.ts";
+import { requestRender, resetUiActionBridge } from "./shared/ui-action-bridge.ts";
 import { TranscriptTurnIndex } from "./shared/turn-index.ts";
 
 export default function conartiPiUi(pi: ExtensionAPI): void {
@@ -61,9 +62,9 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 	pi.registerShortcut("ctrl+alt+p", {
 		description: "Plan Mode / открыть Plan Studio",
 		handler: async (ctx) => {
-			const st = getStore();
-			if (st.planLines.length > 0) await showPlanStudio(pi, ctx);
-			else setSessionMode(pi, ctx, st.mode === "plan" ? "code" : "plan");
+			const wf = getSessionWorkflow();
+			if (wf.hasPlan()) await showPlanStudio(pi, ctx);
+			else setSessionMode(pi, ctx, wf.mode === "plan" ? "code" : "plan");
 		},
 	});
 
@@ -80,9 +81,9 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 	let unsubscribeStickyKey: (() => void) | undefined;
 
 	registerStickyPromptCommands(pi, () => activeStickyBar);
-	registerOutlineCommands(pi, () => getStore().requestRender?.());
+	registerOutlineCommands(pi, () => requestRender());
 
-	const refreshViewport = () => getStore().requestRender?.();
+	const refreshViewport = () => requestRender();
 	const resetViewport = () => {
 		activeStickyBar?.reset();
 		refreshViewport();
@@ -102,14 +103,11 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 		disposeShell = undefined;
 		activeStickyBar = undefined;
 
-		const st = getStore();
-		st.isStreaming = false;
-		st.safeAllowTurn = false;
-
+		const wf = getSessionWorkflow();
 		const entries = ctx.sessionManager.getEntries?.() ?? [];
-		restoreSessionStore(entries, pi.getFlag("plan") === true);
+		const { restored } = wf.restore(entries, pi.getFlag("plan") === true);
 
-		applyModeTools(pi, st.mode);
+		applyModeTools(pi, wf.mode, { inferMissingOnPlanRestore: restored });
 		mountSessionHeader(pi, ctx);
 		mountComposer(pi, ctx);
 		updatePlanWidget(pi, ctx);
@@ -154,5 +152,6 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 		disposeShell = undefined;
 		activeStickyBar = undefined;
 		disposeActiveHostRuntime();
+		resetUiActionBridge();
 	});
 }

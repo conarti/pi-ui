@@ -16,7 +16,7 @@ import {
 	openModalCard,
 	type ModalActionPill,
 } from "../../shared/modal-card.ts";
-import { getStore, persistSessionStore } from "../../shared/session-store.ts";
+import { getSessionWorkflow } from "../../shared/session-workflow.ts";
 import { approveAndExecutePlan, revisePlanWithComments, setSessionMode, updatePlanWidget } from "./index.ts";
 
 function stylePlanLine(raw: string, theme: Theme): string {
@@ -40,7 +40,7 @@ function stylePlanLine(raw: string, theme: Theme): string {
 
 export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
 	if (ctx.mode !== "tui") return;
-	const st = getStore();
+	const st = getSessionWorkflow();
 
 	if (st.planLines.length === 0) {
 		if (st.mode !== "plan") {
@@ -70,12 +70,10 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 
 			const saveCommentEdit = () => {
 				if (editingLine === null) return;
-				const trimmed = commentInput.getValue().trim();
-				if (trimmed) st.planComments[editingLine] = trimmed;
-				else delete st.planComments[editingLine];
+				st.setPlanComment(editingLine, commentInput.getValue());
 				editingLine = null;
 				commentInput.clear();
-				persistSessionStore(pi);
+				st.persist(pi);
 			};
 
 			const comp: Component & Focusable = {
@@ -200,8 +198,8 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 							label: "🗑 Сбросить комменты",
 							variant: "neutral",
 							onClick: () => {
-								st.planComments = {};
-								persistSessionStore(pi);
+								st.clearPlanComments();
+								st.persist(pi);
 							},
 						});
 					}
@@ -271,9 +269,8 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 						return;
 					}
 					if (matchesKey(data, "backspace") || matchesKey(data, "delete") || data === "d") {
-						if (st.planComments[cursorIdx]) {
-							delete st.planComments[cursorIdx];
-							persistSessionStore(pi);
+						if (st.deletePlanComment(cursorIdx)) {
+							st.persist(pi);
 						}
 						return;
 					}
