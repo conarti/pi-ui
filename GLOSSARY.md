@@ -7,16 +7,20 @@ Interactive terminal UI package for Pi: structured transcript cards, turn naviga
 ### Modes & Planning
 
 **Session Mode**:
-The active execution posture of a session: `Code` (unrestricted tool access), `Plan` (read-only exploration that produces a `Plan`), or `Auto-Safe` (read-only calls run immediately while mutating calls require confirmation).
-_Avoid_: Permission level, agent profile, sandbox state
+The active tool-governance posture of a session: `Always-approve` (default, runs tool calls without interactive prompts unless blocked by a deny rule), `Plan` (allows writing only the session `Plan` file while blocking other file edits until `Plan Approval`), or `Auto` (automatically runs safe local edits and reviewed commands while surfacing risky or protected calls in a `Permission Prompt`).
+_Avoid_: Code mode, Auto-Safe, Ask mode, sandbox state
+
+**Permission Prompt**:
+The interactive approval surface raised when `Auto` mode or a permission rule holds a tool call, offering one-off approval, scoped per-project `Always allow` / `Never allow` grants, inline rejection notes back to the model, or switching to `Always-approve`.
+_Avoid_: Auto-Safe confirmation, alert dialog
 
 **Plan**:
-The structured, numbered engineering proposal captured in `Plan` mode, holding optional line-pinned review comments before approval and per-step completion state during execution.
-_Avoid_: Draft, todo list, checklist
+The session-scoped Markdown proposal authored during `Plan` mode before implementation begins, capturing context, recommended approach, critical files, reusable utilities, and verification steps.
+_Avoid_: Chat checklist, todo list, step widget
 
-**Plan Studio**:
-The interactive `Modal Card` where the user inspects a `Plan` line by line, attaches inline comments, requests a revision, or approves execution.
-_Avoid_: Plan editor, comment popup, plan widget
+**Plan Approval**:
+The interactive review view opened when the agent proposes exiting `Plan` mode, where the user reads the `Plan`, attaches line or range comments, writes revision notes, approves implementation, or abandons planning.
+_Avoid_: Plan Studio, plan editor, comment popup
 
 **Shell Effect**:
 The classification of a shell command as strictly read-only versus potentially mutating (accounting for redirections, opaque subshells, mutating flags, package scripts, and code interpreters), shared between execution guards and tool-call summaries.
@@ -47,9 +51,23 @@ _Avoid_: Tool theme, compact mode, vendor style
 ### Overlays
 
 **Modal Card**:
-A framed, focus-capturing dialog centered over the viewport (Command Palette, `Plan Studio`, Context Inspector, `Auto-Safe` confirmation) that blocks other modal dialogs until closed.
+A framed, focus-capturing dialog centered over the viewport (Command Palette, `Settings Modal`, Context Inspector, permission prompt) that blocks other modal dialogs until closed.
 _Avoid_: Popup, toast, inline widget
+
+**Settings Modal**:
+The categorized, type-to-filter `Modal Card` for inspecting, live-previewing, toggling, and resetting host and interface preferences in one place.
+_Avoid_: Config file editor, raw selector
 
 **Hover Popup**:
 A transient, non-capturing overlay anchored near a hovered element or text selection (such as the `Outline Rail` preview, `Prompt Chip` preview, or selection quote action) that never steals input focus or blocks a `Modal Card`.
 _Avoid_: Modal, dialog
+
+### Chrome & Appearance
+
+**Status Bar**:
+The bottom session strip showing workspace path, git branch, active turn timer, context window usage, model, thinking level, and filtered extension badges.
+_Avoid_: Powerline widget, statusline plugin
+
+**Appearance Mode**:
+Whether the interface follows the operating system's light and dark appearance automatically using a configured theme pair (`Auto`) or stays pinned to a single theme.
+_Avoid_: Terminal palette sync, dark-mode hack

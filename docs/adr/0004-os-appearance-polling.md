@@ -1,0 +1,3 @@
+# OS-level appearance polling alongside host theme pairs
+
+Pi's built-in `<light>/<dark>` theme setting relies on terminal `OSC 11` background color queries and `DEC 2031` notifications, which never fire in terminal emulators (such as `herdr`) whose terminal profile canvas stays static when the operating system switches between Light and Dark mode. In `Auto` `Appearance Mode`, `@conarti/pi-ui` polls the OS desktop preference directly every 5 seconds (`AppleInterfaceStyle` on macOS, XDG Desktop Portal on Linux, Registry on Windows, falling back to `COLORFGBG` and terminal queries over headless/SSH) to hot-switch between the configured light and dark themes, while also syncing Pi's `<light>/<dark>` setting so startup renders without an initial theme flash.
