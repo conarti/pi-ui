@@ -1,11 +1,11 @@
 import { UserMessageComponent, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
-import type { TUI } from "@earendil-works/pi-tui";
+import type { ScrollView, TUI } from "@earendil-works/pi-tui";
+import { getActiveHostRuntime, type HostRuntimeHandle } from "../../shared/host-runtime.ts";
+import { hookMethod } from "../../shared/runtime-hooks.ts";
 import { onTick } from "./clock.ts";
 import { colorizeRgb, interpolateRgb } from "./color.ts";
-import { hookMethod } from "./hook.ts";
 import { activityGlow, perPalette, type ThinkingLevel } from "./palette.ts";
 
-const WIDGET_KEY = "compact-tools-silent-activity-render";
 const ACTIVITY_STATE = Symbol.for("pi-compact-tools.silent.activity.state");
 // Markers under which earlier versions kept the unwrapped methods; hookMethod
 // replaces those wrappers so a /reload never leaves the old drawing in place.
@@ -172,9 +172,9 @@ export function bottomAlignTranscript(lines: string[], viewportHeight: number): 
 	return gap > 0 ? [...Array<string>(gap).fill(""), ...lines] : lines;
 }
 
-function patchTranscriptAlignment(tui: TUI): void {
+function patchTranscriptAlignment(tui: TUI, hostScroll?: ScrollView): void {
 	const getPrimaryScrollView = (tui as TUI & { getPrimaryScrollView?: () => unknown }).getPrimaryScrollView;
-	const scroll = getPrimaryScrollView?.call(tui) as { child?: { render(width: number): string[] }; viewportHeight?: number } | undefined;
+	const scroll = (hostScroll ?? getPrimaryScrollView?.call(tui)) as { child?: { render(width: number): string[] }; viewportHeight?: number } | undefined;
 	const document = scroll?.child;
 	if (!document) return;
 	hookMethod(document, "render", "activity.transcriptRender", (self, args, original) => {
@@ -240,6 +240,7 @@ function patchUserMessage(): boolean {
 /** Animates beneath the latest submitted prompt during a silent turn. */
 export class SilentActivityAnimator {
 	private context: ExtensionContext | undefined;
+	private host: HostRuntimeHandle | undefined;
 	private running = false;
 	/** The final answer is streaming; the dots step aside rather than sit under it. */
 	private answering = false;
@@ -277,9 +278,10 @@ export class SilentActivityAnimator {
 		});
 	}
 
-	bind(ctx: ExtensionContext, resume = false): void {
+	bind(ctx: ExtensionContext, resume = false, host?: HostRuntimeHandle): void {
 		this.hide();
 		this.context = ctx;
+		this.host = host ?? getActiveHostRuntime();
 		this.running = ctx.isIdle?.() === false;
 		if (!resume) this.answering = false;
 	}
@@ -293,6 +295,7 @@ export class SilentActivityAnimator {
 		try { this.hide(); }
 		finally {
 			this.context = undefined;
+			this.host = undefined;
 			this.running = false;
 			this.enabled = false;
 		}
@@ -318,17 +321,16 @@ export class SilentActivityAnimator {
 		if (!this.context || this.mounted || !patchUserMessage()) return;
 		this.frame = 0;
 		this.mounted = true;
+		const resolvedHost = this.host ?? getActiveHostRuntime();
 		Object.assign(sharedActivityState(), {
 			active: true, frame: 0, level: this.readLevel(), theme: this.context.ui.theme,
+			tui: resolvedHost?.tui,
 			target: undefined, candidate: undefined,
 		});
-		// This invisible widget provides Pi's TUI for animation repaints.
-		this.context.ui.setWidget(WIDGET_KEY, (tui) => {
-			sharedActivityState().tui = tui;
-			patchTranscriptAlignment(tui);
-			patchEditorGap(tui);
-			return { render: () => [], invalidate() {} };
-		}, { placement: "belowEditor" });
+		if (resolvedHost) {
+			patchTranscriptAlignment(resolvedHost.tui, resolvedHost.scroll);
+			patchEditorGap(resolvedHost.tui);
+		}
 		// Ticks with the working label, so the two share one repaint per frame, and
 		// frames that look the same as the last one ask for no repaint at all.
 		this.stopTicking = onTick(() => {
@@ -350,8 +352,6 @@ export class SilentActivityAnimator {
 		state.candidate = undefined;
 		this.stopTicking?.();
 		this.stopTicking = undefined;
-		if (!this.mounted) return;
 		this.mounted = false;
-		this.context?.ui.setWidget(WIDGET_KEY, undefined, { placement: "belowEditor" });
 	}
 }

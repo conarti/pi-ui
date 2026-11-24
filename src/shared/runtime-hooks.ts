@@ -1,55 +1,69 @@
 import { spawn } from "node:child_process";
 
 export type MethodBehavior = (self: any, args: any[], original: (...args: any[]) => any) => any;
+export type LegacyHookMarker = string | symbol;
 
 interface HookRecord {
 	behavior: MethodBehavior;
 }
 
+function isHookRecord(value: unknown): value is HookRecord {
+	return typeof value === "object" && value !== null && typeof (value as HookRecord).behavior === "function";
+}
+
 /**
  * Reload-safe prototype method hook: wraps `target[method]` once per process
  * and hot-swaps `behavior` across `/reload` calls without stacking wrappers.
- * Also migrates over earlier `pi.grok-ui.hook.*` keys if present in a live session.
+ * Migrates both legacy HookRecord slots (e.g. `pi.grok-ui.hook.*`, `pi-compact-tools.hook.*`)
+ * and legacy unwrapped-original function symbols when reloading inside a live Pi process.
  */
 export function hookMethod(
 	target: object,
 	method: string,
 	name: string,
 	behavior: MethodBehavior,
-	legacyNames: readonly string[] = [],
+	legacyMarkers: readonly LegacyHookMarker[] = [],
 ): boolean {
 	const holder = target as Record<PropertyKey, any>;
 	const key = Symbol.for(`conarti.pi-ui.hook.${name}`);
 
-	if (Object.hasOwn(holder, key)) {
-		(holder[key] as HookRecord).behavior = behavior;
+	if (Object.hasOwn(holder, key) && isHookRecord(holder[key])) {
+		holder[key].behavior = behavior;
 		return true;
 	}
 
-	// Reuse legacy grok-ui hook slot if reloading inside an already-running Pi process
-	for (const leg of legacyNames) {
-		const legKey = Symbol.for(leg);
-		if (Object.hasOwn(holder, legKey) && holder[legKey] && typeof holder[legKey] === "object") {
-			const record = holder[legKey] as HookRecord;
-			record.behavior = behavior;
-			Object.defineProperty(holder, key, { value: record });
+	let original: ((...args: any[]) => any) | undefined;
+	const markers: LegacyHookMarker[] = [Symbol.for(`pi-compact-tools.hook.${name}`), ...legacyMarkers];
+	for (const marker of markers) {
+		const markerKey = typeof marker === "symbol" ? marker : Symbol.for(marker);
+		if (!Object.hasOwn(holder, markerKey)) continue;
+		const existing = holder[markerKey];
+		if (isHookRecord(existing)) {
+			existing.behavior = behavior;
+			Object.defineProperty(holder, key, { value: existing });
 			return true;
+		}
+		if (typeof existing === "function" && !original) {
+			original = existing as (...args: any[]) => any;
 		}
 	}
 
-	if (typeof holder[method] !== "function") {
-		const record: HookRecord = { behavior };
-		holder[method] = function (this: unknown, ...args: any[]) {
-			return record.behavior(this, args, () => undefined);
-		};
-		Object.defineProperty(holder, key, { value: record });
-		return true;
+	if (!original) {
+		if (typeof holder[method] !== "function") {
+			const record: HookRecord = { behavior };
+			holder[method] = function (this: unknown, ...args: any[]) {
+				return record.behavior(this, args, () => undefined);
+			};
+			Object.defineProperty(holder, key, { value: record });
+			return true;
+		}
+		original = holder[method];
 	}
 
-	const original: (...args: any[]) => any = holder[method];
+	const unwrapped = original!;
 	const record: HookRecord = { behavior };
 	holder[method] = function (this: unknown, ...args: any[]) {
-		return record.behavior(this, args, original);
+		return record.behavior(this, args, unwrapped);
 	};
 	Object.defineProperty(holder, key, { value: record });
 	return true;

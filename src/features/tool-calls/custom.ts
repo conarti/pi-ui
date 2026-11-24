@@ -1,5 +1,5 @@
 import { ToolExecutionComponent, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { hookMethod } from "./hook.ts";
+import { hookMethod } from "../../shared/runtime-hooks.ts";
 import { refreshRowShell } from "./rendering.ts";
 
 // Symbol.for keys are shared by every evaluation of this module. The prototype is
@@ -7,7 +7,6 @@ import { refreshRowShell } from "./rendering.ts";
 // most recently loaded extension instance, through the shared slot, what to render.
 const RESOLVER_KEY = Symbol.for("pi-compact-tools.custom.resolver.v2");
 const LEGACY_RESOLVER_KEY = Symbol.for("pi-compact-tools.custom.resolver");
-const PATCHED_KEY = Symbol.for("pi-compact-tools.custom.patched.v2");
 const ROUTED_METHODS = ["getCallRenderer", "getResultRenderer", "getRenderShell", "hasRendererDefinition"] as const;
 
 type AnyToolDefinition = ToolDefinition<any, any, any>;
@@ -48,7 +47,6 @@ export function patchToolRows(prototype: object | undefined): boolean {
 	if (!prototype) return false;
 	const routed = prototype as RoutedPrototype;
 	if (!ROUTED_METHODS.every((method) => typeof routed[method] === "function")) return false;
-	if (Object.hasOwn(prototype, PATCHED_KEY)) return true;
 	hookMethod(prototype, "updateDisplay", "custom.refreshShell", (self, args, original) => {
 		refreshRowShell(self);
 		return original.apply(self, args);
@@ -78,20 +76,18 @@ export function patchToolRows(prototype: object | undefined): boolean {
 		}
 		return decision.renderers ?? undefined;
 	};
-	const original = Object.fromEntries(ROUTED_METHODS.map((method) => [method, routed[method]])) as RoutedPrototype;
-	routed.getCallRenderer = function (this: ToolRow, ...args) {
-		return changed(this, "call", resolve(this)?.renderCall ?? original.getCallRenderer.apply(this, args));
-	};
-	routed.getResultRenderer = function (this: ToolRow, ...args) {
-		return changed(this, "result", resolve(this)?.renderResult ?? original.getResultRenderer.apply(this, args));
-	};
-	routed.getRenderShell = function (this: ToolRow, ...args) {
-		return resolve(this) ? "self" : original.getRenderShell.apply(this, args);
-	};
-	routed.hasRendererDefinition = function (this: ToolRow, ...args) {
-		return resolve(this) ? true : original.hasRendererDefinition.apply(this, args);
-	};
-	Object.defineProperty(prototype, PATCHED_KEY, { value: true });
+	hookMethod(prototype, "getCallRenderer", "custom.getCallRenderer", (self: ToolRow, args, original) => {
+		return changed(self, "call", resolve(self)?.renderCall ?? original.apply(self, args));
+	});
+	hookMethod(prototype, "getResultRenderer", "custom.getResultRenderer", (self: ToolRow, args, original) => {
+		return changed(self, "result", resolve(self)?.renderResult ?? original.apply(self, args));
+	});
+	hookMethod(prototype, "getRenderShell", "custom.getRenderShell", (self: ToolRow, args, original) => {
+		return resolve(self) ? "self" : original.apply(self, args);
+	});
+	hookMethod(prototype, "hasRendererDefinition", "custom.hasRendererDefinition", (self: ToolRow, args, original) => {
+		return resolve(self) ? true : original.apply(self, args);
+	});
 	return true;
 }
 

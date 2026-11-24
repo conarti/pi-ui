@@ -21,10 +21,15 @@ import {
 } from "./features/sticky-prompt/index.ts";
 import { registerToolCallsFeature } from "./features/tool-calls/index.ts";
 import { registerTranscriptFeature } from "./features/transcript/index.ts";
-import { mountFullscreenShell } from "./shared/fullscreen-layout.ts";
+import { acquireHostRuntime, disposeActiveHostRuntime } from "./shared/host-runtime.ts";
 import { getStore, restoreSessionStore } from "./shared/session-store.ts";
 
 export default function conartiPiUi(pi: ExtensionAPI): void {
+	// 0. Acquire shared Host Runtime once at session_start before feature listeners bind
+	pi.on("session_start", async (_event, ctx) => {
+		await acquireHostRuntime(ctx);
+	});
+
 	// 1. Transcript cards: user prompts (`┃ ›`), two-tone code cards + Copy, wave Thinking, clean headings
 	registerTranscriptFeature(pi);
 
@@ -107,7 +112,8 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 		mountComposer(pi, ctx);
 		updatePlanWidget(pi, ctx);
 
-		disposeShell = await mountFullscreenShell(ctx, (shell) => {
+		const hostRuntime = await acquireHostRuntime(ctx);
+		disposeShell = hostRuntime?.mountViewportSlots((shell) => {
 			const stickyBar = new StickyPromptBar(
 				shell,
 				() => ctx.sessionManager.getBranch(),
@@ -135,5 +141,6 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 		disposeShell?.();
 		disposeShell = undefined;
 		activeStickyBar = undefined;
+		disposeActiveHostRuntime();
 	});
 }

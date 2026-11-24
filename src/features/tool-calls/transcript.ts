@@ -1,9 +1,9 @@
 import { ToolExecutionComponent, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { TUI } from "@earendil-works/pi-tui";
+import { findChatContainer, getActiveHostRuntime, type HostRuntimeHandle } from "../../shared/host-runtime.ts";
 import type { RowRenderers, ToolRow } from "./custom.ts";
 import { refreshRowShell, syncNativeToolTimer } from "./rendering.ts";
 import type { ToolRuntime } from "./runtime.ts";
-import { findChat, isKind } from "./silent.ts";
+import { isKind } from "./silent.ts";
 
 type Definition = ToolDefinition<any, any, any> | undefined;
 export interface UIFailure { operation: string; error: unknown }
@@ -21,15 +21,11 @@ interface TranscriptOptions {
 	unwrap(definition: Definition): Definition;
 }
 
-const WIDGET_KEY = "compact-tools-render";
-const emptyWidget = () => ({ render: () => [], invalidate() {} });
-
-/** Own the TUI probe and the private host-row reconciliation boundary together. */
+/** Own the Host Runtime binding and the private host-row reconciliation boundary together. */
 export function createTranscriptRenderer(options: TranscriptOptions) {
-	let context: ExtensionContext | undefined;
 	let refresh: ((failures: UIFailure[]) => void) | undefined;
 
-	const reconcile = (tui: TUI, failures: UIFailure[]) => {
+	const reconcile = (host: HostRuntimeHandle, failures: UIFailure[]) => {
 		const visit = (parent: { children?: unknown[] }) => {
 			for (const child of parent.children ?? []) {
 				if (!child || typeof child !== "object") continue;
@@ -51,43 +47,36 @@ export function createTranscriptRenderer(options: TranscriptOptions) {
 			}
 		};
 		attemptUI(failures, "transcript", () => {
-			const chat = findChat(tui);
+			const chat = host.chatContainer ?? findChatContainer(host.tui, host.scroll);
 			if (chat && chat.children.length > 0) {
 				visit(chat);
-				attemptUI(failures, "repaint", () => tui.requestRender());
+				attemptUI(failures, "repaint", () => host.requestRender());
 			}
 		});
 	};
 
 	return {
-		bind(ctx: ExtensionContext, failures: UIFailure[]): void {
-			context = ctx;
-			attemptUI(failures, "renderer probe", () => ctx.ui.setWidget(WIDGET_KEY, (tui) => {
-				options.runtime.bindRenderer(() => tui.requestRender());
-				refresh = (errors) => reconcile(tui, errors);
-				return emptyWidget();
-			}, { placement: "belowEditor" }));
-			refresh?.(failures);
+		bind(_ctx: ExtensionContext, failures: UIFailure[], host?: HostRuntimeHandle): void {
+			const resolved = host ?? getActiveHostRuntime();
+			if (!resolved) {
+				options.runtime.bindRenderer(undefined);
+				refresh = undefined;
+				return;
+			}
+			options.runtime.bindRenderer(() => resolved.requestRender());
+			refresh = (errors) => reconcile(resolved, errors);
+			refresh(failures);
 		},
 		refresh(failures: UIFailure[]): void { refresh?.(failures); },
 		detach(): void {
-			const previous = context;
-			context = undefined;
 			refresh = undefined;
 			options.runtime.bindRenderer(undefined);
-			previous?.ui.setWidget(WIDGET_KEY, undefined, { placement: "belowEditor" });
 		},
 		/** Reconcile provisional startup rows without binding runtime animation. */
-		reconcileOnce(ctx: ExtensionContext, failures: UIFailure[]): void {
+		reconcileOnce(_ctx: ExtensionContext, failures: UIFailure[], host?: HostRuntimeHandle): void {
 			if (refresh) { refresh(failures); return; }
-			try {
-				attemptUI(failures, "startup renderer probe", () => ctx.ui.setWidget(WIDGET_KEY, (tui) => {
-					reconcile(tui, failures);
-					return emptyWidget();
-				}, { placement: "belowEditor" }));
-			} finally {
-				attemptUI(failures, "startup renderer cleanup", () => ctx.ui.setWidget(WIDGET_KEY, undefined, { placement: "belowEditor" }));
-			}
+			const resolved = host ?? getActiveHostRuntime();
+			if (resolved) reconcile(resolved, failures);
 		},
 	};
 }

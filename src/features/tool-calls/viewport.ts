@@ -1,8 +1,8 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getKeybindings, isKeyRelease, isKeyRepeat, matchesKey, stripTerminalSequences, TuiAltScreen, type TUI } from "@earendil-works/pi-tui";
-import { hookMethod } from "./hook.ts";
+import { getKeybindings, isKeyRelease, isKeyRepeat, matchesKey, stripTerminalSequences, TuiAltScreen } from "@earendil-works/pi-tui";
+import { getActiveHostRuntime, type HostRuntimeHandle } from "../../shared/host-runtime.ts";
+import { hookMethod } from "../../shared/runtime-hooks.ts";
 
-const WIDGET_KEY = "compact-tools-viewport";
 // Shared through globalThis: the TUI outlives a /reload of this module, so the
 // render wrapper installed on it must reach whichever instance is loaded now.
 const STATE_KEY = Symbol.for("pi-compact-tools.viewport.state");
@@ -198,21 +198,16 @@ function isRelayoutKey(data: string): boolean {
 
 /** Keeps the reader's place when expand, collapse, thinking, or silent mode resize the transcript. */
 export class ViewportKeeper {
-	private context: ExtensionContext | undefined;
 	private unsubscribe: (() => void) | undefined;
 
-	bind(ctx: ExtensionContext): void {
+	bind(ctx: ExtensionContext, host?: HostRuntimeHandle): void {
 		this.dispose();
-		this.context = ctx;
 		hookFullscreenRender();
 		// Earlier versions wrapped a renderer instance directly and call this slot;
 		// pointing it at the current restore keeps those in step until Pi restarts.
 		sharedState().restore = restoreViewport;
-		// An invisible widget is the extension API's way to reach Pi's TUI.
-		ctx.ui.setWidget(WIDGET_KEY, (tui: TUI) => {
-			sharedState().tui = tui as unknown as TuiLike;
-			return { render: () => [], invalidate() {} };
-		}, { placement: "belowEditor" });
+		const resolvedHost = host ?? getActiveHostRuntime();
+		sharedState().tui = resolvedHost?.tui as unknown as TuiLike | undefined;
 		this.unsubscribe = ctx.ui.onTerminalInput((data) => {
 			if (isRelayoutKey(data)) captureViewport();
 			// Observe only: Pi and the thinking controller still handle the key.
@@ -221,14 +216,11 @@ export class ViewportKeeper {
 	}
 
 	dispose(): void {
-		const context = this.context;
 		const unsubscribe = this.unsubscribe;
-		this.context = undefined;
 		this.unsubscribe = undefined;
 		const state = sharedState();
 		state.pending = undefined;
 		state.tui = undefined;
-		try { unsubscribe?.(); }
-		finally { context?.ui.setWidget(WIDGET_KEY, undefined, { placement: "belowEditor" }); }
+		unsubscribe?.();
 	}
 }
