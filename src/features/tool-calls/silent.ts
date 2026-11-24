@@ -9,13 +9,14 @@ import {
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Markdown, MouseRegion, Spacer, Text } from "@earendil-works/pi-tui";
-import { hookMethod } from "./hook.ts";
+import { findChatContainer, getActiveHostRuntime, type HostRuntimeHandle } from "../../shared/host-runtime.ts";
+import { hookMethod } from "../../shared/runtime-hooks.ts";
+import { isThinkingBlock } from "../transcript/thinking-block.ts";
 import type { DisplayMode } from "./types.ts";
 import { captureViewport } from "./viewport.ts";
 import { SilentActivityAnimator } from "./activity.ts";
 
 const STATUS_KEY = "compact-tools";
-const WIDGET_KEY = "compact-tools-silent";
 const COMMAND_ARGUMENTS = ["on", "off"] as const;
 export const SILENT_SHORTCUT = "ctrl+'";
 // Symbol.for keys resolve to the same symbol in every evaluation of this module.
@@ -77,24 +78,27 @@ export function isIntermediateAssistant(component: AssistantLike): boolean {
 	return component.hasToolCalls === true;
 }
 
+function isThinkingNode(child: unknown): boolean {
+	return isKind(child, MouseRegion) || isThinkingBlock(child);
+}
+
 /**
  * Render only an assistant turn's answer text. Pi builds a turn from three kinds
- * of children: each thinking run, shown or collapsed to its label, is a
- * MouseRegion followed by a spacer; the answer is Markdown; and an error, abort,
- * or truncation notice is a spacer followed by a plain Text. The children are
- * swapped only for this one render, so the component and its message stay
- * untouched and reappear in full once silent mode is off.
+ * of children: each thinking run (either native MouseRegion or custom ThinkingBlock),
+ * the answer Markdown, and any error, abort, or truncation notice (Spacer + Text).
+ * The children are swapped only for this one render, so the component and its
+ * message stay untouched and reappear in full once silent mode is off.
  */
 export function renderAnswerOnly(component: AssistantLike, width: number, render: Render): readonly string[] {
 	const container = component.contentContainer;
 	const children = container?.children;
 	if (!container || !Array.isArray(children)) return render(width);
 	// Most renders have nothing to drop; skip building a filtered copy for them.
-	if (!children.some((child) => isKind(child, MouseRegion) || isKind(child, Text))) return render(width);
+	if (!children.some((child) => isThinkingNode(child) || isKind(child, Text))) return render(width);
 	const kept: unknown[] = [];
 	let afterThinking = false;
 	for (const child of children) {
-		if (isKind(child, MouseRegion)) {
+		if (isThinkingNode(child)) {
 			afterThinking = true;
 			continue;
 		}
@@ -109,9 +113,10 @@ export function renderAnswerOnly(component: AssistantLike, width: number, render
 		}
 		kept.push(child);
 	}
+	while (isKind(kept.at(-1), Spacer)) kept.pop();
 	if (kept.length === children.length) return render(width);
 	// A turn that was only thinking would otherwise leave its leading blank line.
-	if (kept.every((child) => isKind(child, Spacer))) return [];
+	if (kept.length === 0 || kept.every((child) => isKind(child, Spacer))) return [];
 	container.children = kept;
 	try {
 		return render(width);
@@ -168,21 +173,16 @@ export function renderWithoutNotices(container: { children?: unknown[] }, width:
 	}
 }
 
-type TuiLike = { children?: Array<{ children?: unknown[] }> };
-
 /**
  * Pi mounts the transcript document first in both regular and fullscreen mode, and
  * its chat is the document's last child, after the header and resource list.
  */
 export function findChat(tui: unknown): { children: unknown[] } | undefined {
-	const documentChildren = (tui as TuiLike).children?.[0]?.children;
-	const chat = Array.isArray(documentChildren) ? documentChildren.at(-1) : undefined;
-	if (typeof chat !== "object" || chat === null || !Array.isArray((chat as { children?: unknown }).children)) return undefined;
-	return chat as { children: unknown[] };
+	return findChatContainer(tui) as { children: unknown[] } | undefined;
 }
 
-function hookChatNotices(tui: unknown): void {
-	const chat = findChat(tui);
+function hookChatNotices(host: HostRuntimeHandle | undefined): void {
+	const chat = host?.chatContainer ?? (host ? findChatContainer(host.tui, host.scroll) : undefined);
 	if (!chat) return;
 	hookMethod(chat, "render", "silent.chatNotices", (self, args, original) => {
 		const state = sharedState();
@@ -193,26 +193,30 @@ function hookChatNotices(tui: unknown): void {
 
 /**
  * Pi exposes no API to hide another extension's tool rows, so silent mode wraps
- * the shared component prototypes. Returns false when the host no longer has the
- * expected shape, which leaves the transcript untouched.
+ * the shared component prototypes via the unified reload-safe hook registry.
+ * Returns false when the host no longer has the expected shape, which leaves
+ * the transcript untouched.
  */
 export function patchRender(
 	prototype: Renderable | undefined,
 	override: RenderOverride,
 	/** When this returns false the original render runs directly, with no override and no allocation. */
 	engaged: () => boolean = () => true,
+	hookName?: string,
 ): boolean {
 	if (!prototype || typeof prototype.render !== "function") return false;
-	// Checked as an own property: a component that inherits render() from a shared
-	// base (CustomMessageComponent uses Container's) must still get its own wrapper.
-	if (Object.hasOwn(prototype, ORIGINAL_RENDER)) return true;
-	const original = prototype.render;
-	prototype.render = function (this: unknown, width: number): readonly string[] {
-		if (!engaged()) return original.call(this, width);
-		return override(this, width, (nextWidth) => original.call(this, nextWidth));
-	};
-	Object.defineProperty(prototype, ORIGINAL_RENDER, { value: original });
-	return true;
+	const name = hookName ?? `silent.render.${prototype.constructor?.name || "component"}`;
+	return hookMethod(
+		prototype,
+		"render",
+		name,
+		(self, args, original) => {
+			const width = args[0] as number;
+			if (!engaged()) return original.call(self, width);
+			return override(self, width, (nextWidth) => original.call(self, nextWidth));
+		},
+		[ORIGINAL_RENDER],
+	);
 }
 
 function sharedOverrides(): RenderOverrides | undefined {
@@ -258,15 +262,16 @@ function installPatches(): boolean {
 	// Every patch is checked before any is relied on, so a partial host change
 	// cannot leave tool rows hidden while their surrounding turns remain visible.
 	// Normal mode pays one flag check per render and nothing else.
-	const tools = patchRender(ToolExecutionComponent?.prototype, delegate("tool"), isSilent);
-	const assistant = patchRender(AssistantMessageComponent?.prototype, delegate("assistant"), isSilent);
-	const notices = patchRender(CustomMessageComponent?.prototype, delegate("notice"), isSilent);
+	const tools = patchRender(ToolExecutionComponent?.prototype, delegate("tool"), isSilent, "silent.render.tool");
+	const assistant = patchRender(AssistantMessageComponent?.prototype, delegate("assistant"), isSilent, "silent.render.assistant");
+	const notices = patchRender(CustomMessageComponent?.prototype, delegate("notice"), isSilent, "silent.render.notice");
 	return tools && assistant && notices;
 }
 
 /** Hides tool rows, intermediate assistant turns, thinking, and extension notices; the working label carries progress instead. */
 export class SilentModeController {
 	private context: ExtensionContext | undefined;
+	private host: HostRuntimeHandle | undefined;
 	private readonly activity: SilentActivityAnimator;
 
 	constructor(pi: ExtensionAPI, private readonly onVisible?: (ctx: ExtensionContext) => void) {
@@ -311,15 +316,12 @@ export class SilentModeController {
 		return sharedState().enabled;
 	}
 
-	bind(ctx: ExtensionContext, mode: DisplayMode, reload: boolean, resume = false): void {
+	bind(ctx: ExtensionContext, mode: DisplayMode, reload: boolean, resume = false, host?: HostRuntimeHandle): void {
 		this.context = ctx;
-		this.activity.bind(ctx, resume);
-		// An invisible widget is the extension API's way to reach Pi's TUI, and
-		// through it the chat container whose notices silent mode hides.
-		ctx.ui.setWidget(WIDGET_KEY, (tui) => {
-			hookChatNotices(tui);
-			return { render: () => [], invalidate() {} };
-		}, { placement: "belowEditor" });
+		const resolvedHost = host ?? getActiveHostRuntime();
+		this.host = resolvedHost;
+		this.activity.bind(ctx, resume, resolvedHost);
+		hookChatNotices(resolvedHost);
 		const state = sharedState();
 		if (!reload) state.overridden = false;
 		this.apply(state.overridden ? state.enabled : mode === "silent");
@@ -328,14 +330,12 @@ export class SilentModeController {
 	dispose(): void {
 		const context = this.context;
 		this.context = undefined;
+		this.host = undefined;
 		// Detach state before calling host UI: an exception must not reactivate
 		// silent hiding or its animation while the extension is off.
 		sharedState().active = false;
 		try { this.activity.dispose(); }
-		finally {
-			try { context?.ui.setStatus(STATUS_KEY, undefined); }
-			finally { context?.ui.setWidget(WIDGET_KEY, undefined, { placement: "belowEditor" }); }
-		}
+		finally { context?.ui.setStatus(STATUS_KEY, undefined); }
 	}
 
 	private apply(enabled: boolean): boolean {
@@ -356,6 +356,7 @@ export class SilentModeController {
 		// Clearing the status still requests a render, which is what reveals or hides
 		// rows already in the transcript, and removes the label older versions left.
 		this.context?.ui.setStatus(STATUS_KEY, undefined);
+		this.host?.requestRender();
 		return true;
 	}
 }

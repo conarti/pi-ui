@@ -17,6 +17,16 @@ import { getStore } from "../../shared/session-store.ts";
 
 const MAX_THOUGHTS_WIDTH = 120;
 const STREAMING_THOUGHT_TAIL_LINES = 4;
+const THINKING_BLOCK_MARKER = Symbol.for("conarti.pi-ui.thinking-block");
+
+export function isThinkingBlock(value: unknown): boolean {
+	if (value instanceof ThinkingBlock) return true;
+	if (typeof value !== "object" || value === null) return false;
+	return (
+		(value as Record<PropertyKey, unknown>)[THINKING_BLOCK_MARKER] === true ||
+		value.constructor?.name === "ThinkingBlock"
+	);
+}
 
 interface WaveClock {
 	phase: number;
@@ -73,6 +83,7 @@ function waveAccentGlyph(row: number, glyph: string, lightMode: boolean): string
 }
 
 export class ThinkingBlock implements Component {
+	readonly [THINKING_BLOCK_MARKER] = true;
 	private hovered = false;
 
 	constructor(
