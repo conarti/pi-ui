@@ -42,16 +42,22 @@ function fitExactWidth(text: string, targetWidth: number): string {
 
 export const COMPOSER_PLACEHOLDER = "Спроси или опиши задачу…";
 
+export interface ComposerPointerInfo {
+	readonly hovered: boolean;
+	readonly mouseX?: number;
+	readonly mouseY?: number;
+	readonly screenX?: number;
+	readonly screenY?: number;
+	readonly width?: number;
+}
+
 export interface ComposerHooks {
 	interceptInput?(data: string, editor: PiUiComposerEditor): boolean;
 	transformPaste?(pastedText: string, editor: PiUiComposerEditor): string | undefined;
 	findAtomicTokenSpans?(text: string, editor: PiUiComposerEditor): ReadonlyArray<{ start: number; end: number }>;
 	decorateRenderedLine?(line: string, visualLineIndex: number, editor: PiUiComposerEditor): string;
 	onDraftChanged?(text: string, editor: PiUiComposerEditor): void;
-	onPointerOrCursorChange?(
-		info: { hovered: boolean; mouseX?: number; mouseY?: number },
-		editor: PiUiComposerEditor,
-	): void;
+	onPointerOrCursorChange?(info: ComposerPointerInfo, editor: PiUiComposerEditor): void;
 	captureUndoState?(editor: PiUiComposerEditor): unknown;
 	restoreUndoState?(snapshot: unknown, editor: PiUiComposerEditor): void;
 }
@@ -80,10 +86,12 @@ interface EditorInternals {
 	scrollOffset: number;
 	renderedVisibleLineCount: number;
 	isInPaste?: boolean;
+	pasteBuffer?: string;
 	undoStack?: { length: number; clear?: () => void };
 	setCursorCol(col: number): void;
 	isEditorEmpty(): boolean;
 	insertTextAtCursor(text: string): void;
+	buildVisualLineMap?(width: number): Array<{ logicalLine: number; startCol: number; length: number }>;
 }
 
 const baseEditorProto = Editor.prototype as unknown as {
@@ -102,6 +110,8 @@ export class PiUiComposerEditor extends CustomEditor {
 	private hoveredBadge: string | null = null;
 	private topHits: HitBox[] = [];
 	private undoSnapshots: unknown[] = [];
+	private pendingUndoCapture: { hasValue: boolean; value: unknown } | undefined;
+	private restoringUndo = false;
 
 	constructor(
 		tui: TUI,
@@ -126,6 +136,11 @@ export class PiUiComposerEditor extends CustomEditor {
 
 	updateDeps(deps: PiUiComposerDeps): void {
 		this.deps = deps;
+	}
+
+	matchesKeybinding(data: string, action: string): boolean {
+		const kb = (this as unknown as { keybindings?: KeybindingsManager }).keybindings;
+		return Boolean(kb?.matches(data, action as AppKeybinding));
 	}
 
 	/* InteractiveMode перезаписывает paddingX из настроек хоста сразу после фабрики */
@@ -250,9 +265,10 @@ export class PiUiComposerEditor extends CustomEditor {
 
 		self.handlePaste = (pastedText: string): void => {
 			const hooks = getComposerHooks();
+			const preCaptured = hooks?.captureUndoState ? hooks.captureUndoState(this) : undefined;
 			const transformed = hooks?.transformPaste?.(pastedText, this);
 			if (transformed !== undefined) {
-				this.internals().insertTextAtCursor(transformed);
+				this.insertTextWithUndoSnapshot(transformed, preCaptured);
 				return;
 			}
 			baseEditorProto.handlePaste.call(this, pastedText);
@@ -262,14 +278,25 @@ export class PiUiComposerEditor extends CustomEditor {
 			const stackDepth = this.internals().undoStack?.length ?? 0;
 			this.undoSnapshots.length = stackDepth;
 			const hooks = getComposerHooks();
-			this.undoSnapshots.push(hooks?.captureUndoState ? hooks.captureUndoState(this) : undefined);
+			const snap = this.pendingUndoCapture?.hasValue
+				? this.pendingUndoCapture.value
+				: hooks?.captureUndoState
+					? hooks.captureUndoState(this)
+					: undefined;
+			this.pendingUndoCapture = undefined;
+			this.undoSnapshots.push(snap);
 			baseEditorProto.pushUndoSnapshot.call(this);
 		};
 
 		self.undo = (): void => {
 			const internal = this.internals();
 			const beforeDepth = internal.undoStack?.length ?? 0;
-			baseEditorProto.undo.call(this);
+			this.restoringUndo = true;
+			try {
+				baseEditorProto.undo.call(this);
+			} finally {
+				this.restoringUndo = false;
+			}
 			const afterDepth = internal.undoStack?.length ?? 0;
 			if (afterDepth < beforeDepth) {
 				this.undoSnapshots.length = Math.min(this.undoSnapshots.length, beforeDepth);
@@ -278,6 +305,12 @@ export class PiUiComposerEditor extends CustomEditor {
 				const hooks = getComposerHooks();
 				if (hooks?.restoreUndoState && snap !== undefined) {
 					hooks.restoreUndoState(snap, this);
+				}
+				const beforeSyncText = this.getText();
+				hooks?.onDraftChanged?.(beforeSyncText, this);
+				const afterSyncText = this.getText();
+				if (afterSyncText !== beforeSyncText) {
+					hostOnChange?.(afterSyncText);
 				}
 			}
 		};
@@ -296,8 +329,10 @@ export class PiUiComposerEditor extends CustomEditor {
 			configurable: true,
 			enumerable: true,
 			get: () => (text: string) => {
-				getComposerHooks()?.onDraftChanged?.(text, this);
-				hostOnChange?.(text);
+				if (!this.restoringUndo) {
+					getComposerHooks()?.onDraftChanged?.(text, this);
+				}
+				hostOnChange?.(this.getText());
 			},
 			set: (fn: ((text: string) => void) | undefined) => {
 				hostOnChange = fn;
@@ -305,14 +340,35 @@ export class PiUiComposerEditor extends CustomEditor {
 		});
 	}
 
+	insertTextWithUndoSnapshot(text: string, preCapturedSnapshot?: unknown): void {
+		if (!text) return;
+		this.pendingUndoCapture = { hasValue: true, value: preCapturedSnapshot };
+		try {
+			this.internals().insertTextAtCursor(text);
+		} finally {
+			this.pendingUndoCapture = undefined;
+		}
+	}
+
 	override handleInput(data: string): void {
 		const internal = this.internals();
+		const hooks = getComposerHooks();
 		if (internal.isInPaste) {
+			if ((internal.pasteBuffer ?? "") === "" && data.startsWith("\x1b[201~")) {
+				internal.isInPaste = false;
+				internal.pasteBuffer = "";
+				hooks?.interceptInput?.("\x1b[200~\x1b[201~", this);
+				const remaining = data.slice(6);
+				if (remaining.length > 0) {
+					this.handleInput(remaining);
+				}
+				hooks?.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
+				return;
+			}
 			baseEditorProto.handleInput.call(this, data);
-			getComposerHooks()?.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
+			hooks?.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
 			return;
 		}
-		const hooks = getComposerHooks();
 		if (!data.startsWith("\x1b[200~") && this.onExtensionShortcut?.(data)) {
 			return;
 		}
@@ -552,7 +608,17 @@ export class PiUiComposerEditor extends CustomEditor {
 						this.tui.requestRender();
 					}
 				});
-				hooks?.onPointerOrCursorChange?.({ hovered: true, mouseX: event.x, mouseY: event.y }, this);
+				hooks?.onPointerOrCursorChange?.(
+					{
+						hovered: true,
+						mouseX: event.x,
+						mouseY: event.y,
+						screenX: event.screenX,
+						screenY: event.screenY,
+						width: totalWidth,
+					},
+					this,
+				);
 				const nextBadge =
 					event.y === 0 ? (this.topHits.find((h) => event.x >= h.xStart && event.x < h.xEnd)?.id ?? null) : null;
 				if (!this.editorHovered || nextBadge !== this.hoveredBadge) {
@@ -598,6 +664,19 @@ export class PiUiComposerEditor extends CustomEditor {
 			x: translatedX,
 			width: translatedWidth,
 		});
+		if (event.type === "click") {
+			hooks?.onPointerOrCursorChange?.(
+				{
+					hovered: this.editorHovered,
+					mouseX: event.x,
+					mouseY: event.y,
+					screenX: event.screenX,
+					screenY: event.screenY,
+					width: totalWidth,
+				},
+				this,
+			);
+		}
 		if (hoverStateChanged) {
 			return { ...(superResult ?? { handled: true }), handled: true, render: true };
 		}

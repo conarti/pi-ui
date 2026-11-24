@@ -21,6 +21,7 @@ import {
 	StickyPromptBar,
 } from "./features/sticky-prompt/index.ts";
 import { registerToolCallsFeature } from "./features/tool-calls/index.ts";
+import { registerPromptChipsFeature } from "./features/prompt-chips/index.ts";
 import { registerTranscriptFeature } from "./features/transcript/index.ts";
 import { acquireHostRuntime, disposeActiveHostRuntime } from "./shared/host-runtime.ts";
 import { installKeyboardLayoutSupport } from "./shared/keyboard-layout.ts";
@@ -39,6 +40,7 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 	// 1. Transcript cards: user prompts (`┃ ›`), two-tone code cards + Copy, wave Thinking, clean headings
 	registerTranscriptFeature(pi);
 	registerComposerWorkingAnimation(pi);
+	registerPromptChipsFeature(pi);
 
 	// 2. Compact / Claude / Codex tool call renderers, codemode summaries & silent mode
 	registerToolCallsFeature(pi);

@@ -1,6 +1,13 @@
-import type { ExtensionContext, KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
+import { execFile } from "node:child_process";
+import {
+	convertToPng,
+	type ExtensionContext,
+	type KeybindingsManager,
+	type Theme,
+} from "@earendil-works/pi-coding-agent";
 import {
 	Container,
+	getNativeClipboard,
 	ScrollView,
 	TuiAltScreen,
 	type Component,
@@ -16,10 +23,24 @@ import { setRequestRender } from "./ui-action-bridge.ts";
 
 export type { FullscreenShellContext, MountedViewportSlots };
 
+export interface ClipboardImagePayload {
+	readonly bytes: Uint8Array;
+	readonly mimeType: string;
+	readonly fileName?: string;
+	readonly filePath?: string;
+}
+
+export interface HostClipboardProvider {
+	readFilePaths?(): Promise<readonly string[] | null | undefined>;
+	readImage?(): Promise<ClipboardImagePayload | null | undefined>;
+	readText?(): Promise<string | null | undefined>;
+}
+
 export interface AcquiredHostTui {
 	tui: TUI;
 	keybindings?: KeybindingsManager;
 	theme?: () => Theme;
+	clipboard?: HostClipboardProvider;
 }
 
 export interface HostRuntimeAdapter {
@@ -30,6 +51,7 @@ export interface HostRuntimeHandle {
 	readonly ctx: ExtensionContext;
 	readonly tui: TUI;
 	readonly keybindings: KeybindingsManager | undefined;
+	readonly clipboard: HostClipboardProvider;
 	readonly isFullscreen: boolean;
 	readonly scroll: ScrollView | undefined;
 	readonly chatContainer: Container | undefined;
@@ -56,6 +78,7 @@ const COMPOSITOR_MAP_KEY = Symbol.for("conarti.pi-ui.viewport-compositors.v1");
 interface RuntimeSlot {
 	active?: HostRuntimeHandle;
 	adapter?: HostRuntimeAdapter;
+	clipboard?: HostClipboardProvider;
 }
 
 function getRuntimeSlot(): RuntimeSlot {
@@ -76,6 +99,14 @@ function getCompositorMap(): WeakMap<object, ViewportChromeCompositor> {
 
 export function setHostRuntimeAdapter(adapter: HostRuntimeAdapter | undefined): void {
 	getRuntimeSlot().adapter = adapter;
+}
+
+export function setHostClipboardProvider(clipboard: HostClipboardProvider | undefined): void {
+	getRuntimeSlot().clipboard = clipboard;
+}
+
+export function getHostClipboardProvider(): HostClipboardProvider | undefined {
+	return getRuntimeSlot().clipboard;
 }
 
 export function getActiveHostRuntime(): HostRuntimeHandle | undefined {
@@ -276,6 +307,194 @@ function enablePointerMotionTracking(tui: TUI): void {
 	}
 }
 
+const SUPPORTED_DIRECT_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+
+export function sniffSupportedImageMimeType(bytes: Uint8Array): string | null {
+	if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+		return bytes[3] === 0xf7 ? null : "image/jpeg";
+	}
+	if (
+		bytes.length >= 16 &&
+		bytes[0] === 0x89 &&
+		bytes[1] === 0x50 &&
+		bytes[2] === 0x4e &&
+		bytes[3] === 0x47 &&
+		bytes[4] === 0x0d &&
+		bytes[5] === 0x0a &&
+		bytes[6] === 0x1a &&
+		bytes[7] === 0x0a
+	) {
+		return "image/png";
+	}
+	if (
+		bytes.length >= 6 &&
+		bytes[0] === 0x47 &&
+		bytes[1] === 0x49 &&
+		bytes[2] === 0x46 &&
+		bytes[3] === 0x38 &&
+		(bytes[4] === 0x37 || bytes[4] === 0x39) &&
+		bytes[5] === 0x61
+	) {
+		return "image/gif";
+	}
+	if (
+		bytes.length >= 12 &&
+		bytes[0] === 0x52 &&
+		bytes[1] === 0x49 &&
+		bytes[2] === 0x46 &&
+		bytes[3] === 0x46 &&
+		bytes[8] === 0x57 &&
+		bytes[9] === 0x45 &&
+		bytes[10] === 0x42 &&
+		bytes[11] === 0x50
+	) {
+		return "image/webp";
+	}
+	if (bytes.length >= 26 && bytes[0] === 0x42 && bytes[1] === 0x4d) {
+		return "image/bmp";
+	}
+	return null;
+}
+
+function runClipboardExec(command: string, args: string[], timeoutMs = 1500): Promise<Buffer | undefined> {
+	return new Promise((resolve) => {
+		execFile(
+			command,
+			args,
+			{ encoding: "buffer", timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 },
+			(err, stdout) => {
+				if (err || !Buffer.isBuffer(stdout)) {
+					resolve(undefined);
+					return;
+				}
+				resolve(stdout);
+			},
+		);
+	});
+}
+
+async function normalizeClipboardImageBytes(
+	bytes: Uint8Array,
+	rawMime?: string,
+): Promise<ClipboardImagePayload | null> {
+	if (bytes.length === 0) return null;
+	const baseMime = rawMime?.split(";")[0]?.trim().toLowerCase();
+	const detected = sniffSupportedImageMimeType(bytes) ?? baseMime ?? "application/octet-stream";
+	if (SUPPORTED_DIRECT_IMAGE_MIMES.has(detected)) {
+		return { bytes, mimeType: detected };
+	}
+	try {
+		const b64 = Buffer.from(bytes).toString("base64");
+		const converted = await convertToPng(b64, detected);
+		if (!converted?.data) return null;
+		return {
+			bytes: new Uint8Array(Buffer.from(converted.data, "base64")),
+			mimeType: "image/png",
+		};
+	} catch {
+		return null;
+	}
+}
+
+const PREFERRED_CLIPBOARD_IMAGE_MIMES = [
+	"image/png",
+	"image/jpeg",
+	"image/webp",
+	"image/gif",
+] as const;
+
+function selectPreferredClipboardImageTarget(types: readonly string[]): string | undefined {
+	const entries = types
+		.map((raw) => raw.trim())
+		.filter(Boolean)
+		.map((raw) => ({ raw, base: raw.split(";")[0]?.trim().toLowerCase() ?? raw.toLowerCase() }));
+	for (const preferred of PREFERRED_CLIPBOARD_IMAGE_MIMES) {
+		const hit = entries.find((entry) => entry.base === preferred);
+		if (hit) return hit.raw;
+	}
+	return entries.find((entry) => entry.base.startsWith("image/"))?.raw;
+}
+
+export const defaultHostClipboardProvider: HostClipboardProvider = {
+	async readFilePaths() {
+		try {
+			const paths = await getNativeClipboard()?.getFilePaths?.();
+			return paths && paths.length > 0 ? paths : null;
+		} catch {
+			return null;
+		}
+	},
+
+	async readImage() {
+		if (process.env.TERMUX_VERSION) return null;
+
+		if (process.platform === "linux") {
+			if (process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === "wayland") {
+				const listBuf = await runClipboardExec("wl-paste", ["--list-types"], 1000);
+				if (listBuf !== undefined) {
+					const types = listBuf.toString("utf8").split(/\r?\n/);
+					const preferred = selectPreferredClipboardImageTarget(types);
+					if (!preferred) return null;
+					const imgBuf = await runClipboardExec("wl-paste", ["--type", preferred, "--no-newline"], 3000);
+					if (!imgBuf || imgBuf.length === 0) return null;
+					return await normalizeClipboardImageBytes(new Uint8Array(imgBuf), preferred);
+				}
+			}
+			if (process.env.DISPLAY) {
+				const targetsBuf = await runClipboardExec(
+					"xclip",
+					["-selection", "clipboard", "-t", "TARGETS", "-o"],
+					1000,
+				);
+				if (targetsBuf !== undefined) {
+					const types = targetsBuf.toString("utf8").split(/\r?\n/);
+					const preferred = selectPreferredClipboardImageTarget(types);
+					if (!preferred) return null;
+					const imgBuf = await runClipboardExec(
+						"xclip",
+						["-selection", "clipboard", "-t", preferred, "-o"],
+						3000,
+					);
+					if (!imgBuf || imgBuf.length === 0) return null;
+					return await normalizeClipboardImageBytes(new Uint8Array(imgBuf), preferred);
+				}
+			}
+		}
+
+		try {
+			const nativeBytes = await getNativeClipboard()?.getImage();
+			if (!nativeBytes || nativeBytes.length === 0) return null;
+			return await normalizeClipboardImageBytes(nativeBytes);
+		} catch {
+			return null;
+		}
+	},
+
+	async readText() {
+		if (process.env.TERMUX_VERSION) {
+			const out = await runClipboardExec("termux-clipboard-get", [], 3000);
+			if (out !== undefined) return out.toString("utf8") || null;
+		}
+		if (process.platform === "linux") {
+			if (process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === "wayland") {
+				const out = await runClipboardExec("wl-paste", ["--no-newline", "--type", "text"], 3000);
+				if (out !== undefined) return out.toString("utf8") || null;
+			}
+			if (process.env.DISPLAY) {
+				const out =
+					(await runClipboardExec("xclip", ["-selection", "clipboard", "-out"], 3000)) ??
+					(await runClipboardExec("xsel", ["--clipboard", "--output"], 3000));
+				if (out !== undefined) return out.toString("utf8") || null;
+			}
+		}
+		try {
+			return (await getNativeClipboard()?.getText()) || null;
+		} catch {
+			return null;
+		}
+	},
+};
+
 const defaultAdapter: HostRuntimeAdapter = {
 	async acquire(ctx: ExtensionContext): Promise<AcquiredHostTui | undefined> {
 		if (ctx.mode !== "tui" || !ctx.hasUI) return undefined;
@@ -311,7 +530,7 @@ const defaultAdapter: HostRuntimeAdapter = {
  */
 export async function acquireHostRuntime(
 	ctx: ExtensionContext,
-	options?: { adapter?: HostRuntimeAdapter },
+	options?: { adapter?: HostRuntimeAdapter; clipboard?: HostClipboardProvider },
 ): Promise<HostRuntimeHandle | undefined> {
 	const slot = getRuntimeSlot();
 	if (slot.active && slot.active.ctx === ctx) {
@@ -326,6 +545,7 @@ export async function acquireHostRuntime(
 
 	const { tui, keybindings } = acquired;
 	const theme = acquired.theme ?? (() => ctx.ui.theme);
+	const explicitClipboard = options?.clipboard ?? acquired.clipboard;
 
 	const layoutHost = hasLayoutHost(tui) ? tui : undefined;
 	/* Сначала ищем основной ScrollView в layoutRoot, т.к. до первого doRender() getPrimaryScrollView() возвращает implicitScrollView */
@@ -349,6 +569,9 @@ export async function acquireHostRuntime(
 		ctx,
 		tui,
 		keybindings,
+		get clipboard() {
+			return explicitClipboard ?? slot.clipboard ?? defaultHostClipboardProvider;
+		},
 		isFullscreen,
 		scroll,
 		chatContainer,
