@@ -1,0 +1,466 @@
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	CURSOR_MARKER,
+	matchesKey,
+	renderFakeCursor,
+	truncateToWidth,
+	visibleWidth,
+	type Component,
+	type Focusable,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
+} from "@earendil-works/pi-tui";
+import { bgRgb, fgRgb, renderCardFrame } from "../../shared/ansi.ts";
+import { getStore, MODE_META } from "../../shared/session-store.ts";
+import { showContextInspector } from "../context-inspector/index.ts";
+import { getOutlineSettings } from "../outline-rail/index.ts";
+import { setSessionMode } from "../plan-studio/index.ts";
+import { showPlanStudio } from "../plan-studio/studio-overlay.ts";
+import { getStickyConfig } from "../sticky-prompt/index.ts";
+
+interface PaletteItem {
+	id: string;
+	group: string;
+	icon: string;
+	label: string;
+	hint?: string;
+	keywords: string;
+	run: () => void | Promise<void>;
+}
+
+function fuzzyMatch(query: string, target: string): boolean {
+	if (!query) return true;
+	const q = query.toLowerCase().trim();
+	const t = target.toLowerCase();
+	if (t.includes(q)) return true;
+	let qi = 0;
+	for (let i = 0; i < t.length && qi < q.length; i++) {
+		if (t[i] === q[qi]) qi++;
+	}
+	return qi === q.length;
+}
+
+export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+	if (ctx.mode !== "tui") return;
+	const st = getStore();
+	const stickyCfg = getStickyConfig();
+	const outlineCfg = getOutlineSettings();
+
+	const runAction = (actionId: string) => {
+		st.runAppAction?.(actionId);
+	};
+
+	const items: PaletteItem[] = [
+		{
+			id: "mode-plan",
+			group: "Режим",
+			icon: "◈",
+			label: st.mode === "plan" ? "Выключить Plan Mode → Code" : "Включить Plan Mode (планирование без воды)",
+			hint: "Alt+M",
+			keywords: "plan mode план планирование",
+			run: () => setSessionMode(pi, ctx, st.mode === "plan" ? "code" : "plan"),
+		},
+		{
+			id: "plan-studio",
+			group: "Режим",
+			icon: "📋",
+			label:
+				st.planLines.length > 0
+					? `Открыть Plan Studio (${st.planLines.length} стр., комментарии к строкам)`
+					: "Открыть Plan Studio",
+			hint: "/plan",
+			keywords: "plan studio review comments ревью комментарии план",
+			run: () => showPlanStudio(pi, ctx),
+		},
+		{
+			id: "mode-safe",
+			group: "Режим",
+			icon: "🛡",
+			label: st.mode === "safe" ? "Выключить Auto-Safe → Code" : "Включить Auto-Safe (подтверждение правок/риска)",
+			hint: "/mode safe",
+			keywords: "auto safe confirm локальные модели безопасность",
+			run: () => setSessionMode(pi, ctx, st.mode === "safe" ? "code" : "safe"),
+		},
+		{
+			id: "context",
+			group: "Контекст",
+			icon: "◐",
+			label: "Инспектор контекста и токенов",
+			hint: "/context",
+			keywords: "context tokens usage cost контекст токены",
+			run: () => showContextInspector(pi, ctx),
+		},
+		{
+			id: "compact",
+			group: "Контекст",
+			icon: "⚡",
+			label: "Сжать историю диалога (Compact)",
+			hint: "/compact",
+			keywords: "compact compress сжать контекст",
+			run: () => {
+				if (!ctx.isIdle()) {
+					ctx.ui.notify("Дождись завершения генерации перед сжатием", "warning");
+					return;
+				}
+				ctx.ui.notify("Сжимаю контекст…", "info");
+				ctx.compact({
+					onComplete: () => ctx.ui.notify("Контекст сжат ✓", "info"),
+					onError: (e) => ctx.ui.notify(`Ошибка сжатия: ${e.message}`, "error"),
+				});
+			},
+		},
+		{
+			id: "toggle-sticky",
+			group: "Интерфейс",
+			icon: "📌",
+			label: `Закреплённый промпт сверху: ${stickyCfg.enabled ? "выключить" : "включить"}`,
+			hint: "/sticky",
+			keywords: "sticky header prompt закрепленный промпт",
+			run: () => {
+				stickyCfg.enabled = !stickyCfg.enabled;
+				st.requestRender?.();
+				ctx.ui.notify(`Sticky prompt: ${stickyCfg.enabled ? "включён" : "выключен"}`, "info");
+			},
+		},
+		{
+			id: "toggle-outline",
+			group: "Интерфейс",
+			icon: "☰",
+			label: `Навигация по репликам справа: ${outlineCfg.enabled ? "скрыть" : "показать"}`,
+			hint: "Ctrl+Alt+O",
+			keywords: "outline rail timeline навигация справа",
+			run: () => {
+				outlineCfg.enabled = !outlineCfg.enabled;
+				st.requestRender?.();
+				ctx.ui.notify(`Навигация справа: ${outlineCfg.enabled ? "показана" : "скрыта"}`, "info");
+			},
+		},
+		{
+			id: "model-select",
+			group: "Модель",
+			icon: "✦",
+			label: `Выбрать модель (${ctx.model?.name || ctx.model?.id || "current"})`,
+			hint: "Ctrl+L",
+			keywords: "model select provider модель",
+			run: () => runAction("app.model.select"),
+		},
+		{
+			id: "thinking-cycle",
+			group: "Модель",
+			icon: "⚡",
+			label: `Уровень рассуждений (сейчас: ${pi.getThinkingLevel()})`,
+			hint: "Shift+Tab",
+			keywords: "thinking reasoning effort рассуждения",
+			run: () => runAction("app.thinking.cycle"),
+		},
+		{
+			id: "thinking-toggle",
+			group: "Вид",
+			icon: "💭",
+			label: "Свернуть / развернуть блоки Thinking",
+			hint: "Ctrl+T",
+			keywords: "thinking toggle hide show мысли",
+			run: () => runAction("app.thinking.toggle"),
+		},
+		{
+			id: "tools-toggle",
+			group: "Вид",
+			icon: "🔧",
+			label: "Свернуть / развернуть вывод инструментов",
+			hint: "Ctrl+O",
+			keywords: "tools expand collapse тулзы вывод",
+			run: () => runAction("app.tools.expand"),
+		},
+		{
+			id: "theme-one-blue",
+			group: "Тема",
+			icon: "🎨",
+			label: "Тема: One Blue Pro (под Ghostty One Dark, без фиолетового)",
+			keywords: "theme blue one dark тема синяя",
+			run: () => {
+				ctx.ui.setTheme("one-blue-pro");
+				ctx.ui.notify("Тема: One Blue Pro", "info");
+			},
+		},
+		{
+			id: "theme-nordic-ocean",
+			group: "Тема",
+			icon: "🌊",
+			label: "Тема: Nordic Ocean (глубокий арктический синий)",
+			keywords: "theme nordic ocean nightfox тема океан синяя",
+			run: () => {
+				ctx.ui.setTheme("nordic-ocean");
+				ctx.ui.notify("Тема: Nordic Ocean", "info");
+			},
+		},
+		{
+			id: "theme-midnight-cobalt",
+			group: "Тема",
+			icon: "🌌",
+			label: "Тема: Midnight Cobalt (контрастный электрик-синий)",
+			keywords: "theme midnight cobalt electric тема кобальт",
+			run: () => {
+				ctx.ui.setTheme("midnight-cobalt");
+				ctx.ui.notify("Тема: Midnight Cobalt", "info");
+			},
+		},
+		{
+			id: "theme-one-blue-light",
+			group: "Тема",
+			icon: "☀",
+			label: "Тема: One Blue Light (светлая синяя)",
+			keywords: "theme light blue светлая тема",
+			run: () => {
+				ctx.ui.setTheme("one-blue-light");
+				ctx.ui.notify("Тема: One Blue Light", "info");
+			},
+		},
+		{
+			id: "session-new",
+			group: "Сессия",
+			icon: "＋",
+			label: "Новая сессия",
+			hint: "Ctrl+N",
+			keywords: "new clear session новая сессия очистить",
+			run: () => runAction("app.session.new"),
+		},
+		{
+			id: "session-resume",
+			group: "Сессия",
+			icon: "↺",
+			label: "Открыть историю сессий",
+			hint: "Ctrl+R",
+			keywords: "resume history sessions история сессии",
+			run: () => runAction("app.session.resume"),
+		},
+		{
+			id: "session-tree",
+			group: "Сессия",
+			icon: "⎇",
+			label: "Дерево ветвлений диалога",
+			hint: "Ctrl+Alt+T",
+			keywords: "tree branches дерево ветки",
+			run: () => runAction("app.session.tree"),
+		},
+		{
+			id: "session-fork",
+			group: "Сессия",
+			icon: "⑂",
+			label: "Ответвить диалог с выбранной реплики",
+			hint: "Ctrl+Alt+F",
+			keywords: "fork branch ответвить форк",
+			run: () => runAction("app.session.fork"),
+		},
+	];
+
+	const ownedCommands = new Set(["palette", "context", "plan", "mode", "sticky", "outline"]);
+	for (const cmd of pi.getCommands()) {
+		if (ownedCommands.has(cmd.name)) continue;
+		items.push({
+			id: `cmd:${cmd.name}`,
+			group: cmd.source === "skill" ? "Скилл" : "Команда",
+			icon: cmd.source === "skill" ? "⚡" : "›",
+			label: `/${cmd.name}${cmd.description ? ` — ${cmd.description}` : ""}`,
+			keywords: `${cmd.name} ${cmd.description ?? ""}`,
+			run: () => {
+				ctx.ui.setEditorText(`/${cmd.name} `);
+			},
+		});
+	}
+
+	const picked = await ctx.ui.custom<PaletteItem | null>(
+		(_tui, theme, _kb, done) => {
+			let query = "";
+			let selectedIdx = 0;
+			let scrollOffset = 0;
+			let hoveredIdx: number | null = null;
+			let closeHovered = false;
+			let rowMap = new Map<number, number>();
+			let closeHit: { xStart: number; xEnd: number } | null = null;
+
+			const getFiltered = (): PaletteItem[] =>
+				items.filter((it) => fuzzyMatch(query, `${it.group} ${it.label} ${it.keywords} ${it.hint ?? ""}`));
+
+			const comp: Component & Focusable = {
+				focused: true,
+				capturesViewportInput: true,
+				invalidate() {},
+				render(width: number): string[] {
+					rowMap = new Map();
+					const innerWidth = Math.max(24, width - 4);
+					const filtered = getFiltered();
+
+					if (selectedIdx >= filtered.length) selectedIdx = Math.max(0, filtered.length - 1);
+					const maxVisible = 12;
+					if (selectedIdx < scrollOffset) scrollOffset = selectedIdx;
+					if (selectedIdx >= scrollOffset + maxVisible) scrollOffset = selectedIdx - maxVisible + 1;
+					scrollOffset = Math.max(0, Math.min(scrollOffset, Math.max(0, filtered.length - maxVisible)));
+
+					const marker = comp.focused ? CURSOR_MARKER : "";
+					const searchPrompt = fgRgb(97, 175, 239, theme.bold("⌕ "));
+					const placeholder = query
+						? `${fgRgb(220, 232, 248, query)}${marker}${renderFakeCursor(" ")}`
+						: `${marker}${renderFakeCursor(" ")}${theme.fg("dim", "Поиск команд, режимов, тем, тулзов, скиллов…")}`;
+					const searchRow = truncateToWidth(` ${searchPrompt}${placeholder}`, innerWidth, "…");
+
+					const body: string[] = [searchRow, theme.fg("borderMuted", "─".repeat(innerWidth))];
+
+					if (filtered.length === 0) {
+						body.push(theme.fg("muted", "  Ничего не найдено"));
+					} else {
+						const slice = filtered.slice(scrollOffset, scrollOffset + maxVisible);
+						let renderRowIdx = 3;
+						for (let i = 0; i < slice.length; i++) {
+							const itemIndex = scrollOffset + i;
+							const item = slice[i]!;
+							const isSelected = itemIndex === selectedIdx;
+							const isHovered = itemIndex === hoveredIdx;
+
+							const badge = theme.fg("dim", `[${item.group}]`);
+							const rightHint = item.hint ? theme.fg("muted", ` ${item.hint} `) : "";
+							const iconPart = isSelected
+								? fgRgb(125, 207, 255, theme.bold(`${item.icon} `))
+								: fgRgb(97, 175, 239, `${item.icon} `);
+
+							const availLeft = Math.max(10, innerWidth - visibleWidth(rightHint) - visibleWidth(badge) - 5);
+							const mainText = truncateToWidth(
+								isSelected ? fgRgb(235, 244, 255, theme.bold(item.label)) : theme.fg("text", item.label),
+								availLeft,
+								"…",
+							);
+							const leftComposed = ` ${iconPart}${mainText} ${badge}`;
+							const gap = " ".repeat(Math.max(1, innerWidth - visibleWidth(leftComposed) - visibleWidth(rightHint)));
+							let fullRow = truncateToWidth(`${leftComposed}${gap}${rightHint}`, innerWidth, "…");
+							const pad = " ".repeat(Math.max(0, innerWidth - visibleWidth(fullRow)));
+							fullRow += pad;
+
+							if (isSelected) fullRow = bgRgb(39, 52, 74, fullRow);
+							else if (isHovered) fullRow = bgRgb(31, 39, 54, fullRow);
+
+							rowMap.set(renderRowIdx, itemIndex);
+							body.push(fullRow);
+							renderRowIdx++;
+						}
+					}
+
+					const modeMeta = MODE_META[st.mode];
+					const footer = `${fgRgb(modeMeta.rgb[0], modeMeta.rgb[1], modeMeta.rgb[2], `${modeMeta.icon} ${modeMeta.label}`)}  ${theme.fg("dim", "·  ↑↓ / колесо выбор  ·  Enter / клик запуск  ·  Esc закрыть")}`;
+					const countInfo = theme.fg("muted", `${filtered.length}`);
+					const closeBtn = closeHovered ? fgRgb(224, 108, 117, "✕") : theme.fg("muted", "✕");
+					closeHit = { xStart: Math.max(0, width - 5), xEnd: width - 1 };
+
+					return renderCardFrame(
+						fgRgb(125, 207, 255, theme.bold("⌘ Command Palette")),
+						`${countInfo}  ${closeBtn}`,
+						body,
+						footer,
+						width,
+						theme,
+						[97, 175, 239],
+					);
+				},
+				handleInput(data: string): void {
+					const filtered = getFiltered();
+					if (matchesKey(data, "escape") || matchesKey(data, "ctrl+k")) {
+						done(null);
+						return;
+					}
+					if (matchesKey(data, "enter") || matchesKey(data, "return")) {
+						done(filtered[selectedIdx] ?? null);
+						return;
+					}
+					if (matchesKey(data, "up") || matchesKey(data, "ctrl+p")) {
+						selectedIdx = Math.max(0, selectedIdx - 1);
+						return;
+					}
+					if (matchesKey(data, "down") || matchesKey(data, "ctrl+n")) {
+						selectedIdx = Math.min(Math.max(0, filtered.length - 1), selectedIdx + 1);
+						return;
+					}
+					if (matchesKey(data, "pageUp")) {
+						selectedIdx = Math.max(0, selectedIdx - 6);
+						return;
+					}
+					if (matchesKey(data, "pageDown")) {
+						selectedIdx = Math.min(Math.max(0, filtered.length - 1), selectedIdx + 6);
+						return;
+					}
+					if (matchesKey(data, "ctrl+u")) {
+						query = "";
+						selectedIdx = 0;
+						scrollOffset = 0;
+						return;
+					}
+					if (matchesKey(data, "backspace")) {
+						const segs = [...new Intl.Segmenter().segment(query)];
+						segs.pop();
+						query = segs.map((s) => s.segment).join("");
+						selectedIdx = 0;
+						scrollOffset = 0;
+						return;
+					}
+					if (data.length >= 1 && !data.startsWith("\x1b") && data.charCodeAt(0) >= 32) {
+						query += data;
+						selectedIdx = 0;
+						scrollOffset = 0;
+					}
+				},
+				handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+					const filtered = getFiltered();
+					if (event.type === "wheel" && event.wheelDelta && filtered.length > 0) {
+						const delta = event.wheelDelta < 0 ? -1 : 1;
+						selectedIdx = Math.max(0, Math.min(filtered.length - 1, selectedIdx + delta));
+						return { handled: true, render: true };
+					}
+					if (event.type === "move") {
+						const nextClose = Boolean(event.y === 0 && closeHit && event.x >= closeHit.xStart && event.x <= closeHit.xEnd);
+						const nextHover = rowMap.get(event.y) ?? null;
+						if (nextClose !== closeHovered || nextHover !== hoveredIdx) {
+							closeHovered = nextClose;
+							hoveredIdx = nextHover;
+							return { handled: true, render: true };
+						}
+						return { handled: true, render: false };
+					}
+					if (event.type === "click" && event.button === "left") {
+						if (event.y === 0 && closeHit && event.x >= closeHit.xStart && event.x <= closeHit.xEnd) {
+							done(null);
+							return { handled: true };
+						}
+						const hitIdx = rowMap.get(event.y);
+						if (hitIdx !== undefined && filtered[hitIdx]) {
+							done(filtered[hitIdx]!);
+							return { handled: true };
+						}
+					}
+					return { handled: true, render: false };
+				},
+			};
+			return comp;
+		},
+		{
+			overlay: true,
+			overlayOptions: { width: 78, minWidth: 46, anchor: "center", margin: 2 },
+		},
+	);
+
+	if (picked) {
+		await picked.run();
+	}
+}
+
+export function registerCommandPaletteFeature(pi: ExtensionAPI): void {
+	pi.registerShortcut("ctrl+k", {
+		description: "Открыть Command Palette (@conarti/pi-ui)",
+		handler: async (ctx) => {
+			await showCommandPalette(pi, ctx);
+		},
+	});
+
+	pi.registerCommand("palette", {
+		description: "Открыть центральное меню команд (Ctrl+K)",
+		handler: async (_args, ctx) => {
+			await showCommandPalette(pi, ctx);
+		},
+	});
+}

@@ -1,0 +1,42 @@
+{
+  "name": "@conarti/pi-ui",
+  "version": "0.1.0",
+  "description": "Modern interactive TUI experience for Pi by conarti: refined transcript cards, sticky prompts, conversation outline rail, compact tool calls, ask-user questionnaires, line-commentable Plan Studio, command palette, and blue themes.",
+  "author": "conarti",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/conarti/pi-ui.git"
+  },
+  "homepage": "https://github.com/conarti/pi-ui#readme",
+  "bugs": "https://github.com/conarti/pi-ui/issues",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "tui",
+    "ui",
+    "theme",
+    "conarti"
+  ],
+  "files": [
+    "src",
+    "themes",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "themes": [
+      "./themes/*.json"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}
