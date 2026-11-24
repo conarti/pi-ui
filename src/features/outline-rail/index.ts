@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, type OverlayHandle, type OverlayOptions } from "@earendil-works/pi-tui";
 import type { FullscreenShellContext } from "../../shared/fullscreen-layout.ts";
+import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
 import type { IndexedTurn, TranscriptTurnIndex } from "../../shared/turn-index.ts";
 import {
 	OutlinePreviewPopup,
@@ -28,7 +29,7 @@ export function createOutlineRailSlot(
 	_ctx: ExtensionContext,
 	shell: FullscreenShellContext,
 	turnIndex: TranscriptTurnIndex,
-	getTopOffset: () => number,
+	_getTopOffset?: () => number,
 ): OutlineRailComponent & { dispose(): void } {
 	const settings = getOutlineSettings();
 	const popup = new OutlinePreviewPopup(shell.theme);
@@ -43,63 +44,60 @@ export function createOutlineRailSlot(
 		visible: () => popupVisible && !(shell.tui as any).getTopmostVisibleOverlay?.(),
 	};
 
-	const hidePopup = () => {
+	const hidePopup = (fromRender = false) => {
 		if (!popupVisible && !popupHandle) return;
 		popupVisible = false;
 		if (popupHandle) {
 			try {
 				popupHandle.hide();
 			} catch {
-				// already hidden
+				/* Уже скрыто хостом */
 			}
 			popupHandle = undefined;
 		}
-		shell.requestRender();
+		if (!fromRender) {
+			shell.requestRender();
+		}
 	};
 
-	const updatePopup = (hit: RailHit | undefined, turn: IndexedTurn | undefined, screenY: number) => {
+	const updatePopup = (
+		hit: RailHit | undefined,
+		turn: IndexedTurn | undefined,
+		screenY: number,
+		fromRender = false,
+	) => {
 		const geo = rail.geometry;
-		if (!hit || !turn || !geo) {
-			hidePopup();
+		if (!hit || !turn || !geo || (shell.tui as any).getTopmostVisibleOverlay?.()) {
+			hidePopup(fromRender);
 			return;
 		}
-		const allTurns = turnIndex.getTurns();
-		const total = allTurns.length;
 		const termCols = shell.tui.terminal?.columns ?? 80;
 		const termRows = shell.tui.terminal?.rows ?? 30;
-		const maxText = Math.max(16, Math.min(36, Math.floor((termCols - RAIL_WIDTH) * 0.48)));
+		const viewportRows = shell.scroll.viewportHeight || termRows;
+		const maxText = Math.max(16, Math.min(40, Math.floor((termCols - RAIL_WIDTH - 2) * 0.48)));
 
-		const prefix = hit.kind === "up" ? "↑ " : hit.kind === "down" ? "↓ " : "";
-		const meta = `${prefix}Реплика ${turn.ordinal} из ${total}`;
-		const above = geo.windowStart;
-		const below = Math.max(0, total - geo.windowEnd);
-		const note = [above ? `выше скрыто: ${above}` : "", below ? `ниже скрыто: ${below}` : ""]
-			.filter(Boolean)
-			.join(" · ");
-
-		const bodyLines = wrapPreviewLines(turn.title, maxText);
-		const metaLines = wrapPreviewLines(meta, maxText);
-		const noteLines = note ? wrapPreviewLines(note, maxText) : [];
+		const previewSource = turn.title || turn.prompt;
+		const bodyLines = wrapPreviewLines(previewSource, maxText);
+		const timeText = turn.formattedTime ?? "";
 		const contentW = Math.max(
-			12,
+			10,
+			visibleWidth(timeText),
 			...bodyLines.map(visibleWidth),
-			...metaLines.map(visibleWidth),
-			...noteLines.map(visibleWidth),
 		);
-		const cardW = Math.min(Math.max(16, termCols - RAIL_WIDTH - 4), contentW + 4);
-		const cardH = (bodyLines.length || 1) + metaLines.length + noteLines.length + 2;
+		const cardW = Math.min(Math.max(14, termCols - RAIL_WIDTH - 5), contentW + 4);
+		const cardH = (bodyLines.length || 1) + 2 + (timeText ? 1 : 0);
 
-		const minRow = getTopOffset();
-		const maxRow = Math.max(minRow, termRows - cardH - 3);
-		popup.meta = meta;
-		popup.note = note;
-		popup.preview = turn.title;
+		const maxRow = Math.max(0, Math.min(termRows - cardH, viewportRows - cardH));
+		popup.time = timeText;
+		popup.preview = previewSource;
 		popupOptions.width = cardW;
-		popupOptions.col = Math.max(1, termCols - RAIL_WIDTH - cardW - 2);
-		popupOptions.row = Math.max(minRow, Math.min(screenY - Math.floor(cardH / 2), maxRow));
+		popupOptions.col = Math.max(1, termCols - RAIL_WIDTH - 1 - cardW - 1);
+		popupOptions.row = Math.max(0, Math.min(screenY - Math.floor(cardH / 2), maxRow));
 		popupVisible = true;
 		if (!popupHandle) {
 			popupHandle = shell.tui.showOverlay(popup, popupOptions);
+		} else if (!fromRender) {
+			shell.requestRender();
 		}
 	};
 
@@ -131,6 +129,7 @@ export function registerOutlineCommands(pi: ExtensionAPI, requestRender: () => v
 		}
 		const settings = getOutlineSettings();
 		settings.enabled = !settings.enabled;
+		getActiveHostRuntime()?.scroll?.invalidate?.();
 		requestRender();
 		ctx.ui.notify(
 			`Панель навигации справа: ${settings.enabled ? "показана" : "скрыта"}`,

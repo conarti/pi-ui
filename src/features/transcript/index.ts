@@ -8,7 +8,12 @@ import {
 	observeAssistantThinkingMessage,
 	stopThinkingWave,
 } from "./thinking-block.ts";
-import { installUserPromptCards } from "./user-prompt.ts";
+import {
+	clearPendingUserMessageTimestamps,
+	clearUserPromptCopyTimers,
+	installUserPromptCards,
+	recordPendingUserMessageTimestamp,
+} from "./user-prompt.ts";
 
 export function registerTranscriptFeature(pi: ExtensionAPI): void {
 	installMarkdownCardsAndHeadings();
@@ -21,7 +26,10 @@ export function registerTranscriptFeature(pi: ExtensionAPI): void {
 		}
 	});
 
-	pi.on("message_start", async (event) => {
+	pi.on("message_start", async (event: any) => {
+		if (event?.message?.role === "user") {
+			recordPendingUserMessageTimestamp(event.message.timestamp ?? Date.now());
+		}
 		observeAssistantThinkingMessage(event.message, true);
 	});
 
@@ -29,7 +37,10 @@ export function registerTranscriptFeature(pi: ExtensionAPI): void {
 		observeAssistantThinkingMessage(event.message, true, event.assistantMessageEvent);
 	});
 
-	pi.on("message_end", async (event) => {
+	pi.on("message_end", async (event: any) => {
+		if (event?.message?.role === "user") {
+			clearPendingUserMessageTimestamps();
+		}
 		observeAssistantThinkingMessage(event.message, false);
 	});
 
@@ -47,6 +58,8 @@ export function registerTranscriptFeature(pi: ExtensionAPI): void {
 		stopThinkingWave();
 		stopAllAnimations();
 		clearRecordedThinkingTimings();
+		clearPendingUserMessageTimestamps();
+		clearUserPromptCopyTimers();
 		clearHoverExcept(undefined);
 	});
 }

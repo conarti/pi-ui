@@ -7,7 +7,7 @@ import {
 	type TUI,
 } from "@earendil-works/pi-tui";
 import {
-	composeFullscreenSlots,
+	ViewportChromeCompositor,
 	type FullscreenShellContext,
 	type MountedViewportSlots,
 } from "./fullscreen-layout.ts";
@@ -33,6 +33,7 @@ export interface HostRuntimeHandle {
 	readonly isFullscreen: boolean;
 	readonly scroll: ScrollView | undefined;
 	readonly chatContainer: Container | undefined;
+	readonly viewportSlots: MountedViewportSlots | undefined;
 	readonly theme: () => Theme;
 	requestRender(): void;
 	mountViewportSlots(
@@ -50,6 +51,7 @@ const LEGACY_OUTLINE_GUTTER = Symbol.for("pi-outline.gutter");
 const ALL_MOTION_SEQ = "\x1b[?1003h";
 const MOTION_APPLIED = Symbol.for("conarti.pi-ui.mouse-motion");
 const ACTIVE_RUNTIME_KEY = Symbol.for("conarti.pi-ui.host-runtime.v1");
+const COMPOSITOR_MAP_KEY = Symbol.for("conarti.pi-ui.viewport-compositors.v1");
 
 interface RuntimeSlot {
 	active?: HostRuntimeHandle;
@@ -62,6 +64,14 @@ function getRuntimeSlot(): RuntimeSlot {
 		g[ACTIVE_RUNTIME_KEY] = {};
 	}
 	return g[ACTIVE_RUNTIME_KEY]!;
+}
+
+function getCompositorMap(): WeakMap<object, ViewportChromeCompositor> {
+	const g = globalThis as Record<symbol, WeakMap<object, ViewportChromeCompositor> | undefined>;
+	if (!g[COMPOSITOR_MAP_KEY]) {
+		g[COMPOSITOR_MAP_KEY] = new WeakMap();
+	}
+	return g[COMPOSITOR_MAP_KEY]!;
 }
 
 export function setHostRuntimeAdapter(adapter: HostRuntimeAdapter | undefined): void {
@@ -135,30 +145,97 @@ function hasLayoutHost(tui: unknown): tui is TUI & LayoutHost {
 	);
 }
 
-function installHoverSweepHook(): void {
+function installViewportChromeHooks(): void {
 	const altProto = (TuiAltScreen as unknown as { prototype?: object } | undefined)?.prototype;
 	if (!altProto) return;
+
 	hookMethod(
 		altProto,
 		"compositeScrollToEndIndicator",
 		"viewport.passthroughEndIndicator",
-		(self, args, original) => original.apply(self, args),
+		(self, args, original) => {
+			const base = original.apply(self, args) as string[];
+			const compositor = getCompositorMap().get(self);
+			if (!compositor) return base;
+			const layout = args[1] as { root?: any } | undefined;
+			const width = Number(args[2] ?? self.terminal?.columns ?? 80);
+			return compositor.compositeFrame(base, layout, width);
+		},
 		["pi.grok-ui.hook.chat.timelineComposite"],
 	);
+
+	hookMethod(
+		altProto,
+		"getSelectionColumns",
+		"viewport.clampChromeSelectionColumns",
+		(self, args, original) => {
+			const columns = original.apply(self, args) as { start: number; end: number };
+			const compositor = getCompositorMap().get(self);
+			if (!compositor || !compositor.applyingSelection) return columns;
+			const row = Number(args[1] ?? -1);
+			return compositor.clampSelectionColumns(row, columns);
+		},
+	);
+
+	hookMethod(
+		altProto,
+		"applySelection",
+		"viewport.maskChromeSelection",
+		(self, args, original) => {
+			const compositor = getCompositorMap().get(self);
+			if (!compositor) return original.apply(self, args);
+			const preSelection = args[0] as string[];
+			const selectionBounds = self.getSelectionBounds?.();
+			const isPrimaryScrollSelection = selectionBounds?.start?.scrollView === compositor.scrollRef;
+			compositor.applyingSelection = isPrimaryScrollSelection;
+			try {
+				const postSelection = original.apply(self, args) as string[];
+				if (postSelection === preSelection) return postSelection;
+				const width = Math.max(1, Number(self.terminal?.columns ?? 80));
+				return compositor.maskSelection(self, preSelection, postSelection, width, isPrimaryScrollSelection);
+			} finally {
+				compositor.applyingSelection = false;
+			}
+		},
+	);
+
+	hookMethod(
+		altProto,
+		"dispatchMouseToLayout",
+		"viewport.blockChromeWheelPassthrough",
+		(self, args, original) => {
+			const event = args[0] as { type?: string; screenX?: number; screenY?: number } | undefined;
+			if (event?.type === "wheel" && typeof event.screenX === "number" && typeof event.screenY === "number") {
+				const compositor = getCompositorMap().get(self);
+				if (compositor?.isChromeHit(self, event.screenX, event.screenY)) {
+					return undefined;
+				}
+			}
+			return original.apply(self, args);
+		},
+	);
+
 	hookMethod(
 		altProto,
 		"handleMouseEvent",
 		"viewport.hoverSweep",
 		(self, args, original) => {
-			const raw = args[0] as { button: number; release: boolean };
+			const raw = args[0] as { button: number; x: number; y: number; release: boolean };
 			const isPureMove = (raw.button & 32) !== 0 && (raw.button & 3) === 3 && !raw.release;
+			const compositor = getCompositorMap().get(self);
+
 			if (isPureMove) {
 				beginHoverMovePass();
-				const res = original.apply(self, args);
+				const handledByChrome = compositor?.handleMouseEvent(self, raw) ?? false;
+				const res = handledByChrome ? undefined : original.apply(self, args);
 				if (finishHoverMovePass()) {
 					self.requestRender?.();
 				}
 				return res;
+			}
+
+			if (compositor?.handleMouseEvent(self, raw)) {
+				return undefined;
 			}
 			return original.apply(self, args);
 		},
@@ -251,19 +328,21 @@ export async function acquireHostRuntime(
 	const theme = acquired.theme ?? (() => ctx.ui.theme);
 
 	const layoutHost = hasLayoutHost(tui) ? tui : undefined;
+	/* Сначала ищем основной ScrollView в layoutRoot, т.к. до первого doRender() getPrimaryScrollView() возвращает implicitScrollView */
 	const scroll =
-		((tui as TUI & { getPrimaryScrollView?: () => ScrollView | undefined }).getPrimaryScrollView?.()) ??
-		(layoutHost ? findPrimaryScroll(layoutHost.layoutRoot) : undefined);
+		(layoutHost ? findPrimaryScroll(layoutHost.layoutRoot) : undefined) ??
+		((tui as TUI & { getPrimaryScrollView?: () => ScrollView | undefined }).getPrimaryScrollView?.());
 
 	const isFullscreen = Boolean(layoutHost && scroll);
 	if (scroll) {
 		healLegacyTranscriptPatches(scroll);
 	}
-	installHoverSweepHook();
+	installViewportChromeHooks();
 	enablePointerMotionTracking(tui);
 
 	const chatContainer = findChatContainer(tui, scroll);
 	let disposeMountedSlots: (() => void) | undefined;
+	let currentViewportSlots: MountedViewportSlots | undefined;
 	let disposed = false;
 
 	const handle: HostRuntimeHandle = {
@@ -273,6 +352,9 @@ export async function acquireHostRuntime(
 		isFullscreen,
 		scroll,
 		chatContainer,
+		get viewportSlots() {
+			return currentViewportSlots;
+		},
 		theme,
 		requestRender() {
 			tui.requestRender();
@@ -284,7 +366,6 @@ export async function acquireHostRuntime(
 			disposeMountedSlots?.();
 			disposeMountedSlots = undefined;
 
-			const originalRoot = layoutHost.layoutRoot;
 			const shellCtx: FullscreenShellContext = {
 				tui,
 				theme,
@@ -294,16 +375,21 @@ export async function acquireHostRuntime(
 			};
 
 			const slots = buildSlots(shellCtx);
-			const customRoot = composeFullscreenSlots(originalRoot, scroll, slots);
+			currentViewportSlots = slots;
 
-			layoutHost.setLayoutRoot(customRoot);
+			const compositor = new ViewportChromeCompositor(tui, scroll, slots);
+			const compositorMap = getCompositorMap();
+			compositorMap.set(tui, compositor);
+			tui.requestRender();
 
 			const dispose = () => {
-				if (layoutHost.layoutRoot === customRoot) {
-					layoutHost.setLayoutRoot(originalRoot);
+				if (compositorMap.get(tui) === compositor) {
+					compositorMap.delete(tui);
 				}
-				slots.topSlot?.dispose?.();
-				slots.rightRail?.dispose?.();
+				if (currentViewportSlots === slots) {
+					currentViewportSlots = undefined;
+				}
+				compositor.dispose();
 				tui.requestRender();
 				if (disposeMountedSlots === dispose) {
 					disposeMountedSlots = undefined;
@@ -317,6 +403,7 @@ export async function acquireHostRuntime(
 			disposed = true;
 			disposeMountedSlots?.();
 			disposeMountedSlots = undefined;
+			currentViewportSlots = undefined;
 			if (slot.active === handle) {
 				slot.active = undefined;
 			}

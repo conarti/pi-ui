@@ -5,9 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { UserMessageComponent } from "@earendil-works/pi-coding-agent";
 import {
 	Container,
-	HStack,
 	Text,
-	VStack,
 	stripTerminalSequences,
 	type Component,
 	type TuiMouseEvent,
@@ -15,6 +13,7 @@ import {
 import conartiPiUi from "../src/index.ts";
 import { getOutlineSettings } from "../src/features/outline-rail/index.ts";
 import { getStickyConfig } from "../src/features/sticky-prompt/index.ts";
+import { getActiveHostRuntime } from "../src/shared/host-runtime.ts";
 import { createExtensionHarness, type ExtensionHarness } from "./harness/index.ts";
 
 interface ViewportComponents {
@@ -22,16 +21,12 @@ interface ViewportComponents {
 	outlineRail: Component & { handleMouse?: (event: TuiMouseEvent) => unknown };
 }
 
-function getViewportComponents(harness: ExtensionHarness): ViewportComponents {
-	const rootEntries =
-		(harness.tui.layoutRoot as unknown as { entries?: Array<{ component: Component }> }).entries ?? [];
-	const stickyBar = rootEntries[0]?.component as ViewportComponents["stickyBar"] | undefined;
-	const hstack = rootEntries.find((e) => e.component instanceof HStack)?.component as
-		| { entries?: Array<{ component: Component }> }
-		| undefined;
-	const outlineRail = hstack?.entries?.[1]?.component as ViewportComponents["outlineRail"] | undefined;
+function getViewportComponents(_harness: ExtensionHarness): ViewportComponents {
+	const slots = getActiveHostRuntime()?.viewportSlots;
+	const stickyBar = slots?.topSlot as ViewportComponents["stickyBar"] | undefined;
+	const outlineRail = slots?.rightRail as ViewportComponents["outlineRail"] | undefined;
 	if (!stickyBar || !outlineRail) {
-		throw new Error("Expected StickyPromptBar and OutlineRail to be mounted in fullscreen layout");
+		throw new Error("Expected StickyPromptBar and OutlineRail to be mounted in fullscreen viewport slots");
 	}
 	return { stickyBar, outlineRail };
 }
@@ -53,7 +48,7 @@ function makeUserEntry(id: string, content: string, timestamp: number) {
 	};
 }
 
-function syncTranscriptLayout(harness: ExtensionHarness, viewportHeight = 12, contentWidth = 118): number {
+function syncTranscriptLayout(harness: ExtensionHarness, viewportHeight = 12, contentWidth = 117): number {
 	const totalLines = harness.tui.chatContainer.render(contentWidth).length;
 	harness.tui.scroll.updateLayout(totalLines, viewportHeight, () => harness.tui.requestRender());
 	return totalLines;
@@ -66,7 +61,7 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 		const stickyCfg = getStickyConfig();
 		stickyCfg.enabled = true;
 		stickyCfg.showTimestamp = true;
-		stickyCfg.showNavigation = true;
+		stickyCfg.showNavigation = false;
 		stickyCfg.mode = "auto";
 		getOutlineSettings().enabled = true;
 
@@ -76,7 +71,7 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 		}
 	});
 
-	it("reports identical Turn counts, ordinals, sanitized titles, timestamps, and scroll offsets across Sticky Prompt and Outline Rail after compaction", async () => {
+	it("reports identical Turn counts, sanitized titles, timestamps, and scroll offsets across Sticky Prompt and Outline Rail after compaction", async () => {
 		const t1 = new Date(2026, 0, 15, 9, 0).getTime();
 		const t2 = new Date(2026, 0, 15, 9, 5).getTime();
 		const t3 = new Date(2026, 0, 15, 9, 10).getTime();
@@ -102,7 +97,6 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 		harness.mount(conartiPiUi);
 		await harness.startSession();
 
-		// Transcript after compaction: 4-line compaction summary + only Turns 4 and 5 mounted
 		const compactionSummary = createMultilineBlock("summary", 4);
 		const turn4Card = new UserMessageComponent("Inspect \x1b[31mcompacted\x1b[0m   turn\x07 four");
 		const response4 = createMultilineBlock("resp4", 18);
@@ -115,33 +109,30 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 		harness.tui.chatContainer.addChild(turn5Card);
 		harness.tui.chatContainer.addChild(response5);
 
-		syncTranscriptLayout(harness, 12, 118);
+		syncTranscriptLayout(harness, 12, 117);
 
 		const { stickyBar, outlineRail } = getViewportComponents(harness);
 
-		// Scroll past Turn 4 card (starts at row 4, 1 line tall -> row 8 is inside response 4)
 		harness.tui.scroll.scrollTo(8, { disableFollow: true });
 
-		const stickyLines = stickyBar.render(120).map(stripTerminalSequences);
+		const stickyLines = stickyBar.render(117).map(stripTerminalSequences);
 		const stickyText = stickyLines.join("\n");
 
-		// Sticky Prompt must align with compacted branch: #4/5, sanitized title, and Turn 4 timestamp 09:15
-		expect(stickyText).toContain("#4/5");
+		expect(stickyText).not.toContain("#4/5");
 		expect(stickyText).toContain("09:15");
-		expect(stickyText).toContain("Inspect compacted turn four");
+		expect(stickyText).toContain("Inspect compacted");
+		expect(stickyText).toContain("turn four");
 
-		// Outline Rail renders and hovering Turn 4 tick shows identical ordinal/count and sanitized title
 		const railLines = outlineRail.render(2);
 		expect(railLines.length).toBe(12);
 
-		// With 5 turns in height 12: totalRows = 5 + 2 = 7, top = floor((12 - 7)/2) = 2, ticksY = 3
-		// Turn index 3 (ordinal 4) is at y = 3 + 3 = 6
+		/* При 5 репликах в высоте 12: totalRows = 7, top = 2, ticksY = 3, индекс 3 (четвертая реплика) на y = 6 */
 		outlineRail.handleMouse?.({
 			type: "move",
 			button: "none",
 			x: 0,
 			y: 6,
-			screenX: 118,
+			screenX: 117,
 			screenY: 6,
 			width: 2,
 			height: 12,
@@ -149,21 +140,21 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 
 		const popupOverlay = harness.tui.overlayStack.find((o) => o.options?.nonCapturing);
 		expect(popupOverlay).toBeDefined();
-		const popupText = popupOverlay!.component
+		const popupLines = popupOverlay!.component
 			.render(Number(popupOverlay!.options?.width ?? 40))
-			.map(stripTerminalSequences)
-			.join("\n");
+			.map(stripTerminalSequences);
+		const popupText = popupLines.join("\n");
 
-		expect(popupText).toContain("Реплика 4 из 5");
+		expect(popupLines[0]?.trim()).toBe("09:15");
+		expect(popupText).not.toContain("Реплика");
 		expect(popupText).toContain("Inspect compacted turn four");
 
-		// Clicking Turn 4 tick jumps to Turn 4's exact structural row offset (row 4)
 		outlineRail.handleMouse?.({
 			type: "click",
 			button: "left",
 			x: 0,
 			y: 6,
-			screenX: 118,
+			screenX: 117,
 			screenY: 6,
 			width: 2,
 			height: 12,
@@ -191,7 +182,6 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 		harness.mount(conartiPiUi);
 		await harness.startSession();
 
-		// Nested Container hierarchy: [2-line header, innerGroup([turn1, resp1, turn2, resp2])]
 		const header = createMultilineBlock("session-header", 2);
 		const innerGroup = new Container();
 		const turn1Card = new UserMessageComponent("continue");
@@ -207,24 +197,21 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 		harness.tui.chatContainer.addChild(header);
 		harness.tui.chatContainer.addChild(innerGroup);
 
-		// Confirm user prompt card renders OSC 133 zone markers
-		const initialCardLines = turn1Card.render(118);
+		const initialCardLines = turn1Card.render(117);
 		expect(initialCardLines[0]).toContain("\x1b]133;A\x07");
 
-		syncTranscriptLayout(harness, 12, 118);
+		syncTranscriptLayout(harness, 12, 117);
 
 		const { stickyBar, outlineRail } = getViewportComponents(harness);
 		const docRenderSpy = vi.spyOn(harness.tui.chatContainer, "render");
 
-		// Scroll into response 2 so Sticky Prompt shows #2/2
-		harness.tui.scroll.scrollTo(18, { disableFollow: true });
-		expect(stripTerminalSequences(stickyBar.render(120).join("\n"))).toContain("#2/2");
+		/* Карточка Turn 1 на строках 2..4 (3 строки), resp1 на 5..16 (12 строк), карточка Turn 2 на 17..19 (3 строки) */
+		harness.tui.scroll.scrollTo(20, { disableFollow: true });
+		expect(stripTerminalSequences(stickyBar.render(117).join("\n"))).toContain("10:05");
 		outlineRail.render(2);
 
-		// Structural walk must NEVER call doc.render() for ANSI string matching
 		expect(docRenderSpy).not.toHaveBeenCalled();
 
-		// Hover turn1Card -> changes background RGB and adds " Copy " badge
 		(turn1Card as unknown as { handleMouse?: (e: TuiMouseEvent) => unknown }).handleMouse?.({
 			type: "move",
 			button: "none",
@@ -232,53 +219,48 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 			y: 0,
 			screenX: 4,
 			screenY: 2,
-			width: 118,
-			height: 1,
+			width: 117,
+			height: 3,
 		} as TuiMouseEvent);
-		const hoveredCardLine = stripTerminalSequences(turn1Card.render(118).join("\n"));
+		const hoveredCardLine = stripTerminalSequences(turn1Card.render(117).join("\n"));
 		expect(hoveredCardLine).toContain("Copy");
 
-		// Force a fresh coordinate computation while hovered (simulate session_tree invalidation)
 		await harness.emit("session_tree", {});
 		outlineRail.render(2);
 
-		// With 2 turns and refHeight=12: stable uses height 11 -> top = floor((11 - 4)/2) = 3, ticksY = 4
-		// Tick 1 (Turn 2, duplicate text "continue") is at y = 5 -> row 2 + 1 + 12 = 15 (moving up from row 18)
+		/* При 2 репликах в постоянной высоте 12: totalRows = 4, top = 4, ticksY = 5 (Turn 1 на y = 5, Turn 2 на y = 6) */
+		outlineRail.handleMouse?.({
+			type: "click",
+			button: "left",
+			x: 0,
+			y: 6,
+			screenX: 117,
+			screenY: 6,
+			width: 2,
+			height: 12,
+		} as TuiMouseEvent);
+		expect(harness.tui.scroll.scrollTop).toBe(17);
+		expect(harness.tui.scroll.isFollowingEnd).toBe(false);
+
 		outlineRail.handleMouse?.({
 			type: "click",
 			button: "left",
 			x: 0,
 			y: 5,
-			screenX: 118,
+			screenX: 117,
 			screenY: 5,
 			width: 2,
 			height: 12,
 		} as TuiMouseEvent);
-		expect(harness.tui.scroll.scrollTop).toBe(15);
-		expect(harness.tui.scroll.isFollowingEnd).toBe(false);
-
-		// Tick 0 (Turn 1) is at y = 4 -> must jump to row 2 (after 2-line header)
-		outlineRail.handleMouse?.({
-			type: "click",
-			button: "left",
-			x: 0,
-			y: 4,
-			screenX: 118,
-			screenY: 4,
-			width: 2,
-			height: 12,
-		} as TuiMouseEvent);
 		expect(harness.tui.scroll.scrollTop).toBe(2);
 		expect(harness.tui.scroll.isFollowingEnd).toBe(false);
 
-		// Verify Sticky Prompt navigating prev from row 18 lands cleanly on Turn 1 (row 2)
-		harness.tui.scroll.scrollTo(18, { disableFollow: true });
-		expect(stripTerminalSequences(stickyBar.render(120).join("\n"))).toContain("#2/2");
+		harness.tui.scroll.scrollTo(20, { disableFollow: true });
+		expect(stripTerminalSequences(stickyBar.render(117).join("\n"))).toContain("10:05");
 		await harness.runCommand("sticky", "prev");
 		expect(harness.tui.scroll.scrollTop).toBe(2);
 		expect(harness.tui.scroll.isFollowingEnd).toBe(false);
 
-		// Structural walk still never called doc.render()
 		expect(docRenderSpy).not.toHaveBeenCalled();
 	});
 
@@ -307,53 +289,53 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 		harness.tui.chatContainer.addChild(turn2Card);
 		harness.tui.chatContainer.addChild(resp2);
 
-		const initialHeight = syncTranscriptLayout(harness, 12, 118);
+		const initialHeight = syncTranscriptLayout(harness, 12, 117);
 		const { stickyBar, outlineRail } = getViewportComponents(harness);
 
 		const turn1RenderSpy = vi.spyOn(turn1Card, "render");
 		const resp1RenderSpy = vi.spyOn(resp1, "render");
 
-		// Cold cache: StickyPromptBar renders once -> populates shared cache
-		stickyBar.render(120);
+		stickyBar.render(117);
 		expect(turn1RenderSpy).toHaveBeenCalledTimes(1);
 		expect(resp1RenderSpy).toHaveBeenCalledTimes(1);
 
-		// OutlineRail in the same frame hits the shared cache (0 additional child renders)
 		outlineRail.render(2);
 		expect(turn1RenderSpy).toHaveBeenCalledTimes(1);
 		expect(resp1RenderSpy).toHaveBeenCalledTimes(1);
 
-		// Simulate 5 streaming animation ticks with unchanged branch, width, and contentHeight
 		for (let tick = 0; tick < 5; tick++) {
-			stickyBar.render(120);
+			stickyBar.render(117);
 			outlineRail.render(2);
 		}
 		expect(turn1RenderSpy).toHaveBeenCalledTimes(1);
 		expect(resp1RenderSpy).toHaveBeenCalledTimes(1);
 
-		// 1. Invalidate on contentHeight change (streaming appends lines)
 		harness.tui.scroll.updateLayout(initialHeight + 4, 12, () => harness!.tui.requestRender());
-		stickyBar.render(120);
+		stickyBar.render(117);
 		outlineRail.render(2);
 		expect(turn1RenderSpy).toHaveBeenCalledTimes(2);
 		expect(resp1RenderSpy).toHaveBeenCalledTimes(2);
 
-		// 2. Invalidate on contentWidth change (terminal resize)
 		harness.tui.terminal.columns = 100;
-		stickyBar.render(100);
+		stickyBar.render(97);
 		outlineRail.render(2);
 		expect(turn1RenderSpy).toHaveBeenCalledTimes(3);
 		expect(resp1RenderSpy).toHaveBeenCalledTimes(3);
 
-		// 3. Invalidate on branch change (new Turn appended)
 		const t3 = new Date(2026, 0, 15, 11, 10).getTime();
-		const nextBranch = [...branch, makeUserEntry("u3", "Third turn", t3)];
+		/* Во время live message_start карточка новой реплики уже смонтирована в chatContainer до записи в sessionManager.getBranch() */
+		const liveTurn3Card = new UserMessageComponent("Third turn live", undefined, 1, [], "u3", new Date(t3).toISOString());
+		harness.tui.chatContainer.addChild(liveTurn3Card);
+		harness.tui.scroll.updateLayout(initialHeight + 18, 12, () => harness!.tui.requestRender());
+		harness.tui.scroll.scrollTo(40, { disableFollow: true });
+		expect(stripTerminalSequences(stickyBar.render(97).join("\n"))).toContain("Third turn live");
+
+		const nextBranch = [...branch, makeUserEntry("u3", "Third turn live", t3)];
 		harness.setEntries(nextBranch, nextBranch);
-		harness.tui.chatContainer.addChild(new UserMessageComponent("Third turn"));
-		stickyBar.render(100);
+		stickyBar.render(97);
 		outlineRail.render(2);
-		expect(turn1RenderSpy).toHaveBeenCalledTimes(4);
-		expect(resp1RenderSpy).toHaveBeenCalledTimes(4);
+		expect(turn1RenderSpy).toHaveBeenCalledTimes(5);
+		expect(resp1RenderSpy).toHaveBeenCalledTimes(5);
 	});
 
 	it("disables follow-end when jumping to an earlier Turn and restores follow-end when navigating forward to the final Turn via Sticky Prompt or Outline Rail", async () => {
@@ -376,7 +358,7 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 		harness.mount(conartiPiUi);
 		await harness.startSession();
 
-		// Turn 1 at row 0 (1 line), resp1 (15 lines), Turn 2 at row 16 (1 line), resp2 (15 lines), Turn 3 at row 32 (1 line), resp3 (15 lines)
+		/* Каждая карточка реплики занимает 3 строки (vpad = 1), каждый ответ 15 строк: Turn 1 = 0, Turn 2 = 18, Turn 3 = 36 */
 		harness.tui.chatContainer.addChild(new UserMessageComponent("Turn one"));
 		harness.tui.chatContainer.addChild(createMultilineBlock("resp1", 15));
 		harness.tui.chatContainer.addChild(new UserMessageComponent("Turn two"));
@@ -384,7 +366,7 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 		harness.tui.chatContainer.addChild(new UserMessageComponent("Turn three"));
 		harness.tui.chatContainer.addChild(createMultilineBlock("resp3", 15));
 
-		const totalHeight = syncTranscriptLayout(harness, 12, 118);
+		const totalHeight = syncTranscriptLayout(harness, 12, 117);
 		const maxScrollTop = totalHeight - 12;
 		expect(harness.tui.scroll.isFollowingEnd).toBe(true);
 		expect(harness.tui.scroll.scrollTop).toBe(maxScrollTop);
@@ -392,58 +374,50 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 		const { stickyBar, outlineRail } = getViewportComponents(harness);
 		outlineRail.render(2);
 
-		// With 3 turns and refHeight=12: stable uses height 11 -> totalRows=5, top=floor((11-5)/2)=3
-		// upY = 3, tick0 (Turn 1) = 4, tick1 (Turn 2) = 5, tick2 (Turn 3) = 6, downY = 7
+		/* При 3 репликах в высоте 12: upY = 3, tick0 = 4, tick1 = 5, tick2 = 6, downY = 7 */
 		const clickRail = (y: number) =>
 			outlineRail.handleMouse?.({
 				type: "click",
 				button: "left",
 				x: 0,
 				y,
-				screenX: 118,
+				screenX: 117,
 				screenY: y,
 				width: 2,
 				height: 12,
 			} as TuiMouseEvent);
 
-		// 1. Click Turn 1 tick -> disables follow-end at row 0
 		clickRail(4);
 		expect(harness.tui.scroll.scrollTop).toBe(0);
 		expect(harness.tui.scroll.isFollowingEnd).toBe(false);
 
-		// 2. Click down-arrow -> moves to Turn 2 (row 16), follow-end remains disabled
 		outlineRail.render(2);
 		clickRail(7);
-		expect(harness.tui.scroll.scrollTop).toBe(16);
+		expect(harness.tui.scroll.scrollTop).toBe(18);
 		expect(harness.tui.scroll.isFollowingEnd).toBe(false);
 
-		// 3. Click down-arrow again -> moves forward to final Turn 3, restores follow-end at bottom
 		outlineRail.render(2);
 		clickRail(7);
 		expect(harness.tui.scroll.scrollTop).toBe(maxScrollTop);
 		expect(harness.tui.scroll.isFollowingEnd).toBe(true);
 
-		// 4. Navigate back to Turn 2 via Sticky Prompt -> disables follow-end at row 16
-		stickyBar.render(120);
+		stickyBar.render(117);
 		await harness.runCommand("sticky", "prev");
-		expect(harness.tui.scroll.scrollTop).toBe(16);
+		expect(harness.tui.scroll.scrollTop).toBe(18);
 		expect(harness.tui.scroll.isFollowingEnd).toBe(false);
 
-		// 5. Click final Turn 3 tick on Outline Rail from Turn 2 -> restores follow-end at bottom
 		outlineRail.render(2);
 		clickRail(6);
 		expect(harness.tui.scroll.scrollTop).toBe(maxScrollTop);
 		expect(harness.tui.scroll.isFollowingEnd).toBe(true);
 
-		// 6. Navigate back to Turn 2 then forward to final Turn 3 via Sticky Prompt -> restores follow-end at bottom
-		stickyBar.render(120);
+		stickyBar.render(117);
 		await harness.runCommand("sticky", "prev");
-		expect(harness.tui.scroll.scrollTop).toBe(16);
+		expect(harness.tui.scroll.scrollTop).toBe(18);
 		expect(harness.tui.scroll.isFollowingEnd).toBe(false);
 
-		// Scroll 1 line into Turn 2's response so Sticky Prompt pins Turn 2 in auto mode
-		harness.tui.scroll.scrollTo(17, { disableFollow: true });
-		stickyBar.render(120);
+		harness.tui.scroll.scrollTo(19, { disableFollow: true });
+		stickyBar.render(117);
 		await harness.runCommand("sticky", "next");
 		expect(harness.tui.scroll.scrollTop).toBe(maxScrollTop);
 		expect(harness.tui.scroll.isFollowingEnd).toBe(true);
@@ -472,26 +446,23 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 			harness.tui.chatContainer.addChild(new UserMessageComponent("Beta prompt"));
 			harness.tui.chatContainer.addChild(createMultilineBlock("resp2", 15));
 
-			syncTranscriptLayout(harness, 12, 118);
+			syncTranscriptLayout(harness, 12, 117);
 
 			const { stickyBar, outlineRail } = getViewportComponents(harness);
 
-			// ScrollView native scrollbar remains active ("auto")
 			expect(harness.tui.scroll.scrollbar).toBe("auto");
 
-			// Initially both Sticky Prompt and Outline Rail render
-			expect(stickyBar.render(120).length).toBeGreaterThan(0);
+			expect(stickyBar.render(117).length).toBeGreaterThan(0);
 			expect(outlineRail.render(2).length).toBe(12);
 
-			// Hover Popup is lazily mounted only while hovered, with nonCapturing: true
 			expect(harness.tui.overlayStack.some((o) => o.options?.nonCapturing)).toBe(false);
 			outlineRail.handleMouse?.({
 				type: "move",
 				button: "none",
 				x: 0,
-				y: 4,
-				screenX: 118,
-				screenY: 4,
+				y: 5,
+				screenX: 117,
+				screenY: 5,
 				width: 2,
 				height: 12,
 			} as TuiMouseEvent);
@@ -499,39 +470,34 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 			expect(hoverEntry).toBeDefined();
 			expect(harness.tui.isOverlayVisible(hoverEntry!)).toBe(true);
 
-			// Topmost blocking modal hides Hover Popup via getTopmostVisibleOverlay() guard
 			const modalHandle = harness.tui.showOverlay({ render: () => ["modal"], invalidate() {} }, {});
 			expect(harness.tui.getTopmostVisibleOverlay()).toBeDefined();
 			expect(harness.tui.isOverlayVisible(hoverEntry!)).toBe(false);
 			modalHandle.hide();
 			expect(harness.tui.isOverlayVisible(hoverEntry!)).toBe(true);
 
-			// Moving off ticks removes Hover Popup via handle.hide()
 			outlineRail.handleMouse?.({
 				type: "move",
 				button: "none",
 				x: 0,
 				y: 0,
-				screenX: 118,
+				screenX: 117,
 				screenY: 0,
 				width: 2,
 				height: 12,
 			} as TuiMouseEvent);
 			expect(harness.tui.overlayStack.some((o) => o.options?.nonCapturing)).toBe(false);
 
-			// Toggle /sticky off -> hides Sticky Prompt in memory
 			await harness.runCommand("sticky", "toggle");
-			expect(stickyBar.render(120)).toEqual([]);
+			expect(stickyBar.render(117)).toEqual([]);
 			await harness.runCommand("sticky", "toggle");
-			expect(stickyBar.render(120).length).toBeGreaterThan(0);
+			expect(stickyBar.render(117).length).toBeGreaterThan(0);
 
-			// Toggle /outline off -> hides Outline Rail in memory
 			await harness.runCommand("outline");
 			expect(outlineRail.render(2)).toEqual([]);
 			await harness.runCommand("outline");
 			expect(outlineRail.render(2).length).toBe(12);
 
-			// Neither /sticky nor /outline writes any files to disk
 			expect(readdirSync(tempCwd)).toEqual([]);
 		} finally {
 			rmSync(tempCwd, { recursive: true, force: true });

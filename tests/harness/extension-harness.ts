@@ -526,6 +526,7 @@ export function createExtensionHarness(options: ExtensionHarnessOptions = {}): E
 		},
 		async shutdownSession() {
 			await harness.emit("session_shutdown", {});
+			tui.disposeTimers();
 		},
 		async runCommand(name, args = "") {
 			const cmd = commands.get(name);

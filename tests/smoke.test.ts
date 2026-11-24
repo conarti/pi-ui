@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { HStack, ScrollView, VStack } from "@earendil-works/pi-tui";
+import { ScrollView, VStack } from "@earendil-works/pi-tui";
 import conartiPiUi from "../src/index.ts";
 import { isLightTheme } from "../src/shared/ansi.ts";
+import { getActiveHostRuntime } from "../src/shared/host-runtime.ts";
 import { createExtensionHarness, type ExtensionHarness } from "./harness/index.ts";
 
 describe("conartiPiUi end-to-end extension smoke", () => {
@@ -41,21 +42,20 @@ describe("conartiPiUi end-to-end extension smoke", () => {
 		expect(headerLines.length).toBeGreaterThan(0);
 		expect(editorLines.length).toBeGreaterThan(0);
 
-		// Fullscreen shell composed VStack + HStack while preserving ScrollView native scrollbar
-		expect(harness.tui.layoutRoot).not.toBe(originalRoot);
+		/* Полноэкранный layoutRoot остается нетронутым, а Sticky Prompt и Outline Rail монтируются как композитные слоты */
+		expect(harness.tui.layoutRoot).toBe(originalRoot);
 		expect(harness.tui.layoutRoot).toBeInstanceOf(VStack);
 		expect(harness.tui.scroll).toBeInstanceOf(ScrollView);
 		expect(harness.tui.scroll.scrollbar).toBe("auto");
-
-		const entries = (harness.tui.layoutRoot as unknown as { entries?: Array<{ component: unknown }> }).entries ?? [];
-		expect(entries.some((entry) => entry.component instanceof HStack)).toBe(true);
+		expect(getActiveHostRuntime()?.viewportSlots?.topSlot).toBeDefined();
+		expect(getActiveHostRuntime()?.viewportSlots?.rightRail).toBeDefined();
 
 		const viewportLines = harness.tui.renderViewport(120, 32);
 		expect(viewportLines.length).toBeGreaterThan(0);
 
-		// Session shutdown restores original layout root cleanly
 		await harness.shutdownSession();
 		expect(harness.tui.layoutRoot).toBe(originalRoot);
+		expect(getActiveHostRuntime()).toBeUndefined();
 		harness = undefined;
 	});
 
