@@ -6,19 +6,48 @@ import {
 	stripTerminalSequences,
 	truncateToWidth,
 	visibleWidth,
-	wrapTextWithAnsi,
 	type Component,
+	type MarkdownTheme,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
+import {
+	activateAnimationSurface,
+	deactivateAnimationSurface,
+	paintBreathingWaveGlyph,
+} from "../../shared/animation-scheduler.ts";
 import { fgRgb, getActiveGlobalTheme, isLightTheme } from "../../shared/ansi.ts";
 import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
-import { getSessionWorkflow } from "../../shared/session-workflow.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
 
 const MAX_THOUGHTS_WIDTH = 120;
-const STREAMING_THOUGHT_TAIL_LINES = 4;
+const STREAMING_THOUGHT_TAIL_LINES = 3;
 const THINKING_BLOCK_MARKER = Symbol.for("conarti.pi-ui.thinking-block");
+
+export function formatThinkingDuration(durationMs: number | undefined): string | undefined {
+	if (durationMs === undefined || !Number.isFinite(durationMs) || durationMs < 0) {
+		return undefined;
+	}
+	const totalSeconds = Math.max(1, Math.round(durationMs / 1000));
+	if (totalSeconds < 60) {
+		return `${totalSeconds}s`;
+	}
+	if (totalSeconds < 3600) {
+		const minutes = Math.floor(totalSeconds / 60);
+		const rem = totalSeconds % 60;
+		return rem > 0 ? `${minutes}m ${rem}s` : `${minutes}m`;
+	}
+	const hours = Math.floor(totalSeconds / 3600);
+	const minutes = Math.floor((totalSeconds % 3600) / 60);
+	const rem = totalSeconds % 60;
+	if (rem > 0) return `${hours}h ${minutes}m ${rem}s`;
+	return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+}
+
+export function formatThoughtLabel(durationMs: number | undefined): string {
+	const formatted = formatThinkingDuration(durationMs);
+	return formatted ? `Thought for ${formatted}` : "Thought";
+}
 
 export function isThinkingBlock(value: unknown): boolean {
 	if (value instanceof ThinkingBlock) return true;
@@ -29,62 +58,193 @@ export function isThinkingBlock(value: unknown): boolean {
 	);
 }
 
-interface WaveClock {
-	phase: number;
-	timer?: ReturnType<typeof setInterval>;
+const THINKING_WAVE_SURFACE_KEY = "transcript.thinking-wave";
+const THINKING_TIMINGS_KEY = Symbol.for("conarti.pi-ui.thinking-timings.v1");
+const MAX_TRACKED_THINKING_RUNS = 2000;
+
+interface ThinkingRunTiming {
+	startedAt: number;
+	endedAt?: number;
+	signature: string;
+	closedByEvent?: boolean;
 }
 
-const WAVE_CLOCK_KEY = Symbol.for("conarti.pi-ui.wave-clock.v1");
+interface SharedThinkingTimingStore {
+	byRunKey: Map<string, ThinkingRunTiming>;
+}
 
-function getWaveClock(): WaveClock {
-	const g = globalThis as Record<symbol, WaveClock | undefined>;
-	if (!g[WAVE_CLOCK_KEY]) {
-		g[WAVE_CLOCK_KEY] = { phase: 0 };
+function getSharedThinkingTimingStore(): SharedThinkingTimingStore {
+	const g = globalThis as Record<symbol, SharedThinkingTimingStore | undefined>;
+	if (!g[THINKING_TIMINGS_KEY]) {
+		g[THINKING_TIMINGS_KEY] = {
+			byRunKey: new Map(),
+		};
 	}
-	return g[WAVE_CLOCK_KEY]!;
+	return g[THINKING_TIMINGS_KEY]!;
+}
+
+export function clearRecordedThinkingTimings(): void {
+	getSharedThinkingTimingStore().byRunKey.clear();
+}
+
+function makeThinkingRunKey(message: any, runIndex: number): string | undefined {
+	const ts = message?.timestamp;
+	if (typeof ts !== "number" || !Number.isFinite(ts)) return undefined;
+	return `${ts}:${runIndex}`;
+}
+
+function rememberSharedTiming(key: string | undefined, timing: ThinkingRunTiming): void {
+	if (!key) return;
+	const { byRunKey } = getSharedThinkingTimingStore();
+	byRunKey.set(key, timing);
+	if (byRunKey.size > MAX_TRACKED_THINKING_RUNS) {
+		const oldest = byRunKey.keys().next().value;
+		if (oldest !== undefined) byRunKey.delete(oldest);
+	}
+}
+
+function lookupSharedTiming(
+	key: string | undefined,
+	sig: string,
+	isStreaming: boolean,
+): ThinkingRunTiming | undefined {
+	if (!key) return undefined;
+	const existing = getSharedThinkingTimingStore().byRunKey.get(key);
+	if (!existing) return undefined;
+	if (isStreaming || !existing.signature || !sig) return existing;
+	if (existing.signature === sig || sig.startsWith(existing.signature)) {
+		return existing;
+	}
+	return undefined;
+}
+
+function hasContentAfterThinkingRun(contents: any[], endIdx: number): boolean {
+	for (let k = endIdx; k < contents.length; k++) {
+		const item = contents[k];
+		if (item?.type === "text" || item?.type === "toolCall") return true;
+	}
+	return false;
+}
+
+export function observeAssistantThinkingMessage(
+	message: any,
+	isStreaming: boolean,
+	assistantEvent?: any,
+): void {
+	if (!message || message.role !== "assistant" || !Array.isArray(message.content)) return;
+	const contents: any[] = message.content;
+	let thinkingRunIndex = 0;
+
+	for (let i = 0; i < contents.length; i++) {
+		if (contents[i]?.type !== "thinking") continue;
+		const startIdx = i;
+		const thinkingParts: string[] = [];
+		let allRedacted = true;
+		let endIdx = i;
+		for (; endIdx < contents.length; endIdx++) {
+			const tc = contents[endIdx];
+			if (tc?.type !== "thinking") break;
+			if (tc.redacted !== true) allRedacted = false;
+			const trimmed = String(tc.thinking ?? "").trim();
+			if (trimmed) thinkingParts.push(trimmed);
+		}
+		i = endIdx - 1;
+		const runIndex = thinkingRunIndex++;
+		const joined = thinkingParts.join("\n\n");
+		const sig = joined.slice(0, 160);
+		const runKey = makeThinkingRunKey(message, runIndex);
+		let timing = lookupSharedTiming(runKey, sig, isStreaming);
+
+		const endedViaStreamEvent =
+			(assistantEvent?.type === "thinking_end" &&
+				typeof assistantEvent.contentIndex === "number" &&
+				assistantEvent.contentIndex >= startIdx &&
+				assistantEvent.contentIndex < endIdx &&
+				assistantEvent.contentIndex === endIdx - 1) ||
+			((assistantEvent?.type === "text_start" || assistantEvent?.type === "toolcall_start") &&
+				typeof assistantEvent.contentIndex === "number" &&
+				assistantEvent.contentIndex >= endIdx);
+
+		if (endedViaStreamEvent && timing) {
+			timing.closedByEvent = true;
+			timing.endedAt ??= Date.now();
+		}
+
+		const hasSubsequentContent = hasContentAfterThinkingRun(contents, endIdx);
+		const activelyThinkingNow = Boolean(
+			isStreaming && !hasSubsequentContent && !endedViaStreamEvent && !timing?.closedByEvent,
+		);
+
+		if (activelyThinkingNow) {
+			if (allRedacted && thinkingParts.length === 0) continue;
+			if (!timing) {
+				timing = { startedAt: Date.now(), signature: sig };
+			} else if (sig) {
+				timing.signature = sig;
+			}
+			rememberSharedTiming(runKey, timing);
+		} else if (timing) {
+			timing.endedAt ??= Date.now();
+			if (sig) timing.signature = sig;
+			rememberSharedTiming(runKey, timing);
+		}
+	}
 }
 
 export function startThinkingWave(): void {
-	const clock = getWaveClock();
-	if (clock.timer) return;
-	clock.timer = setInterval(() => {
-		if (!getSessionWorkflow().isStreaming) {
-			stopThinkingWave();
-			return;
-		}
-		clock.phase = (clock.phase + 1) % 64;
+	activateAnimationSurface(THINKING_WAVE_SURFACE_KEY, () => {
 		requestRender();
-	}, 65);
-	clock.timer.unref?.();
+	});
 }
 
 export function stopThinkingWave(): void {
-	const clock = getWaveClock();
-	if (clock.timer) {
-		clearInterval(clock.timer);
-		clock.timer = undefined;
-	}
+	deactivateAnimationSurface(THINKING_WAVE_SURFACE_KEY);
 }
 
 function waveAccentGlyph(row: number, glyph: string, lightMode: boolean): string {
-	const clock = getWaveClock();
-	const angle = ((row - clock.phase * 0.85) / 12) * Math.PI * 2;
-	const t = (Math.cos(angle) + 1) * 0.5;
-	if (lightMode) {
-		const r = Math.round(148 + (37 - 148) * t);
-		const g = Math.round(163 + (99 - 163) * t);
-		const b = Math.round(184 + (235 - 184) * t);
-		return fgRgb(r, g, b, glyph);
-	}
-	const r = Math.round(64 + (125 - 64) * t);
-	const g = Math.round(82 + (207 - 82) * t);
-	const b = Math.round(112 + (255 - 112) * t);
-	return fgRgb(r, g, b, glyph);
+	return paintBreathingWaveGlyph(row, glyph, { light: lightMode });
+}
+
+function createSoftThinkingMarkdown(text: string, themeRef: Theme, light: boolean): Markdown {
+	const bodyRgb: readonly [number, number, number] = light ? [100, 116, 139] : [124, 138, 160];
+	const strongRgb: readonly [number, number, number] = light ? [64, 84, 114] : [156, 174, 200];
+	const bodyEsc = `\x1b[38;2;${bodyRgb[0]};${bodyRgb[1]};${bodyRgb[2]}m`;
+	const strongEsc = `\x1b[38;2;${strongRgb[0]};${strongRgb[1]};${strongRgb[2]}m`;
+	const bodyFg = (s: string) => fgRgb(bodyRgb, s);
+	const dimFg = (s: string) => (light ? fgRgb(132, 148, 170, s) : fgRgb(92, 108, 132, s));
+	/* Markdown оборачивает вложенный текст в bodyFg до вызова bold(), поэтому заменяем внутренний SGR-префикс. */
+	const strongFg = (s: string) => fgRgb(strongRgb, s.replaceAll(bodyEsc, strongEsc));
+	const codeFg = (s: string) => (light ? fgRgb(44, 104, 178, s) : fgRgb(128, 178, 218, s));
+
+	const mdTheme: MarkdownTheme = {
+		heading: (s: string) => strongFg(s),
+		link: (s: string) => codeFg(s),
+		linkUrl: (s: string) => dimFg(s),
+		code: (s: string) => codeFg(s),
+		codeBlock: (s: string) => codeFg(s),
+		codeBlockBorder: (s: string) => dimFg(s),
+		quote: (s: string) => bodyFg(s),
+		quoteBorder: (s: string) => dimFg(s),
+		hr: (s: string) => dimFg(s),
+		listBullet: (s: string) => dimFg(s),
+		bold: (s: string) => themeRef.bold(strongFg(s)),
+		italic: (s: string) => themeRef.italic(s),
+		underline: (s: string) => themeRef.underline(s),
+		strikethrough: (s: string) => themeRef.strikethrough(s),
+	};
+
+	const md = new Markdown(text, 0, 0, mdTheme, {
+		color: bodyFg,
+	});
+	(md as any).__conartiThinkingMarkdown = true;
+	(md as any).__conartiSkipReplyCopy = true;
+	return md;
 }
 
 export class ThinkingBlock implements Component {
 	readonly [THINKING_BLOCK_MARKER] = true;
-	private hovered = false;
+	private readonly hoverSlot: { hovered: boolean };
+	private markdownCache?: { light: boolean; md: Markdown };
 
 	constructor(
 		private readonly thinkingText: string,
@@ -92,39 +252,42 @@ export class ThinkingBlock implements Component {
 		private readonly isExpanded: boolean,
 		private readonly onToggle: () => void,
 		private readonly themeRef: Theme,
-	) {}
+		private readonly durationMs?: number,
+		markdownSlot?: { light: boolean; md: Markdown },
+		hoverSlot?: { hovered: boolean },
+	) {
+		this.markdownCache = markdownSlot;
+		this.hoverSlot = hoverSlot ?? { hovered: false };
+	}
 
-	invalidate(): void {}
+	invalidate(): void {
+		this.markdownCache?.md.invalidate();
+	}
+
+	private renderFormattedLines(contentWidth: number, light: boolean, activeTheme: Theme): string[] {
+		if (!this.markdownCache || this.markdownCache.light !== light) {
+			this.markdownCache = {
+				light,
+				md: createSoftThinkingMarkdown(this.thinkingText, activeTheme, light),
+			};
+		} else if ((this.markdownCache.md as any).text !== this.thinkingText) {
+			this.markdownCache.md.setText(this.thinkingText);
+		}
+		return this.markdownCache.md.render(contentWidth).map((line) => line.replace(/ +$/u, ""));
+	}
 
 	render(width: number): string[] {
+		if (width <= 0) return [];
 		const outerPad = width >= 48 ? 2 : 1;
 		const margin = " ".repeat(outerPad);
-		const cappedWidth = Math.max(16, Math.min(width - outerPad * 2, MAX_THOUGHTS_WIDTH));
-		const textAvail = Math.max(10, cappedWidth - 4);
-		const light = isLightTheme(this.themeRef);
+		const cappedWidth = Math.max(8, Math.min(width - outerPad * 2, MAX_THOUGHTS_WIDTH));
+		const textAvail = Math.max(4, cappedWidth - 2);
+		const activeTheme = getActiveGlobalTheme(this.themeRef);
+		const light = isLightTheme(activeTheme);
+		const isHovered = this.hoverSlot.hovered;
 
-		const cleanSource = this.thinkingText
-			.replace(/\r\n?/g, "\n")
-			.split("\n")
-			.map((l) => l.replace(/^\s*#{1,6}\s+/, "").trimEnd());
-
-		const allWrapped: string[] = [];
-		for (const rawLine of cleanSource) {
-			if (!rawLine.trim()) {
-				if (allWrapped.length > 0 && allWrapped[allWrapped.length - 1] !== "") {
-					allWrapped.push("");
-				}
-				continue;
-			}
-			for (const w of wrapTextWithAnsi(rawLine, textAvail)) {
-				allWrapped.push(stripTerminalSequences(w));
-			}
-		}
-
-		const nonEmptyCount = allWrapped.filter((l) => l.trim().length > 0).length;
-		const dimBody = (s: string) => (light ? fgRgb(100, 116, 139, s) : fgRgb(120, 133, 154, s));
 		const headerMuted = (s: string) =>
-			this.hovered
+			isHovered
 				? light
 					? fgRgb(37, 99, 235, s)
 					: fgRgb(145, 195, 248, s)
@@ -135,35 +298,38 @@ export class ThinkingBlock implements Component {
 		const out: string[] = [];
 
 		if (this.isStreamingNow) {
-			startThinkingWave();
 			const hdrSpine = waveAccentGlyph(0, "┃", light);
-			const hdrRow = `${margin}${hdrSpine} ${headerMuted("Thinking…")}`;
+			const hdrRow = truncateToWidth(`${margin}${hdrSpine} ${headerMuted("Thinking…")}`, width, "…");
 			out.push(hdrRow + " ".repeat(Math.max(0, width - visibleWidth(hdrRow))));
 
-			const tail = allWrapped.filter((l) => l.trim().length > 0).slice(-STREAMING_THOUGHT_TAIL_LINES);
+			const formattedLines = this.renderFormattedLines(textAvail, light, activeTheme);
+			const nonEmptyLines = formattedLines.filter((l) => stripTerminalSequences(l).trim().length > 0);
+			const contentLines = nonEmptyLines.filter(
+				(l) => !/^(?:`{3,}|~{3,})[^\s`~]*$/u.test(stripTerminalSequences(l).trim()),
+			);
+			const tail = (contentLines.length > 0 ? contentLines : nonEmptyLines).slice(
+				-STREAMING_THOUGHT_TAIL_LINES,
+			);
 			for (let i = 0; i < tail.length; i++) {
 				const spine = waveAccentGlyph(i + 1, "▎", light);
-				const row = truncateToWidth(`${margin}${spine} ${dimBody(tail[i]!)}`, width, "…");
+				const row = truncateToWidth(`${margin}${spine} ${tail[i]!}`, width, "…");
 				out.push(row + " ".repeat(Math.max(0, width - visibleWidth(row))));
 			}
 			return out;
 		}
 
+		const label = formatThoughtLabel(this.durationMs);
+
 		if (!this.isExpanded) {
-			const collapsedSpine = this.hovered
-				? fgRgb(97, 175, 239, "❙")
+			const collapsedSpine = isHovered
+				? light
+					? fgRgb(37, 99, 235, "❙")
+					: fgRgb(97, 175, 239, "❙")
 				: light
 					? fgRgb(148, 163, 184, "❙")
 					: fgRgb(78, 92, 114, "❙");
-			const firstSnippet = allWrapped.find((l) => l.trim().length > 0) ?? "";
-			const snippetBudget = Math.max(0, cappedWidth - 24);
-			const snippet =
-				firstSnippet && snippetBudget > 16
-					? ` ${this.themeRef.fg("dim", `— ${truncateToWidth(firstSnippet.replace(/[*_`]/g, ""), snippetBudget, "…")}`)}`
-					: "";
-			const countHint = nonEmptyCount > 0 ? this.themeRef.fg("dim", ` (${nonEmptyCount})`) : "";
 			const line = truncateToWidth(
-				`${margin}${collapsedSpine} ${headerMuted("› Thought")}${countHint}${snippet}`,
+				`${margin}${collapsedSpine} ${headerMuted(`› ${label}`)}`,
 				width,
 				"…",
 			);
@@ -171,12 +337,18 @@ export class ThinkingBlock implements Component {
 		}
 
 		const openSpine = light ? fgRgb(148, 163, 184, "│") : fgRgb(76, 92, 118, "│");
-		const topSpine = light ? fgRgb(59, 130, 246, "┃") : fgRgb(97, 175, 239, "┃");
-		const hdr = `${margin}${topSpine} ${headerMuted("⌄ Thought")}${this.themeRef.fg("dim", "  · клик свернуть")}`;
+		const topSpine = isHovered
+			? light
+				? fgRgb(37, 99, 235, "│")
+				: fgRgb(97, 175, 239, "│")
+			: openSpine;
+		const hdr = truncateToWidth(`${margin}${topSpine} ${headerMuted(`⌄ ${label}`)}`, width, "…");
 		out.push(hdr + " ".repeat(Math.max(0, width - visibleWidth(hdr))));
 
-		for (const rowText of allWrapped) {
-			const row = truncateToWidth(`${margin}${openSpine} ${dimBody(rowText)}`, width, "…");
+		const formattedLines = this.renderFormattedLines(textAvail, light, activeTheme);
+		for (const rowText of formattedLines) {
+			const bodyLine = rowText ? `${margin}${openSpine} ${rowText}` : `${margin}${openSpine}`;
+			const row = truncateToWidth(bodyLine, width, "…");
 			out.push(row + " ".repeat(Math.max(0, width - visibleWidth(row))));
 		}
 		return out;
@@ -184,14 +356,14 @@ export class ThinkingBlock implements Component {
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		if (event.type === "move") {
-			claimHover(this, () => {
-				if (this.hovered) {
-					this.hovered = false;
+			claimHover(this.hoverSlot, () => {
+				if (this.hoverSlot.hovered) {
+					this.hoverSlot.hovered = false;
 					requestRender();
 				}
 			});
-			if (!this.hovered) {
-				this.hovered = true;
+			if (!this.hoverSlot.hovered) {
+				this.hoverSlot.hovered = true;
 				return { handled: true, render: true };
 			}
 			return undefined;
@@ -242,6 +414,7 @@ export function installAssistantTranscriptBlocks(): void {
 			const themeRef = getActiveGlobalTheme(self?.theme);
 			const contents: any[] = Array.isArray(message?.content) ? message.content : [];
 			let thinkingRunIndex = 0;
+			let hasActiveThinkingRun = false;
 
 			for (let i = 0; i < contents.length; i++) {
 				const part = contents[i];
@@ -266,9 +439,7 @@ export function installAssistantTranscriptBlocks(): void {
 										try {
 											const next = fn(outMd, txCtx);
 											if (typeof next === "string") outMd = next;
-										} catch {
-											// keep current markdown
-										}
+										} catch {}
 									}
 									return outMd;
 								},
@@ -278,30 +449,90 @@ export function installAssistantTranscriptBlocks(): void {
 					needsSpacer = true;
 				} else if (part?.type === "thinking") {
 					const thinkingParts: string[] = [];
+					let allRedacted = true;
 					let endIdx = i;
 					for (; endIdx < contents.length; endIdx++) {
 						const tc = contents[endIdx];
 						if (tc?.type !== "thinking") break;
+						if (tc.redacted !== true) allRedacted = false;
 						const trimmed = String(tc.thinking ?? "").trim();
 						if (trimmed) thinkingParts.push(trimmed);
 					}
 					i = endIdx - 1;
-					if (thinkingParts.length === 0) continue;
-
 					const runIndex = thinkingRunIndex++;
-					const hasSubsequentContent = contents
-						.slice(endIdx)
-						.some((c) => (c?.type === "text" && String(c.text ?? "").trim()) || c?.type === "toolCall");
-					const activelyThinkingNow = Boolean(isStreaming && !hasSubsequentContent);
+					const hasSubsequentContent = hasContentAfterThinkingRun(contents, endIdx);
+
+					const compTimings: Map<number, ThinkingRunTiming> =
+						(self.__conartiThinkingTimings ??= new Map());
+					const joinedThinking = thinkingParts.join("\n\n");
+					const sig = joinedThinking.slice(0, 160);
+					const runKey = makeThinkingRunKey(message, runIndex);
+
+					let runTiming =
+						compTimings.get(runIndex) ?? lookupSharedTiming(runKey, sig, Boolean(isStreaming));
+
+					const activelyThinkingNow = Boolean(
+						isStreaming && !hasSubsequentContent && !runTiming?.closedByEvent,
+					);
+
+					if (activelyThinkingNow) {
+						if (allRedacted && thinkingParts.length === 0) continue;
+						if (!runTiming) {
+							runTiming = { startedAt: Date.now(), signature: sig };
+						} else if (sig) {
+							runTiming.signature = sig;
+						}
+						compTimings.set(runIndex, runTiming);
+						rememberSharedTiming(runKey, runTiming);
+					} else if (runTiming) {
+						runTiming.endedAt ??= Date.now();
+						if (sig) runTiming.signature = sig;
+						compTimings.set(runIndex, runTiming);
+						rememberSharedTiming(runKey, runTiming);
+					}
 
 					const override: boolean | undefined = self.thinkingVisibilityOverrides?.get?.(runIndex);
 					const isExpanded = override !== undefined ? !override : false;
+
+					if (thinkingParts.length === 0) {
+						if (!activelyThinkingNow || allRedacted || (self.hideThinkingBlock && override === undefined)) {
+							continue;
+						}
+					}
 
 					if (self.hideThinkingBlock && override === undefined && !activelyThinkingNow) {
 						if (!String(self.hiddenThinkingLabel ?? "Thinking...").trim()) continue;
 					}
 
-					const joinedThinking = thinkingParts.join("\n\n");
+					if (activelyThinkingNow) {
+						hasActiveThinkingRun = true;
+					}
+
+					const durationMs =
+						runTiming && runTiming.endedAt !== undefined
+							? Math.max(0, runTiming.endedAt - runTiming.startedAt)
+							: undefined;
+
+					const mdSlots: Map<number, { light: boolean; md: Markdown }> =
+						(self.__conartiThinkingMdSlots ??= new Map());
+					const lightNow = isLightTheme(themeRef);
+					let mdSlot = mdSlots.get(runIndex);
+					if (!mdSlot || mdSlot.light !== lightNow) {
+						mdSlot = {
+							light: lightNow,
+							md: createSoftThinkingMarkdown(joinedThinking, themeRef, lightNow),
+						};
+						mdSlots.set(runIndex, mdSlot);
+					} else {
+						mdSlot.md.setText(joinedThinking);
+					}
+					const hoverSlots: Map<number, { hovered: boolean }> =
+						(self.__conartiThinkingHoverSlots ??= new Map());
+					let hoverSlot = hoverSlots.get(runIndex);
+					if (!hoverSlot) {
+						hoverSlot = { hovered: false };
+						hoverSlots.set(runIndex, hoverSlot);
+					}
 					addVisibleChild(
 						new ThinkingBlock(
 							joinedThinking,
@@ -314,10 +545,21 @@ export function installAssistantTranscriptBlocks(): void {
 								}
 							},
 							themeRef,
+							durationMs,
+							mdSlot,
+							hoverSlot,
 						),
 					);
 					needsSpacer = true;
 				}
+			}
+
+			if (hasActiveThinkingRun) {
+				activateAnimationSurface(self, () => {
+					requestRender();
+				});
+			} else {
+				deactivateAnimationSurface(self);
 			}
 
 			const hasToolCalls = contents.some((c) => c?.type === "toolCall");

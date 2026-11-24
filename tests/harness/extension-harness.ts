@@ -173,6 +173,9 @@ export function createExtensionHarness(options: ExtensionHarnessOptions = {}): E
 
 	let headerComponent: Component | undefined;
 	let editorComponent: Component | undefined;
+	let editorFactory:
+		| ((t: unknown, editorTheme: EditorTheme, kb: KeybindingsManager) => Component)
+		| undefined;
 	let editorText = "";
 	let activeCustomModal: ActiveCustomModal | undefined;
 	let confirmHandler: ((title: string, message: string) => boolean | Promise<boolean>) | undefined;
@@ -212,12 +215,13 @@ export function createExtensionHarness(options: ExtensionHarnessOptions = {}): E
 		setEditorComponent: (
 			factory: ((t: unknown, editorTheme: EditorTheme, kb: KeybindingsManager) => Component) | undefined,
 		) => {
+			editorFactory = factory;
 			editorComponent = factory
 				? factory(tui.asTui(), createEditorTheme(() => currentTheme), keybindings)
 				: undefined;
 			tui.requestRender();
 		},
-		getEditorComponent: () => editorComponent,
+		getEditorComponent: () => editorFactory,
 		setEditorText: (text: string) => {
 			editorText = text;
 		},

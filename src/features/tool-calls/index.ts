@@ -790,6 +790,7 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 	});
 	pi.on("agent_start", () => runtime.setBusy(true));
 	pi.on("agent_end", () => runtime.setBusy(false));
+	pi.on("agent_settled", () => runtime.setBusy(false));
 	// The calls of the run going on, read from each update as Pi reads them to make
 	// their rows, and told to extensions before Pi makes them.
 	pi.on("message_update", (event) => noteCalls(event.message));
