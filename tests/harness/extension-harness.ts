@@ -29,6 +29,20 @@ export interface RegisteredFlag {
 	default?: unknown;
 }
 
+export interface HarnessToolInfo {
+	name: string;
+	description?: string;
+	annotations?: {
+		destructiveHint?: boolean;
+		readOnlyHint?: boolean;
+		idempotentHint?: boolean;
+		openWorldHint?: boolean;
+		[key: string]: unknown;
+	};
+	destructiveHint?: boolean;
+	[key: string]: unknown;
+}
+
 export interface ExtensionHarnessOptions {
 	theme?: "dark" | "light" | Theme;
 	mode?: "tui" | "print";
@@ -38,6 +52,7 @@ export interface ExtensionHarnessOptions {
 	cwd?: string;
 	flags?: Record<string, unknown>;
 	activeTools?: string[];
+	allTools?: HarnessToolInfo[];
 	entries?: unknown[];
 	branch?: unknown[];
 	sessionId?: string;
@@ -124,6 +139,11 @@ export function createExtensionHarness(options: ExtensionHarnessOptions = {}): E
 
 	let currentTheme = resolveTheme(options.theme);
 	let activeTools = [...(options.activeTools ?? ["read", "bash", "edit", "write", "grep", "find", "ls"])];
+	const configuredTools: HarnessToolInfo[] = options.allTools
+		? options.allTools.map((t) => ({ ...t }))
+		: [...new Set([...activeTools, "read", "bash", "powershell", "edit", "write", "grep", "find", "ls"])].map(
+				(name) => ({ name }),
+			);
 	let sessionEntries = [...(options.entries ?? [])];
 	let sessionBranch = [...(options.branch ?? sessionEntries)];
 	let thinkingLevel = "medium";
@@ -339,6 +359,18 @@ export function createExtensionHarness(options: ExtensionHarnessOptions = {}): E
 		getFlag: (name: string) => flagValues.get(name),
 		registerTool: (tool: ToolDefinition) => {
 			tools.set(tool.name, tool);
+		},
+		getAllTools: () => {
+			const byName = new Map<string, HarnessToolInfo>();
+			for (const tool of configuredTools) {
+				byName.set(tool.name, tool);
+			}
+			for (const tool of tools.values()) {
+				if (!byName.has(tool.name)) {
+					byName.set(tool.name, tool as unknown as HarnessToolInfo);
+				}
+			}
+			return [...byName.values()];
 		},
 		getActiveTools: () => [...activeTools],
 		setActiveTools: (next: string[]) => {

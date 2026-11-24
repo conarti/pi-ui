@@ -146,6 +146,7 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", () => {
+		getSessionWorkflow().endAgentTurn();
 		unsubscribeStickyKey?.();
 		unsubscribeStickyKey = undefined;
 		disposeShell?.();
