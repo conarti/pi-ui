@@ -8,6 +8,9 @@ import { actionKeys, actionMatches } from "./keys.ts";
 import { Preview, columns } from "./preview.ts";
 import type { Usage } from "@earendil-works/pi-ai";
 import { explainer, type Explain, type Request } from "./explain.ts";
+import { hasBlockingModalOverlay, registerBlockingDialog } from "../../shared/modal-card.ts";
+
+export { hasBlockingModalOverlay };
 
 const RESERVED_ROWS = 4;
 const PREVIEW_ROWS = 12;
@@ -425,32 +428,22 @@ const unavailable: Explain = async () => { throw new Error("Explanations are una
 
 export interface ExplainOptions { lastRequest?: () => Request | undefined; onUsage?: (usage: Usage) => void }
 
-type OverlayInspectableTui = TUI & {
-  getTopmostVisibleOverlay?: () => unknown;
-  readonly hasOverlayEntries?: boolean;
-};
-
-export function hasBlockingModalOverlay(tui: TUI): boolean {
-  const inspectable = tui as OverlayInspectableTui;
-  if (typeof inspectable.getTopmostVisibleOverlay === "function") {
-    return Boolean(inspectable.getTopmostVisibleOverlay());
-  }
-  return Boolean(inspectable.hasOverlayEntries);
-}
-
 export async function runQuestionnaire(ctx: ExtensionContext, params: Params, signal?: AbortSignal, options: ExplainOptions = {}): Promise<Result> {
   if (ctx.mode !== "tui") throw new Error("Questionnaires require terminal mode.");
   validate(params);
   signal?.throwIfAborted();
   let abort: (() => void) | undefined;
+  let releaseBlocking: (() => void) | undefined;
   const runs: Promise<string>[] = [];
   try {
     const outcome = await ctx.ui.custom<Result | Error>((tui, theme, keys, done) => {
       if (hasBlockingModalOverlay(tui)) throw new Error("Close the existing dialog before opening a questionnaire.");
+      releaseBlocking = registerBlockingDialog();
       let settled = false;
       const finish = (value: Result | Error) => {
         if (settled) return;
         settled = true;
+        releaseBlocking?.();
         done(value);
       };
       abort = () => finish(new Error("Questionnaire aborted."));
@@ -467,6 +460,7 @@ export async function runQuestionnaire(ctx: ExtensionContext, params: Params, si
     await Promise.allSettled(runs);
     return outcome;
   } finally {
+    releaseBlocking?.();
     if (abort) signal?.removeEventListener("abort", abort);
   }
 }

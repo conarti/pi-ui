@@ -50,23 +50,148 @@ export function paintSurfaceRow(content: string, targetWidth: number, r: number,
 	return `${bgEsc}${patched}\x1b[49m`;
 }
 
+export type RgbTuple = readonly [number, number, number];
+
+export type PillVariant = "primary" | "secondary" | "success" | "warning" | "danger" | "neutral";
+
+export interface ThemeSurfacePalette {
+	readonly isLight: boolean;
+	readonly surfaceBg: RgbTuple;
+	readonly selectedRowBg: RgbTuple;
+	readonly hoveredRowBg: RgbTuple;
+	readonly noteRowBg: RgbTuple;
+	readonly noteEditRowBg: RgbTuple;
+	readonly pillNeutralBg: RgbTuple;
+	readonly pillNeutralHoverBg: RgbTuple;
+	readonly border: RgbTuple;
+	readonly accent: RgbTuple;
+	readonly accentBright: RgbTuple;
+	readonly selectedText: RgbTuple;
+	readonly inputText: RgbTuple;
+	readonly noteText: RgbTuple;
+	readonly warning: RgbTuple;
+	readonly success: RgbTuple;
+	readonly danger: RgbTuple;
+	readonly info: RgbTuple;
+	readonly freeBar: RgbTuple;
+}
+
+const DARK_SURFACE_PALETTE: ThemeSurfacePalette = {
+	isLight: false,
+	surfaceBg: [27, 35, 50],
+	selectedRowBg: [39, 52, 74],
+	hoveredRowBg: [31, 39, 54],
+	noteRowBg: [40, 39, 33],
+	noteEditRowBg: [44, 42, 34],
+	pillNeutralBg: [36, 43, 56],
+	pillNeutralHoverBg: [48, 59, 78],
+	border: [97, 175, 239],
+	accent: [97, 175, 239],
+	accentBright: [125, 207, 255],
+	selectedText: [235, 244, 255],
+	inputText: [220, 232, 248],
+	noteText: [232, 210, 156],
+	warning: [229, 192, 123],
+	success: [140, 194, 101],
+	danger: [224, 108, 117],
+	info: [86, 182, 194],
+	freeBar: [52, 62, 80],
+};
+
+const LIGHT_SURFACE_PALETTE: ThemeSurfacePalette = {
+	isLight: true,
+	surfaceBg: [237, 243, 252],
+	selectedRowBg: [214, 230, 252],
+	hoveredRowBg: [232, 240, 251],
+	noteRowBg: [252, 244, 224],
+	noteEditRowBg: [248, 237, 206],
+	pillNeutralBg: [226, 235, 247],
+	pillNeutralHoverBg: [207, 224, 246],
+	border: [37, 99, 235],
+	accent: [29, 78, 216],
+	accentBright: [2, 132, 199],
+	selectedText: [15, 23, 42],
+	inputText: [15, 23, 42],
+	noteText: [120, 53, 15],
+	warning: [180, 83, 9],
+	success: [21, 128, 61],
+	danger: [220, 38, 38],
+	info: [15, 118, 110],
+	freeBar: [203, 213, 225],
+};
+
+export function getThemeSurfacePalette(theme: unknown): ThemeSurfacePalette {
+	return isLightTheme(theme) ? LIGHT_SURFACE_PALETTE : DARK_SURFACE_PALETTE;
+}
+
+function mixRgb(base: RgbTuple, accent: RgbTuple, accentWeight: number): [number, number, number] {
+	const baseWeight = 1 - accentWeight;
+	return [
+		Math.round(base[0] * baseWeight + accent[0] * accentWeight),
+		Math.round(base[1] * baseWeight + accent[1] * accentWeight),
+		Math.round(base[2] * baseWeight + accent[2] * accentWeight),
+	];
+}
+
+function resolvePillAccent(palette: ThemeSurfacePalette, variant?: PillVariant, rgb?: RgbTuple): RgbTuple {
+	if (rgb) return rgb;
+	switch (variant) {
+		case "primary":
+			return palette.accent;
+		case "secondary":
+			return palette.info;
+		case "success":
+			return palette.success;
+		case "warning":
+			return palette.warning;
+		case "danger":
+			return palette.danger;
+		case "neutral":
+		default:
+			return palette.accent;
+	}
+}
+
 export function renderPill(
 	text: string,
 	opts: {
 		hovered?: boolean;
 		active?: boolean;
-		rgb?: [number, number, number];
+		variant?: PillVariant;
+		rgb?: RgbTuple;
 		theme: Theme;
 	},
 ): string {
-	const [r, g, b] = opts.rgb ?? [97, 175, 239];
+	const palette = getThemeSurfacePalette(opts.theme);
+	const isNeutral = opts.variant === "neutral" || (!opts.variant && !opts.rgb && !opts.active);
+	const accent = resolvePillAccent(palette, opts.variant, opts.rgb);
+
+	if (palette.isLight) {
+		if (opts.hovered) {
+			const bg = isNeutral ? palette.pillNeutralHoverBg : mixRgb([244, 248, 254], accent, 0.28);
+			return bgRgb(bg[0], bg[1], bg[2], fgRgb(15, 23, 42, ` ${text} `));
+		}
+		if (opts.active) {
+			const bg = mixRgb([246, 249, 254], accent, 0.16);
+			const fg = mixRgb([15, 23, 42], accent, 0.72);
+			return bgRgb(bg[0], bg[1], bg[2], fgRgb(fg[0], fg[1], fg[2], ` ${text} `));
+		}
+		const bg = palette.pillNeutralBg;
+		return bgRgb(bg[0], bg[1], bg[2], opts.theme.fg("muted", ` ${text} `));
+	}
+
+	const [r, g, b] = accent;
 	if (opts.hovered) {
-		return bgRgb(Math.round(r * 0.34), Math.round(g * 0.34), Math.round(b * 0.38), fgRgb(235, 244, 255, ` ${text} `));
+		const bg = isNeutral
+			? palette.pillNeutralHoverBg
+			: ([Math.round(r * 0.34), Math.round(g * 0.34), Math.round(b * 0.38)] as const);
+		return bgRgb(bg[0], bg[1], bg[2], fgRgb(235, 244, 255, ` ${text} `));
 	}
 	if (opts.active) {
 		return bgRgb(Math.round(r * 0.2), Math.round(g * 0.22), Math.round(b * 0.26), fgRgb(r, g, b, ` ${text} `));
 	}
-	return bgRgb(36, 43, 56, opts.theme.fg("muted", ` ${text} `));
+	const bg = palette.pillNeutralBg;
+	return bgRgb(bg[0], bg[1], bg[2], opts.theme.fg("muted", ` ${text} `));
 }
 
 export function renderCardFrame(

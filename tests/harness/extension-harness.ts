@@ -109,6 +109,7 @@ function createFakeKeybindings(): KeybindingsManager {
 		matches: (_data: string, _action: string) => false,
 		getKeys: (_action: string) => [],
 		getDisplayString: (action: string) => action,
+		getUserBindings: () => ({}),
 	};
 	return kb as unknown as KeybindingsManager;
 }
@@ -239,7 +240,7 @@ export function createExtensionHarness(options: ExtensionHarnessOptions = {}): E
 				};
 
 				const component = factory(tui.asTui(), currentTheme, keybindings, done);
-				if (customOptions?.overlay) {
+				if (!settled && customOptions?.overlay) {
 					overlayHandle = tui.showOverlay(component, customOptions.overlayOptions);
 				}
 
