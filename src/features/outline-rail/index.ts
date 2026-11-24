@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, type OverlayHandle, type OverlayOptions } from "@earendil-works/pi-tui";
 import type { FullscreenShellContext } from "../../shared/fullscreen-layout.ts";
+import type { IndexedTurn, TranscriptTurnIndex } from "../../shared/turn-index.ts";
 import {
 	OutlinePreviewPopup,
 	OutlineRailComponent,
@@ -8,7 +9,6 @@ import {
 	wrapPreviewLines,
 	type RailHit,
 } from "./rail-view.ts";
-import { createTurnsReader, jumpScrollToTurn, type OutlineTurn } from "./turn-tracker.ts";
 
 interface OutlineSettings {
 	enabled: boolean;
@@ -25,12 +25,12 @@ export function getOutlineSettings(): OutlineSettings {
 }
 
 export function createOutlineRailSlot(
-	ctx: ExtensionContext,
+	_ctx: ExtensionContext,
 	shell: FullscreenShellContext,
+	turnIndex: TranscriptTurnIndex,
 	getTopOffset: () => number,
 ): OutlineRailComponent & { dispose(): void } {
 	const settings = getOutlineSettings();
-	const readTurns = createTurnsReader(ctx);
 	const popup = new OutlinePreviewPopup(shell.theme);
 	let popupVisible = false;
 	let popupHandle: OverlayHandle | undefined;
@@ -57,13 +57,13 @@ export function createOutlineRailSlot(
 		shell.requestRender();
 	};
 
-	const updatePopup = (hit: RailHit | undefined, turn: OutlineTurn | undefined, screenY: number) => {
+	const updatePopup = (hit: RailHit | undefined, turn: IndexedTurn | undefined, screenY: number) => {
 		const geo = rail.geometry;
 		if (!hit || !turn || !geo) {
 			hidePopup();
 			return;
 		}
-		const allTurns = readTurns();
+		const allTurns = turnIndex.getTurns();
 		const total = allTurns.length;
 		const termCols = shell.tui.terminal?.columns ?? 80;
 		const termRows = shell.tui.terminal?.rows ?? 30;
@@ -107,12 +107,12 @@ export function createOutlineRailSlot(
 		shell.tui,
 		shell.scroll,
 		shell.theme,
-		readTurns,
+		turnIndex,
 		() => settings.enabled,
 		updatePopup,
-		(_turn, targetRow) => {
+		(_turn, turnIdx, direction) => {
 			hidePopup();
-			jumpScrollToTurn(shell.scroll, shell.requestRender, targetRow);
+			turnIndex.jumpToTurn(turnIdx, { direction });
 		},
 	);
 
