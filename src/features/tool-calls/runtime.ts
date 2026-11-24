@@ -1,3 +1,7 @@
+import { readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
+import { BREATHING_TICK_MS } from "../../shared/animation-scheduler.ts";
 import { DEFAULT_CONFIG } from "./config.ts";
 import { onTick } from "./clock.ts";
 import { isSilent } from "./silent.ts";
@@ -10,7 +14,8 @@ import {
 } from "./types.ts";
 
 const MAX_TRACKED_ROWS = 2_000;
-const INDICATOR_INTERVAL_MS = 45;
+const MAX_WRITE_SNAPSHOT_BYTES = 512 * 1024;
+const INDICATOR_INTERVAL_MS = BREATHING_TICK_MS;
 /**
  * How long a running row may go undrawn before it stops asking for frames. Pi draws
  * every row it shows on every frame, so only a row that left the transcript, or
@@ -18,6 +23,7 @@ const INDICATOR_INTERVAL_MS = 45;
  */
 const UNDRAWN_ROW_MS = 1_500;
 const EXECUTION_TIMINGS_KEY = Symbol.for("pi.compact-tools.execution-timings");
+const WRITE_BASELINES_KEY = Symbol.for("conarti.pi-ui.write-baselines.v1");
 
 type ExecutionTiming = { startedAt: number; endedAt?: number; durationMs?: number };
 
@@ -28,12 +34,23 @@ export function validDurationMs(value: unknown): value is number {
 type Indicator = { invalidate: () => void; drawnAt: number };
 type SharedState = typeof globalThis & {
 	[EXECUTION_TIMINGS_KEY]?: Map<string, ExecutionTiming>;
+	[WRITE_BASELINES_KEY]?: Map<string, string | null>;
 };
+
+function resolveWriteTargetPath(rawPath: string, cwd: string): string {
+	const cleaned = rawPath.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/gu, " ").replace(/^@/u, "");
+	if (cleaned === "~") return homedir();
+	if (cleaned.startsWith("~/") || cleaned.startsWith("~\\")) {
+		return resolve(homedir(), cleaned.slice(2));
+	}
+	return resolve(cwd, cleaned);
+}
 
 export class ToolRuntime {
 	private configValue = DEFAULT_CONFIG;
 	private configRevision: object = {};
 	private readonly executionTimings: Map<string, ExecutionTiming>;
+	private readonly writeBaselines: Map<string, string | null>;
 	private readonly indicators = new Map<string, Indicator>();
 	private indicatorFrame = 0;
 	private stopIndicatorTicks: (() => void) | undefined;
@@ -52,6 +69,8 @@ export class ToolRuntime {
 		const shared = globalThis as SharedState;
 		this.executionTimings = shared[EXECUTION_TIMINGS_KEY] ?? new Map<string, ExecutionTiming>();
 		shared[EXECUTION_TIMINGS_KEY] = this.executionTimings;
+		this.writeBaselines = shared[WRITE_BASELINES_KEY] ?? new Map<string, string | null>();
+		shared[WRITE_BASELINES_KEY] = this.writeBaselines;
 	}
 
 	get config(): CompactToolsConfig {
@@ -75,6 +94,38 @@ export class ToolRuntime {
 
 	clearTimings(): void {
 		this.executionTimings.clear();
+		this.writeBaselines.clear();
+	}
+
+	/* Снимок исходного файла до перезаписи write нужен, так как встроенный write возвращает details: undefined. */
+	captureWriteBaseline(toolCallId: string, args: unknown, cwd?: string): void {
+		if (!toolCallId || this.writeBaselines.has(toolCallId)) return;
+		const obj = typeof args === "object" && args !== null ? (args as Record<string, unknown>) : undefined;
+		const rawPath = typeof obj?.path === "string" ? obj.path : typeof obj?.file_path === "string" ? obj.file_path : "";
+		if (!rawPath.trim()) return;
+		const absPath = resolveWriteTargetPath(rawPath, cwd ?? process.cwd());
+		let baseline: string | null = null;
+		try {
+			const stat = statSync(absPath);
+			if (stat.isFile() && stat.size <= MAX_WRITE_SNAPSHOT_BYTES) {
+				const buf = readFileSync(absPath);
+				if (!buf.includes(0)) {
+					baseline = buf.toString("utf8");
+				}
+			}
+		} catch {
+			baseline = null;
+		}
+		this.writeBaselines.set(toolCallId, baseline);
+		if (this.writeBaselines.size > MAX_TRACKED_ROWS) {
+			const oldest = this.writeBaselines.keys().next().value;
+			if (oldest !== undefined) this.writeBaselines.delete(oldest);
+		}
+	}
+
+	writeBaseline(toolCallId: string): string | undefined {
+		const value = this.writeBaselines.get(toolCallId);
+		return typeof value === "string" ? value : undefined;
 	}
 
 	reset(clearTimings: boolean): void {

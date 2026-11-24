@@ -1,10 +1,20 @@
-import type {
-	ExtensionAPI,
-	ExtensionContext,
-	ExtensionUIContext,
-	KeybindingsManager,
-	Theme,
-	ToolDefinition,
+import {
+	createBashToolDefinition,
+	createCodemodeExtension,
+	createEditToolDefinition,
+	createFindToolDefinition,
+	createGrepToolDefinition,
+	createLsToolDefinition,
+	createPowerShellToolDefinition,
+	createReadToolDefinition,
+	createWriteToolDefinition,
+	type ExtensionAPI,
+	type ExtensionContext,
+	type ExtensionUIContext,
+	type KeybindingsManager,
+	type Theme,
+	type ToolDefinition,
+	type ToolRendererResolver,
 } from "@earendil-works/pi-coding-agent";
 import {
 	isKeyRelease,
@@ -75,6 +85,7 @@ export interface ExtensionHarnessOptions {
 	sessionId?: string;
 	projectTrusted?: boolean;
 	clipboard?: HostClipboardProvider;
+	enableToolRendererRegistry?: boolean;
 }
 
 export interface ActiveCustomModal {
@@ -88,7 +99,6 @@ export interface ExtensionHarness {
 	readonly ctx: ExtensionContext;
 	readonly tui: FakeTui;
 	readonly keybindings: KeybindingsManager;
-
 	readonly handlers: Map<string, Array<(...args: unknown[]) => unknown>>;
 	readonly commands: Map<string, RegisteredCommand>;
 	readonly shortcuts: Map<string, RegisteredShortcut>;
@@ -103,7 +113,6 @@ export interface ExtensionHarness {
 	readonly workingMessages: Array<string | undefined>;
 	readonly hiddenThinkingLabels: Array<string | undefined>;
 	readonly statuses: Map<string, string>;
-
 	header: Component | undefined;
 	editor: (Component & Partial<EditorComponent>) | undefined;
 	editorFactory: HarnessEditorFactory;
@@ -111,7 +120,6 @@ export interface ExtensionHarness {
 	activeCustomModal: ActiveCustomModal | undefined;
 	confirmHandler: ((title: string, message: string) => boolean | Promise<boolean>) | undefined;
 	selectHandler: ((title: string, items: unknown[]) => unknown | Promise<unknown>) | undefined;
-
 	mount(extensionFn: (pi: ExtensionAPI) => void): void;
 	emit(eventName: string, event?: unknown): Promise<unknown[]>;
 	startSession(): Promise<void>;
@@ -123,6 +131,7 @@ export interface ExtensionHarness {
 	setEntries(entries: unknown[], branch?: unknown[]): void;
 	setClipboard(clipboard: HostClipboardProvider | undefined): void;
 	getActiveTools(): string[];
+	resolveToolDefinition(toolName: string): ToolDefinition<any, any, any> | undefined;
 }
 
 const emptyTestClipboard: HostClipboardProvider = {
@@ -195,6 +204,7 @@ export function createExtensionHarness(options: ExtensionHarnessOptions = {}): E
 	const sentUserMessages: Array<{ content: unknown; options?: unknown }> = [];
 	const terminalInputListeners = new Set<(data: string) => unknown>();
 	const markdownTransformers: Array<(markdown: string, context: any) => string> = [];
+	const toolRenderers: ToolRendererResolver[] = [];
 	const workingMessages: Array<string | undefined> = [];
 	const hiddenThinkingLabels: Array<string | undefined> = [];
 	const statuses = new Map<string, string>();
@@ -466,7 +476,46 @@ export function createExtensionHarness(options: ExtensionHarnessOptions = {}): E
 		registerMarkdownTransformer: (transformer: (markdown: string, context: any) => string) => {
 			markdownTransformers.push(transformer);
 		},
+		...(options.enableToolRendererRegistry
+			? {
+					registerToolRenderer: (resolver: ToolRendererResolver) => {
+						toolRenderers.push(resolver);
+					},
+				}
+			: {}),
 	} as unknown as ExtensionAPI;
+
+	const builtInToolFactories: Record<string, (cwd: string) => ToolDefinition<any, any, any>> = {
+		read: createReadToolDefinition,
+		write: createWriteToolDefinition,
+		edit: createEditToolDefinition,
+		bash: createBashToolDefinition,
+		powershell: createPowerShellToolDefinition,
+		grep: createGrepToolDefinition,
+		find: createFindToolDefinition,
+		ls: createLsToolDefinition,
+	};
+	let cachedCodemodeDef: ToolDefinition<any, any, any> | undefined;
+	const getBuiltInOrRegisteredDefinition = (toolName: string): ToolDefinition<any, any, any> | undefined => {
+		const registered = tools.get(toolName);
+		if (registered) return registered;
+		const factory = builtInToolFactories[toolName];
+		if (factory) return factory(ctx.cwd);
+		if (toolName === "codemode") {
+			if (!cachedCodemodeDef) {
+				createCodemodeExtension()({
+					registerTool(def: ToolDefinition<any, any, any>) {
+						cachedCodemodeDef = def;
+					},
+					appendEntry() {},
+					getAllTools: () => [],
+					getSettings: () => ({}),
+				} as unknown as ExtensionAPI);
+			}
+			return cachedCodemodeDef;
+		}
+		return undefined;
+	};
 
 	const harness: ExtensionHarness = {
 		pi,
@@ -487,7 +536,6 @@ export function createExtensionHarness(options: ExtensionHarnessOptions = {}): E
 		workingMessages,
 		hiddenThinkingLabels,
 		statuses,
-
 		get header() {
 			return headerComponent;
 		},
@@ -604,6 +652,13 @@ export function createExtensionHarness(options: ExtensionHarnessOptions = {}): E
 		},
 		getActiveTools() {
 			return [...activeTools];
+		},
+		resolveToolDefinition(toolName) {
+			const resolve = (index: number): ToolDefinition<any, any, any> | undefined =>
+				index < toolRenderers.length
+					? (toolRenderers[index]!(toolName, () => resolve(index + 1)) as ToolDefinition<any, any, any> | undefined)
+					: getBuiltInOrRegisteredDefinition(toolName);
+			return resolve(0);
 		},
 	};
 
