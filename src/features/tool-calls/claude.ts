@@ -7,7 +7,7 @@ import {
 	summarizeCustomArguments,
 	summarizeFailure,
 } from "./invocation.ts";
-import { isHarmlessRedirect, parseShell, writesOrRuns } from "./shell.ts";
+import { analyzeShell, isHarmlessRedirect, type ShellDialect } from "../../shared/shell-analysis.ts";
 import type { ToolArgs } from "./types.ts";
 
 /**
@@ -145,19 +145,21 @@ export type LookKind = "search" | "read" | "list";
  * `cat a.ts` reads, `ls src` lists. Anything that runs something else, writes a
  * file, or redirects anywhere but /dev/null is undefined, so a group never hides it.
  */
-export function classifyShellCommand(command: string): LookKind | undefined {
-	const parsed = parseShell(normalizeLineEndings(command));
-	if (!parsed || parsed.opaque) return undefined;
+export function classifyShellCommand(command: string, dialect: ShellDialect = "bash"): LookKind | undefined {
+	const analysis = analyzeShell(command, dialect);
+	if (!analysis.valid || analysis.opaque || analysis.effect.kind !== "read-only") return undefined;
 	let search = false;
 	let read = false;
 	let list = false;
-	for (const { words, redirects } of parsed.commands) {
-		if (!redirects.every(isHarmlessRedirect) || writesOrRuns(words)) return undefined;
-		const program = words[0];
-		if (!program || NEUTRAL_COMMANDS.has(program)) continue;
-		if (SEARCH_COMMANDS.has(program)) search = true;
-		else if (READ_COMMANDS.has(program)) read = true;
-		else if (LIST_COMMANDS.has(program)) list = true;
+	for (const { words, redirects } of analysis.commands) {
+		if (!redirects.every(isHarmlessRedirect)) return undefined;
+		const rawProgram = words[0];
+		if (!rawProgram) continue;
+		const program = dialect === "powershell" ? rawProgram.toLowerCase() : rawProgram;
+		if (NEUTRAL_COMMANDS.has(program)) continue;
+		if (SEARCH_COMMANDS.has(program) || program === "select-string" || program === "sls") search = true;
+		else if (READ_COMMANDS.has(program) || program === "get-content" || program === "gc") read = true;
+		else if (LIST_COMMANDS.has(program) || program === "get-childitem" || program === "gci") list = true;
 		else return undefined;
 	}
 	// Claude Code counts a call once: as a listing first, then a search, then a read.
@@ -169,7 +171,9 @@ export function lookKind(name: string, args: ToolArgs): LookKind | undefined {
 	if (name === "read") return "read";
 	if (name === "grep" || name === "find") return "search";
 	if (name === "ls") return "list";
-	if (name === "bash" || name === "powershell") return classifyShellCommand(commandOf(args));
+	if (name === "bash" || name === "powershell") {
+		return classifyShellCommand(commandOf(args), name === "powershell" ? "powershell" : "bash");
+	}
 	return undefined;
 }
 

@@ -1,7 +1,7 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { normalizeLineEndings } from "./core.ts";
-import { parseShell, writesOrRuns } from "./shell.ts";
+import { analyzeShell, type ShellDialect } from "../../shared/shell-analysis.ts";
 import type { ToolArgs } from "./types.ts";
 
 /** Rows Codex shows of a call's output, its last ones, before offering the rest. */
@@ -236,11 +236,11 @@ function summarize(words: readonly string[]): ExploreAction | undefined {
  * Unlike Codex, a command that can write or run something else, `xargs rm`, `tee`,
  * `find -delete`, never passes for exploring, since the group would hide it.
  */
-export function parseExploreCommand(command: string): ExploreAction[] | undefined {
-	const parsed = parseShell(normalizeLineEndings(command));
-	if (!parsed || parsed.opaque || parsed.commands.some((each) => each.redirects.length > 0)) return undefined;
-	let commands = parsed.commands.map((each) => each.words);
-	if (commands.some(writesOrRuns)) return undefined;
+export function parseExploreCommand(command: string, dialect: ShellDialect = "bash"): ExploreAction[] | undefined {
+	const analysis = analyzeShell(command, dialect);
+	if (!analysis.valid || analysis.opaque || analysis.effect.kind !== "read-only") return undefined;
+	if (analysis.commands.some((each) => each.redirects.length > 0)) return undefined;
+	let commands = analysis.commands.map((each) => [...each.words]);
 	if (commands.length > 1) commands = commands.filter((each) => !isFormatting(each));
 	commands = commands.filter((each, index) => each[0] !== "cd" && !(each.length === 1 && each[0] === "true")
 		&& !(each[0] === "echo" && index === 0 && commands.length > 1));
@@ -280,7 +280,7 @@ export function exploreActions(name: string, args: ToolArgs): ExploreAction[] | 
 		case "ls": return [{ kind: "list", path: short, command: "ls" }];
 		case "bash": case "powershell": {
 			const command = argument(args, "command");
-			return command ? parseExploreCommand(command) : undefined;
+			return command ? parseExploreCommand(command, name === "powershell" ? "powershell" : "bash") : undefined;
 		}
 		default: return undefined;
 	}
