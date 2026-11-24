@@ -16,6 +16,11 @@ import {
 	type OverlayHandle,
 	type OverlayOptions,
 } from "@earendil-works/pi-tui";
+import {
+	getHostClipboardProvider,
+	setHostClipboardProvider,
+	type HostClipboardProvider,
+} from "../../src/shared/host-runtime.ts";
 import { createDarkTheme, createLightTheme } from "./fake-theme.ts";
 import { FakeTui } from "./fake-tui.ts";
 
@@ -69,6 +74,7 @@ export interface ExtensionHarnessOptions {
 	branch?: unknown[];
 	sessionId?: string;
 	projectTrusted?: boolean;
+	clipboard?: HostClipboardProvider;
 }
 
 export interface ActiveCustomModal {
@@ -115,8 +121,15 @@ export interface ExtensionHarness {
 	sendTerminalInput(data: string): Promise<void>;
 	setTheme(theme: "dark" | "light" | Theme): void;
 	setEntries(entries: unknown[], branch?: unknown[]): void;
+	setClipboard(clipboard: HostClipboardProvider | undefined): void;
 	getActiveTools(): string[];
 }
+
+const emptyTestClipboard: HostClipboardProvider = {
+	readFilePaths: async () => null,
+	readImage: async () => null,
+	readText: async () => null,
+};
 
 function resolveTheme(input: "dark" | "light" | Theme | undefined): Theme {
 	if (!input || input === "dark") return createDarkTheme();
@@ -150,6 +163,14 @@ function createFakeKeybindings(): KeybindingsManager {
 export function createExtensionHarness(options: ExtensionHarnessOptions = {}): ExtensionHarness {
 	const tui = new FakeTui({ width: options.width ?? 120, height: options.height ?? 32 });
 	const keybindings = createFakeKeybindings();
+	let ownedClipboard: HostClipboardProvider | undefined;
+	if (options.clipboard) {
+		ownedClipboard = options.clipboard;
+		setHostClipboardProvider(options.clipboard);
+	} else if (!getHostClipboardProvider()) {
+		ownedClipboard = emptyTestClipboard;
+		setHostClipboardProvider(emptyTestClipboard);
+	}
 
 	let currentTheme = resolveTheme(options.theme);
 	let activeTools = [...(options.activeTools ?? ["read", "bash", "edit", "write", "grep", "find", "ls"])];
@@ -527,6 +548,10 @@ export function createExtensionHarness(options: ExtensionHarnessOptions = {}): E
 		async shutdownSession() {
 			await harness.emit("session_shutdown", {});
 			tui.disposeTimers();
+			if (ownedClipboard && getHostClipboardProvider() === ownedClipboard) {
+				setHostClipboardProvider(undefined);
+				ownedClipboard = undefined;
+			}
 		},
 		async runCommand(name, args = "") {
 			const cmd = commands.get(name);
@@ -572,6 +597,10 @@ export function createExtensionHarness(options: ExtensionHarnessOptions = {}): E
 		setEntries(entries, branch) {
 			sessionEntries = [...entries];
 			sessionBranch = [...(branch ?? entries)];
+		},
+		setClipboard(clipboard) {
+			ownedClipboard = clipboard ?? emptyTestClipboard;
+			setHostClipboardProvider(ownedClipboard);
 		},
 		getActiveTools() {
 			return [...activeTools];
