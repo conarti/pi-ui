@@ -19,6 +19,33 @@ interface CodeZone {
 	btnEnd: number;
 }
 
+interface ActiveMarkdownCopyTimer {
+	target: any;
+	timer: ReturnType<typeof setTimeout>;
+}
+
+const MARKDOWN_COPY_TIMERS_KEY = Symbol.for("conarti.pi-ui.markdown-copy-timers.v1");
+
+function getMarkdownCopyTimers(): Set<ActiveMarkdownCopyTimer> {
+	const g = globalThis as Record<symbol, Set<ActiveMarkdownCopyTimer> | undefined>;
+	if (!g[MARKDOWN_COPY_TIMERS_KEY]) {
+		g[MARKDOWN_COPY_TIMERS_KEY] = new Set();
+	}
+	return g[MARKDOWN_COPY_TIMERS_KEY]!;
+}
+
+export function clearMarkdownCopyTimers(): void {
+	const timers = getMarkdownCopyTimers();
+	for (const entry of timers) {
+		clearTimeout(entry.timer);
+		if (entry.target) {
+			entry.target.__conartiCopiedZone = null;
+			entry.target.__conartiCopyTimer = undefined;
+		}
+	}
+	timers.clear();
+}
+
 export function installMarkdownCardsAndHeadings(): void {
 	const proto = Markdown.prototype as any;
 
@@ -194,6 +221,7 @@ export function installMarkdownCardsAndHeadings(): void {
 			const contentWidth = Math.max(1, width - padX * 2);
 			const leftMargin = " ".repeat(padX);
 			const rightMargin = " ".repeat(padX);
+			const isLight = isLightTheme(getActiveGlobalTheme(self?.theme));
 
 			for (const z of zones) {
 				const isCopied = copiedZone === z.id;
@@ -201,10 +229,17 @@ export function installMarkdownCardsAndHeadings(): void {
 				if (!isCopied && !isHovered) continue;
 				if (z.headerRow < 0 || z.headerRow >= out.length) continue;
 
-				const leftHdr = `  ${fgRgb(145, 165, 194, z.lang)}`;
-				const badge = isCopied ? fgRgb(140, 194, 101, "✓ Copied  ") : fgRgb(125, 207, 255, "Copy  ");
+				const leftHdr = `  ${isLight ? fgRgb(51, 65, 85, z.lang) : fgRgb(145, 165, 194, z.lang)}`;
+				const badge = isCopied
+					? isLight
+						? fgRgb(21, 128, 61, "✓ Copied  ")
+						: fgRgb(140, 194, 101, "✓ Copied  ")
+					: isLight
+						? fgRgb(29, 78, 216, "Copy  ")
+						: fgRgb(125, 207, 255, "Copy  ");
 				const gap = " ".repeat(Math.max(1, contentWidth - visibleWidth(leftHdr) - visibleWidth(badge)));
-				const hdrCard = paintSurfaceRow(`${leftHdr}${gap}${badge}`, contentWidth, 42, 52, 68);
+				const hdrBg: [number, number, number] = isLight ? [214, 226, 242] : [42, 52, 68];
+				const hdrCard = paintSurfaceRow(`${leftHdr}${gap}${badge}`, contentWidth, hdrBg[0], hdrBg[1], hdrBg[2]);
 				const full = leftMargin + hdrCard + rightMargin;
 				out[z.headerRow] = full + " ".repeat(Math.max(0, width - visibleWidth(full)));
 			}
@@ -213,8 +248,12 @@ export function installMarkdownCardsAndHeadings(): void {
 				const row0 = out[0] ?? "";
 				const badge =
 					copiedZone === "reply"
-						? bgRgb(32, 54, 42, fgRgb(140, 194, 101, " ✓ Copied "))
-						: bgRgb(38, 49, 68, fgRgb(125, 207, 255, " Copy "));
+						? isLight
+							? bgRgb(220, 242, 228, fgRgb(21, 128, 61, " ✓ Copied "))
+							: bgRgb(32, 54, 42, fgRgb(140, 194, 101, " ✓ Copied "))
+						: isLight
+							? bgRgb(219, 231, 246, fgRgb(29, 78, 216, " Copy "))
+							: bgRgb(38, 49, 68, fgRgb(125, 207, 255, " Copy "));
 				const badgeW = visibleWidth(badge);
 				if (width > badgeW + 12) {
 					const targetCol = width - badgeW - padX;
@@ -274,34 +313,54 @@ export function installMarkdownCardsAndHeadings(): void {
 				return undefined;
 			}
 
-			if (event.type === "click" && event.button === "left") {
-				const hitCode = zones.find(
-					(z) => event.y === z.headerRow && event.x >= z.btnStart && event.x <= z.btnEnd,
-				);
-				if (hitCode) {
-					copyToClipboard(hitCode.raw);
-					self.__conartiCopiedZone = hitCode.id;
-					requestRender();
-					setTimeout(() => {
-						if (self.__conartiCopiedZone === hitCode.id) {
+			const hitCode = zones.find(
+				(z) => event.y === z.headerRow && event.x >= z.btnStart && event.x <= z.btnEnd,
+			);
+			const replyBtn = self.__conartiReplyBtn as { xStart: number; xEnd: number } | undefined;
+			const hitReply = Boolean(
+				event.y === 0 && replyBtn && event.x >= replyBtn.xStart && event.x <= replyBtn.xEnd,
+			);
+
+			if (event.type === "press" && event.button === "left" && (hitCode || hitReply)) {
+				return { handled: true, render: false };
+			}
+
+			const armCopiedReset = (zoneId: string) => {
+				self.__conartiCopiedZone = zoneId;
+				const timers = getMarkdownCopyTimers();
+				if (self.__conartiCopyTimer) {
+					clearTimeout(self.__conartiCopyTimer.timer);
+					timers.delete(self.__conartiCopyTimer);
+				}
+				requestRender();
+				const entry: ActiveMarkdownCopyTimer = {
+					target: self,
+					timer: setTimeout(() => {
+						timers.delete(entry);
+						if (self.__conartiCopyTimer === entry) {
+							self.__conartiCopyTimer = undefined;
+						}
+						if (self.__conartiCopiedZone === zoneId) {
 							self.__conartiCopiedZone = null;
 							requestRender();
 						}
-					}, 1300).unref?.();
+					}, 1300),
+				};
+				entry.timer.unref?.();
+				self.__conartiCopyTimer = entry;
+				timers.add(entry);
+			};
+
+			if (event.type === "click" && event.button === "left") {
+				if (hitCode) {
+					copyToClipboard(hitCode.raw);
+					armCopiedReset(hitCode.id);
 					return { handled: true, render: true };
 				}
 
-				const replyBtn = self.__conartiReplyBtn as { xStart: number; xEnd: number } | undefined;
-				if (event.y === 0 && replyBtn && event.x >= replyBtn.xStart && event.x <= replyBtn.xEnd) {
+				if (hitReply) {
 					copyToClipboard(String(self.text ?? "").trim());
-					self.__conartiCopiedZone = "reply";
-					requestRender();
-					setTimeout(() => {
-						if (self.__conartiCopiedZone === "reply") {
-							self.__conartiCopiedZone = null;
-							requestRender();
-						}
-					}, 1300).unref?.();
+					armCopiedReset("reply");
 					return { handled: true, render: true };
 				}
 			}

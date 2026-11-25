@@ -824,6 +824,10 @@ export async function createInteractiveHarness(
 				async readFilePaths() {
 					return clipboardState.filePaths ?? null;
 				},
+				writeText(text: string) {
+					clipboardState.text = text;
+					terminal.write(`\x1b]52;c;${Buffer.from(text, "utf8").toString("base64")}\x07`);
+				},
 			};
 
 	setHostClipboardProvider(activeClipboard);

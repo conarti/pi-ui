@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { stopAllAnimations } from "../../shared/animation-scheduler.ts";
 import { clearHoverExcept } from "../../shared/runtime-hooks.ts";
-import { installMarkdownCardsAndHeadings } from "./markdown-cards.ts";
+import { clearMarkdownCopyTimers, installMarkdownCardsAndHeadings } from "./markdown-cards.ts";
 import {
 	clearRecordedThinkingTimings,
 	installAssistantTranscriptBlocks,
@@ -60,6 +60,7 @@ export function registerTranscriptFeature(pi: ExtensionAPI): void {
 		clearRecordedThinkingTimings();
 		clearPendingUserMessageTimestamps();
 		clearUserPromptCopyTimers();
+		clearMarkdownCopyTimers();
 		clearHoverExcept(undefined);
 	});
 }

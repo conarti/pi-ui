@@ -362,6 +362,10 @@ export class ThinkingBlock implements Component {
 			}
 			return undefined;
 		}
+		/* Перехватываем press на строке заголовка, чтобы быстрый повторный клик (<500мс) не запускал выделение слова в TuiAltScreen */
+		if (event.type === "press" && event.button === "left" && (!this.isExpanded || event.y === 0)) {
+			return { handled: true, render: false };
+		}
 		if (event.type === "click" && event.button === "left") {
 			this.onToggle();
 			return { handled: true, render: true };

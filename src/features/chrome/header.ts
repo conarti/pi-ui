@@ -79,15 +79,19 @@ export function mountSessionHeader(pi: ExtensionAPI, ctx: ExtensionContext): voi
 					return undefined;
 				}
 				if (
-					event.type === "click" &&
 					event.button === "left" &&
 					menuHit &&
 					event.y === 0 &&
 					event.x >= menuHit.xStart &&
 					event.x <= menuHit.xEnd
 				) {
-					menuHit.onClick();
-					return { handled: true };
+					if (event.type === "press") {
+						return { handled: true, render: false };
+					}
+					if (event.type === "click") {
+						menuHit.onClick();
+						return { handled: true };
+					}
 				}
 				return undefined;
 			},

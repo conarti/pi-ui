@@ -39,11 +39,6 @@ export interface TerminalScreenSnapshot {
 	findText(needle: string): { row: number; col: number } | undefined;
 }
 
-export interface ViewportRenderableTarget {
-	readonly terminal: { readonly columns: number; readonly rows: number };
-	renderViewport(width?: number, height?: number): string[];
-}
-
 export interface FrameRenderableTarget {
 	readonly width: number;
 	readonly height: number;
@@ -399,19 +394,10 @@ export function parseTerminalFrame(lines: string[], explicitWidth?: number): Ter
 	};
 }
 
-export type CapturableTerminalTarget =
-	| FrameRenderableTarget
-	| ViewportRenderableTarget
-	| TUI;
+export type CapturableTerminalTarget = FrameRenderableTarget | TUI;
 
 function isFrameRenderableTarget(target: CapturableTerminalTarget): target is FrameRenderableTarget {
 	return typeof (target as FrameRenderableTarget).renderFrame === "function";
-}
-
-function isViewportRenderableTarget(
-	target: CapturableTerminalTarget,
-): target is ViewportRenderableTarget {
-	return typeof (target as ViewportRenderableTarget).renderViewport === "function";
 }
 
 export function captureTerminalScreen(
@@ -423,12 +409,6 @@ export function captureTerminalScreen(
 		const width = explicitWidth ?? target.width;
 		const height = explicitHeight ?? target.height;
 		return parseTerminalFrame(target.renderFrame(width, height), width);
-	}
-
-	if (isViewportRenderableTarget(target)) {
-		const width = explicitWidth ?? target.terminal.columns;
-		const height = explicitHeight ?? target.terminal.rows;
-		return parseTerminalFrame(target.renderViewport(width, height), width);
 	}
 
 	const tui = target as TUI & {

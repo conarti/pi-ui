@@ -1,6 +1,6 @@
 # Coding Standards
 
-Review-stage conventions for `@conarti/pi-ui`. Mechanical invariants (peer isolation, file naming, single-line comment checks, commit trailers, and TypeScript types) are enforced automatically by `npm run check`.
+Review-stage conventions for `@conarti/pi-ui`. Mechanical invariants (peer isolation, file naming, single-line comment checks, real-host anti-mock test rules, commit trailers, and TypeScript types) are enforced automatically by `npm run check`.
 
 ## Domain Naming
 
@@ -21,3 +21,9 @@ Review-stage conventions for `@conarti/pi-ui`. Mechanical invariants (peer isola
 
 - Expose explicit public methods on custom TUI components (such as coordinate or hit-test helpers on `PiUiComposerEditor`) rather than reading inherited private `Editor` fields from feature modules.
 - Derive surface, border, pill, and animation colors from adaptive light/dark blue-slate theme tokens and RGB helpers, supporting both `truecolor` and `256color` terminals without purple or magenta accents.
+
+## Real-Host Integration Testing (`ADR-0006`)
+
+- Boot Pi's real `InteractiveMode`, `createAgentSessionRuntime`, real package themes (`midnight-cobalt` / `one-blue-light`), and `registerFauxProvider` via `tests/harness/interactive-harness.ts` for all UI and extension integration suites, substituting only process-edge ports (`VirtualTerminal`, `fauxProvider` streams, per-test temp `cwd`/`agentDir`, and `HostClipboardProvider`).
+- Drive UI interactions through outer terminal/session inputs (keyboard sequences, bracketed pastes, SGR mouse sequences, slash commands) and assert on parsed `TerminalScreen` snapshots (`harness.screen()`) and public session/disk state. Reserve direct unit tests (`loadPackageThemes()` when a `Theme` is needed) strictly for pure combinatorial modules.
+- Never introduce hand-rolled host doubles, `as unknown as TUI` / `.asTui()` casts, private `.overlayStack` inspection, direct component `.handleMouse(...)` calls in integration suites, or production test-adapter backdoors (`setHostRuntimeAdapter`). `scripts/check-standards.mjs` fails `npm run lint` automatically on any violation.
