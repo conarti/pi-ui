@@ -1,275 +1,261 @@
-import { stripTerminalSequences, type Component, type TuiMouseEvent } from "@earendil-works/pi-tui";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import conartiPiUi from "../src/index.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { defineTool, SessionManager } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import { getActiveComposerEditor } from "../src/features/chrome/composer.ts";
+import { hasBlockingModalOverlay } from "../src/shared/modal-card.ts";
 import { getSessionWorkflow } from "../src/shared/session-workflow.ts";
 import { requestRender, runAppAction } from "../src/shared/ui-action-bridge.ts";
-import { createExtensionHarness, type ExtensionHarness } from "./harness/index.ts";
+import {
+	contentText,
+	createInteractiveHarness,
+	fauxAssistantMessage,
+	type InteractiveHarness,
+} from "./harness/index.ts";
 
-function leftClick(x: number, y: number): TuiMouseEvent {
-	return { type: "click", button: "left", x, y } as unknown as TuiMouseEvent;
+function getLatestPersistedState(harness: InteractiveHarness): Record<string, unknown> | undefined {
+	const entries = harness.sessionManager.getEntries();
+	for (let i = entries.length - 1; i >= 0; i -= 1) {
+		const entry = entries[i] as { type?: string; customType?: string; data?: Record<string, unknown> };
+		if (entry.type === "custom" && entry.customType === "conarti-ui-state") {
+			return entry.data;
+		}
+	}
+	return undefined;
 }
 
-function mountWidgetComponent(harness: ExtensionHarness, name: string): Component {
-	const factory = harness.widgets.get(name) as ((tui: unknown, theme: unknown) => Component) | undefined;
-	if (!factory) throw new Error(`Widget "${name}" is not mounted`);
-	return factory(harness.tui, harness.ctx.ui.theme);
+async function openSlashWithoutWaiting(harness: InteractiveHarness, cmd: string): Promise<void> {
+	await harness.paste(cmd, true);
+	await harness.pressKey("\r");
+	await harness.flush();
 }
 
-async function flushMicrotasks(): Promise<void> {
-	await new Promise((resolve) => setTimeout(resolve, 0));
-}
+describe("Session Workflow on real InteractiveMode", () => {
+	let harness: InteractiveHarness | undefined;
+	const tempDirs: string[] = [];
 
-function findTextX(line: string, needle: string): number {
-	const plain = stripTerminalSequences(line);
-	const idx = plain.indexOf(needle);
-	if (idx < 0) throw new Error(`Text "${needle}" not found in "${plain}"`);
-	return idx;
-}
-
-function assistantMessage(text: string, stopReason = "stop") {
-	return {
-		role: "assistant",
-		stopReason,
-		content: [{ type: "text", text }],
-	};
-}
-
-function getLatestPersistedState(harness: ExtensionHarness): Record<string, any> | undefined {
-	const entry = [...harness.appendedEntries]
-		.reverse()
-		.find((e) => e.customType === "conarti-ui-state");
-	return entry?.data as Record<string, any> | undefined;
-}
-
-describe("Session Workflow via extension harness", () => {
-	let harness: ExtensionHarness | undefined;
+	function createTempDir(): string {
+		const dir = mkdtempSync(join(tmpdir(), "pi-ui-workflow-"));
+		tempDirs.push(dir);
+		return dir;
+	}
 
 	afterEach(async () => {
 		if (harness) {
-			await harness.shutdownSession();
+			await harness.dispose();
 			harness = undefined;
+		}
+		while (tempDirs.length > 0) {
+			rmSync(tempDirs.pop()!, { recursive: true, force: true });
 		}
 	});
 
 	it("restores only withheld write tools when exiting Plan mode without overwriting mid-session tool changes", async () => {
-		harness = createExtensionHarness({
-			activeTools: ["read", "bash", "edit", "write", "grep"],
+		const mcpSearch = defineTool({
+			name: "mcp_search",
+			label: "MCP Search",
+			description: "Search tool",
+			parameters: Type.Object({}),
+			async execute() {
+				return { content: [], details: {} };
+			},
 		});
-		harness.mount(conartiPiUi);
-		await harness.startSession();
 
-		// Enter Plan mode: strips only edit and write
-		await harness.runCommand("mode", "plan");
-		expect(harness.getActiveTools()).toEqual(["read", "bash", "grep"]);
+		harness = await createInteractiveHarness({
+			tools: ["+grep"],
+			customTools: [mcpSearch],
+		});
+		harness.session.setActiveToolsByName(["read", "bash", "edit", "write", "grep"]);
+		expect(harness.session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write", "grep"]);
 
-		// Mid-session while in Plan mode: user activates mcp_search and deactivates grep
-		harness.pi.setActiveTools(["read", "bash", "mcp_search"]);
+		await harness.submitInput("/mode plan");
+		expect(harness.session.getActiveToolNames()).toEqual(["read", "bash", "grep"]);
 
-		// Exit Plan mode into Code: restores only edit and write alongside current tools
-		await harness.runCommand("mode", "code");
-		expect(harness.getActiveTools()).toEqual(["read", "bash", "mcp_search", "edit", "write"]);
+		harness.session.setActiveToolsByName(["read", "bash", "mcp_search"]);
+
+		await harness.submitInput("/mode code");
+		expect(harness.session.getActiveToolNames()).toEqual([
+			"read",
+			"bash",
+			"mcp_search",
+			"edit",
+			"write",
+		]);
 	});
 
 	it("restores only the subset of write tools that were active before Plan mode, including when exiting into Auto-Safe", async () => {
-		harness = createExtensionHarness({
-			activeTools: ["read", "bash", "edit"],
+		harness = await createInteractiveHarness({
+			tools: ["-write", "+find"],
 		});
-		harness.mount(conartiPiUi);
-		await harness.startSession();
+		expect(harness.session.getActiveToolNames()).toEqual([
+			"read",
+			"bash",
+			"edit",
+			"find",
+			"ask_user_question",
+		]);
 
-		await harness.runCommand("mode", "plan");
-		expect(harness.getActiveTools()).toEqual(["read", "bash"]);
+		await harness.submitInput("/mode plan");
+		expect(harness.session.getActiveToolNames()).toEqual(["read", "bash", "find", "ask_user_question"]);
 
-		// Activate another tool mid-session
-		harness.pi.setActiveTools(["read", "bash", "find"]);
+		harness.session.setActiveToolsByName(["read", "bash"]);
 
-		// Exit Plan mode directly into Auto-Safe: only edit (not write) is restored
-		await harness.runCommand("mode", "safe");
-		expect(harness.getActiveTools()).toEqual(["read", "bash", "find", "edit"]);
+		await harness.submitInput("/mode safe");
+		expect(harness.session.getActiveToolNames()).toEqual(["read", "bash", "edit"]);
 	});
 
-	it("tracks and restores write tools when session starts with --plan flag or reloads while already in Plan mode", async () => {
-		// 1. Start session directly with --plan flag
-		harness = createExtensionHarness({
+	it("tracks and restores write tools across --plan startup flag, /reload, persisted conarti-ui-state, and legacy grok-ui-state", async () => {
+		const extraTool = defineTool({
+			name: "mcp_docs",
+			label: "MCP Docs",
+			description: "Docs lookup",
+			parameters: Type.Object({}),
+			async execute() {
+				return { content: [], details: {} };
+			},
+		});
+
+		/* 1. Запуск напрямую с флагом --plan + /reload */
+		harness = await createInteractiveHarness({
 			flags: { plan: true },
-			activeTools: ["read", "bash", "edit", "write", "grep"],
+			tools: ["+grep"],
+			customTools: [extraTool],
 		});
-		harness.mount(conartiPiUi);
-		await harness.startSession();
+		expect(harness.session.getActiveToolNames()).toEqual([
+			"read",
+			"bash",
+			"grep",
+			"ask_user_question",
+			"mcp_docs",
+		]);
 
-		expect(harness.getActiveTools()).toEqual(["read", "bash", "grep"]);
+		await harness.reload();
+		expect(harness.session.getActiveToolNames()).toEqual([
+			"read",
+			"bash",
+			"grep",
+			"ask_user_question",
+			"mcp_docs",
+		]);
 
-		// Mid-session tool change while in Plan mode
-		harness.pi.setActiveTools(["read", "bash", "custom_tool"]);
+		harness.session.setActiveToolsByName(["read", "bash", "mcp_docs"]);
+		await harness.submitInput("/mode code");
+		expect(harness.session.getActiveToolNames()).toEqual([
+			"read",
+			"bash",
+			"mcp_docs",
+			"edit",
+			"write",
+		]);
+		await harness.dispose();
+		harness = undefined;
 
-		// Persist state by switching/saving or check persisted entries from startup?
-		// Exit Plan mode -> restores edit and write while keeping custom_tool
-		await harness.runCommand("mode", "code");
-		expect(harness.getActiveTools()).toEqual(["read", "bash", "custom_tool", "edit", "write"]);
-
-		await harness.shutdownSession();
-
-		// 1b. Fresh --plan start followed immediately by /reload (with persisted entries carried over)
-		harness = createExtensionHarness({
-			flags: { plan: true },
-			activeTools: ["read", "bash", "edit", "write", "grep"],
+		/* 2. Восстановление сессии в режиме Plan из conarti-ui-state, когда активные тулы уже без edit/write */
+		harness = await createInteractiveHarness({
+			tools: ["-edit", "-write"],
+			customTools: [extraTool],
+			setupSession(sm) {
+				sm.appendCustomEntry("conarti-ui-state", {
+					mode: "plan",
+					planRaw: "",
+					planComments: {},
+					planSteps: [],
+					executingPlan: false,
+					withheldWriteTools: ["edit", "write"],
+				});
+			},
 		});
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-		expect(harness.getActiveTools()).toEqual(["read", "bash", "grep"]);
+		harness.session.setActiveToolsByName(["read", "bash", "mcp_docs"]);
+		await harness.submitInput("/mode code");
+		expect(harness.session.getActiveToolNames()).toEqual([
+			"read",
+			"bash",
+			"mcp_docs",
+			"edit",
+			"write",
+		]);
+		await harness.dispose();
+		harness = undefined;
 
-		const reloadEntries = harness.ctx.sessionManager.getEntries();
-		const reloadActiveTools = harness.getActiveTools();
-		await harness.emit("session_shutdown", { reason: "reload" });
-
-		harness = createExtensionHarness({
-			flags: { plan: true },
-			activeTools: reloadActiveTools,
-			entries: reloadEntries,
+		/* 3. Восстановление legacy grok-ui-state без поля withheldWriteTools */
+		harness = await createInteractiveHarness({
+			tools: ["-edit", "-write"],
+			setupSession(sm) {
+				sm.appendCustomEntry("grok-ui-state", {
+					mode: "plan",
+					planRaw: "",
+					planComments: {},
+					planSteps: [],
+					executingPlan: false,
+				});
+			},
 		});
-		harness.mount(conartiPiUi);
-		await harness.emit("session_start", { reason: "reload" });
-
-		// Mid-session tool change after reload while still in Plan mode
-		harness.pi.setActiveTools(["read", "bash", "mcp_docs"]);
-		await harness.runCommand("mode", "code");
-		expect(harness.getActiveTools()).toEqual(["read", "bash", "mcp_docs", "edit", "write"]);
-
-		await harness.shutdownSession();
-
-		// 1c. Reload with --plan set and NO persisted entries (activeTools already lack edit/write)
-		harness = createExtensionHarness({
-			flags: { plan: true },
-			activeTools: ["read", "bash", "mcp_docs"],
-			entries: [],
-		});
-		harness.mount(conartiPiUi);
-		await harness.emit("session_start", { reason: "reload" });
-
-		await harness.runCommand("mode", "code");
-		expect(harness.getActiveTools()).toEqual(["read", "bash", "mcp_docs", "edit", "write"]);
-
-		await harness.shutdownSession();
-
-		// 2. Reload a session whose persisted state is already in Plan mode AND host activeTools already lack edit/write
-		harness = createExtensionHarness({
-			activeTools: ["read", "bash", "mcp_docs"],
-			entries: [
-				{
-					type: "custom",
-					customType: "conarti-ui-state",
-					data: {
-						mode: "plan",
-						planRaw: "",
-						planComments: {},
-						planSteps: [],
-						executingPlan: false,
-						withheldWriteTools: ["edit", "write"],
-					},
-				},
-			],
-		});
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-
-		expect(harness.getActiveTools()).toEqual(["read", "bash", "mcp_docs"]);
-
-		await harness.runCommand("mode", "code");
-		expect(harness.getActiveTools()).toEqual(["read", "bash", "mcp_docs", "edit", "write"]);
-
-		await harness.shutdownSession();
-
-		// 3. Reload a legacy session in Plan mode (no withheldWriteTools field) where activeTools already lack write tools
-		harness = createExtensionHarness({
-			activeTools: ["read", "bash"],
-			entries: [
-				{
-					type: "custom",
-					customType: "grok-ui-state",
-					data: {
-						mode: "plan",
-						planRaw: "",
-						planComments: {},
-						planSteps: [],
-						executingPlan: false,
-					},
-				},
-			],
-		});
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-
-		expect(harness.getActiveTools()).toEqual(["read", "bash"]);
-
-		await harness.runCommand("mode", "safe");
-		expect(harness.getActiveTools()).toEqual(["read", "bash", "edit", "write"]);
+		expect(harness.session.getActiveToolNames()).toEqual(["read", "bash", "ask_user_question"]);
+		await harness.submitInput("/mode safe");
+		expect(harness.session.getActiveToolNames()).toEqual([
+			"read",
+			"bash",
+			"ask_user_question",
+			"edit",
+			"write",
+		]);
 	});
 
 	it("automatically clears pre-existing line-pinned comments when a new Plan is generated in Plan mode", async () => {
-		harness = createExtensionHarness({ width: 100, height: 32 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-
-		// Enter Plan mode and receive Plan #1
-		await harness.runCommand("mode", "plan");
-		await harness.emit("agent_end", {
-			messages: [
-				assistantMessage("# Plan 1\n1. Inspect schema\n2. Update API"),
+		harness = await createInteractiveHarness({
+			width: 100,
+			height: 32,
+			responses: [
+				fauxAssistantMessage("# Plan 1\n1. Inspect schema\n2. Update API"),
+				fauxAssistantMessage("# Plan 2\n1. Completely different step A\n2. Step B"),
 			],
 		});
 
-		// Plan Studio auto-opens on stopReason === "stop"; add a line-pinned comment on line 1 (index 1)
-		expect(harness.activeCustomModal).toBeDefined();
-		const studio1 = harness.activeCustomModal!.component;
-		studio1.handleInput?.("j"); // move to line 2 ("1. Inspect schema")
-		studio1.handleInput?.("\r"); // start comment edit
-		studio1.handleInput?.("Check nullability");
-		studio1.handleInput?.("\r"); // save comment
-		studio1.handleInput?.("\x1b"); // close Plan Studio
+		await harness.submitInput("/mode plan");
+		await harness.submitInput("Generate first plan");
 
-		expect(harness.activeCustomModal).toBeUndefined();
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
+		await harness.pressKey("j");
+		await harness.pressKey("\r");
+		await harness.typeText("Check nullability");
+		await harness.pressKey("\r");
+		await harness.pressKey("\x1b");
+
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 		expect(getLatestPersistedState(harness)?.planComments).toEqual({ 1: "Check nullability" });
 
-		// Receive newly generated Plan #2 in Plan mode
-		await harness.emit("agent_end", {
-			messages: [
-				assistantMessage("# Plan 2\n1. Completely different step A\n2. Step B"),
-			],
-		});
+		await harness.submitInput("Generate replacement plan");
 
-		// Persisted state and newly opened Plan Studio must have 0 stale comments
 		const saved = getLatestPersistedState(harness);
-		expect(saved?.planRaw).toContain("Completely different step A");
+		expect(String(saved?.planRaw ?? "")).toContain("Completely different step A");
 		expect(saved?.planComments).toEqual({});
 
-		expect(harness.activeCustomModal).toBeDefined();
-		const rendered = stripTerminalSequences(harness.activeCustomModal!.component.render(100).join("\n"));
-		expect(rendered).toContain("Completely different step A");
-		expect(rendered).not.toContain("Check nullability");
-
-		harness.activeCustomModal!.done("close");
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
+		const studioText = harness.screen().text();
+		expect(studioText).toContain("Completely different step A");
+		expect(studioText).not.toContain("Check nullability");
+		await harness.pressKey("\x1b");
 	});
 
-	it("preserves an unapproved Plan draft and its line-pinned comments across manual Session Mode switches", async () => {
-		harness = createExtensionHarness({ width: 100, height: 32 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-
-		// Generate a plan in Plan mode and pin a comment
-		await harness.runCommand("mode", "plan");
-		await harness.emit("agent_end", {
-			messages: [assistantMessage("# Migration Plan\n1. Extract workflow\n2. Wire commands")],
+	it("preserves an unapproved Plan draft and its line-pinned comments across manual Session Mode switches (/mode and Alt+M)", async () => {
+		harness = await createInteractiveHarness({
+			width: 100,
+			height: 32,
+			responses: [fauxAssistantMessage("# Migration Plan\n1. Extract workflow\n2. Wire commands")],
 		});
 
-		const studio = harness.activeCustomModal!.component;
-		studio.handleInput?.("j");
-		studio.handleInput?.("\r");
-		studio.handleInput?.("Keep legacy restore intact");
-		studio.handleInput?.("\r");
-		studio.handleInput?.("\x1b");
+		await harness.submitInput("/mode plan");
+		await harness.submitInput("Draft migration plan");
 
-		// Switch manually Plan -> Code -> Auto-Safe -> Plan via commands and Alt+M shortcut
-		await harness.runCommand("mode", "code");
+		await harness.pressKey("j");
+		await harness.pressKey("\r");
+		await harness.typeText("Keep legacy restore intact");
+		await harness.pressKey("\r");
+		await harness.pressKey("\x1b");
+
+		await harness.submitInput("/mode code");
 		expect(getLatestPersistedState(harness)).toMatchObject({
 			mode: "code",
 			planRaw: "# Migration Plan\n1. Extract workflow\n2. Wire commands",
@@ -277,7 +263,7 @@ describe("Session Workflow via extension harness", () => {
 			executingPlan: false,
 		});
 
-		await harness.runCommand("mode", "safe");
+		await harness.submitInput("/mode safe");
 		expect(getLatestPersistedState(harness)).toMatchObject({
 			mode: "safe",
 			planRaw: "# Migration Plan\n1. Extract workflow\n2. Wire commands",
@@ -285,9 +271,9 @@ describe("Session Workflow via extension harness", () => {
 			executingPlan: false,
 		});
 
-		// Cycle Safe -> Code -> Plan using Alt+M
-		await harness.triggerShortcut("alt+m"); // safe -> code
-		await harness.triggerShortcut("alt+m"); // code -> plan
+		/* Переключаем Safe -> Code -> Plan по шорткату Alt+M */
+		await harness.pressKey("\x1bm");
+		await harness.pressKey("\x1bm");
 		expect(getLatestPersistedState(harness)).toMatchObject({
 			mode: "plan",
 			planRaw: "# Migration Plan\n1. Extract workflow\n2. Wire commands",
@@ -295,59 +281,65 @@ describe("Session Workflow via extension harness", () => {
 			executingPlan: false,
 		});
 
-		// Opening Plan Studio still renders the preserved draft and comment
-		const openPromise = harness.runCommand("plan", "review");
-		expect(harness.activeCustomModal).toBeDefined();
-		const rendered = stripTerminalSequences(harness.activeCustomModal!.component.render(100).join("\n"));
-		expect(rendered).toContain("Extract workflow");
-		expect(rendered).toContain("Keep legacy restore intact");
-		harness.activeCustomModal!.done("close");
-		await openPromise;
+		await openSlashWithoutWaiting(harness, "/plan review");
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
+		expect(harness.screen().text()).toContain("Extract workflow");
+		expect(harness.screen().text()).toContain("Keep legacy restore intact");
+		await harness.pressKey("\x1b");
 	});
 
-	it("atomically resets Plan text, lines, steps, comments, and execution tracking when dismissing the banner or running /plan clear", async () => {
-		harness = createExtensionHarness({ width: 100, height: 32 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-
-		// 1. Dismissing the draft Plan banner in Code mode
-		await harness.runCommand("mode", "plan");
-		await harness.emit("agent_end", {
-			messages: [assistantMessage("1. Build module\n2. Add tests")],
+	it("atomically resets Plan text, lines, steps, comments, and execution context when clicking banner dismiss pills or running /plan clear", async () => {
+		harness = await createInteractiveHarness({
+			width: 110,
+			height: 34,
+			responses: [
+				fauxAssistantMessage("1. Build module\n2. Add tests"),
+				fauxAssistantMessage("1. Step one\n2. Step two"),
+				fauxAssistantMessage("Started step one."),
+				fauxAssistantMessage("Normal code reply after banner dismiss."),
+				fauxAssistantMessage("1. Alpha\n2. Beta"),
+				fauxAssistantMessage("Started alpha."),
+				fauxAssistantMessage("Normal reply after /plan clear."),
+			],
 		});
-		const studio = harness.activeCustomModal!.component;
-		studio.handleInput?.("\r");
-		studio.handleInput?.("Draft note");
-		studio.handleInput?.("\r");
-		studio.handleInput?.("\x1b");
 
-		await harness.runCommand("mode", "code");
-		const draftWidget = mountWidgetComponent(harness, "conarti-plan");
-		const draftLine = draftWidget.render(100)[0]!;
-		const dismissX = findTextX(draftLine, "✕");
-		draftWidget.handleMouse?.(leftClick(dismissX, 0));
+		/* 1. Скрытие баннера черновика в режиме Code реальным кликом мыши по ✕ */
+		await harness.submitInput("/mode plan");
+		await harness.submitInput("Build draft plan");
+		await harness.pressKey("\r");
+		await harness.typeText("Draft note");
+		await harness.pressKey("\r");
+		await harness.pressKey("\x1b");
 
+		await harness.submitInput("/mode code");
+		const draftScreen = harness.screen();
+		const openBannerPos = draftScreen.findText("Открыть план");
+		expect(openBannerPos).toBeDefined();
+		const bannerRow = draftScreen.rowText(openBannerPos!.row);
+		const dismissCol = bannerRow.lastIndexOf("✕");
+		expect(dismissCol).toBeGreaterThan(openBannerPos!.col);
+
+		await harness.mouseClick(dismissCol, openBannerPos!.row);
 		expect(getLatestPersistedState(harness)).toMatchObject({
 			planRaw: "",
 			planComments: {},
 			planSteps: [],
 			executingPlan: false,
 		});
-		expect(harness.widgets.has("conarti-plan")).toBe(false);
+		expect(harness.screen().text()).not.toContain("Открыть план");
 
-		// 2. Dismissing the executing Plan banner ("✕ Скрыть")
-		await harness.runCommand("mode", "plan");
-		await harness.emit("agent_end", {
-			messages: [assistantMessage("1. Step one\n2. Step two")],
-		});
-		harness.activeCustomModal!.done("approve");
-		await flushMicrotasks();
+		/* 2. Скрытие баннера активного выполнения ("✕ Скрыть") очищает контекст выполнения */
+		await harness.submitInput("/mode plan");
+		await harness.submitInput("Generate executable plan");
+		await harness.pressKey("a");
+		await harness.flush();
+		await new Promise((r) => setTimeout(r, 30));
+		await harness.flush();
 
 		expect(getLatestPersistedState(harness)?.executingPlan).toBe(true);
-		const execWidget = mountWidgetComponent(harness, "conarti-plan");
-		const execLine = execWidget.render(100)[0]!;
-		const clearX = findTextX(execLine, "Скрыть");
-		execWidget.handleMouse?.(leftClick(clearX, 0));
+		const hidePos = harness.screen().findText("Скрыть");
+		expect(hidePos).toBeDefined();
+		await harness.mouseClick(hidePos!.col + 1, hidePos!.row);
 
 		expect(getLatestPersistedState(harness)).toMatchObject({
 			planRaw: "",
@@ -355,173 +347,170 @@ describe("Session Workflow via extension harness", () => {
 			planSteps: [],
 			executingPlan: false,
 		});
-		expect(harness.widgets.has("conarti-plan")).toBe(false);
+		expect(harness.screen().text()).not.toContain("План 0/2");
 
-		// before_agent_start must not inject stale execution context
-		const beforeStartResults = await harness.emit("before_agent_start", {});
-		expect(beforeStartResults.filter(Boolean)).toEqual([]);
+		await harness.submitInput("Follow-up after hiding plan");
+		const callAfterHide = harness.calls.at(-1)!;
+		const serializedHideMsgs = JSON.stringify(callAfterHide.messages);
+		expect(serializedHideMsgs).not.toContain("[Выполнение плана]");
 
-		// 3. Running /plan clear during active execution
-		await harness.runCommand("mode", "plan");
-		await harness.emit("agent_end", {
-			messages: [assistantMessage("1. Alpha\n2. Beta")],
-		});
-		harness.activeCustomModal!.done("approve");
-		await flushMicrotasks();
+		/* 3. Команда /plan clear во время выполнения плана */
+		await harness.submitInput("/mode plan");
+		await harness.submitInput("Generate second executable plan");
+		await harness.pressKey("a");
+		await harness.flush();
+		await new Promise((r) => setTimeout(r, 30));
+		await harness.flush();
 
 		expect(getLatestPersistedState(harness)?.executingPlan).toBe(true);
-		await harness.runCommand("plan", "clear");
-
+		await harness.submitInput("/plan clear");
 		expect(getLatestPersistedState(harness)).toMatchObject({
 			planRaw: "",
 			planComments: {},
 			planSteps: [],
 			executingPlan: false,
 		});
-		expect(harness.widgets.has("conarti-plan")).toBe(false);
-		const afterClearResults = await harness.emit("before_agent_start", {});
-		expect(afterClearResults.filter(Boolean)).toEqual([]);
+
+		await harness.submitInput("Follow-up after /plan clear");
+		const callAfterClear = harness.calls.at(-1)!;
+		expect(JSON.stringify(callAfterClear.messages)).not.toContain("[Выполнение плана]");
 	});
 
-	it("approves a Plan into execution, tracks [DONE:N] step completion, and persists/restores across session restarts including legacy grok-ui-state", async () => {
-		harness = createExtensionHarness({
-			activeTools: ["read", "bash", "edit", "write"],
-			width: 100,
-			height: 32,
+	it("approves a Plan into execution, tracks [DONE:N] / [done:N] completion, and persists/restores across disk restarts and legacy grok-ui-state", async () => {
+		const projectDir = createTempDir();
+		const agentDir = createTempDir();
+
+		harness = await createInteractiveHarness({
+			cwd: projectDir,
+			agentDir,
+			persistSession: true,
+			width: 110,
+			height: 34,
+			responses: [
+				fauxAssistantMessage("1. Implement parser\n2. Add integration tests"),
+				fauxAssistantMessage("Implemented parser. [DONE:1]"),
+			],
 		});
-		harness.mount(conartiPiUi);
-		await harness.startSession();
 
-		// Enter Plan mode, generate 2-step plan, add a line comment, and approve
-		await harness.runCommand("mode", "plan");
-		expect(harness.getActiveTools()).toEqual(["read", "bash"]);
+		await harness.submitInput("/mode plan");
+		expect(harness.session.getActiveToolNames()).toEqual(["read", "bash", "ask_user_question"]);
 
-		await harness.emit("agent_end", {
-			messages: [assistantMessage("1. Implement parser\n2. Add integration tests")],
-		});
+		await harness.submitInput("Plan parser work");
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
 
-		const studio = harness.activeCustomModal!.component;
-		studio.handleInput?.("\r");
-		studio.handleInput?.("Handle empty input");
-		studio.handleInput?.("\r");
-		studio.handleInput?.("a"); // approve shortcut
-		await flushMicrotasks();
+		/* Прикрепляем комментарий к шагу 1 и утверждаем план клавишей 'a' */
+		await harness.pressKey("\r");
+		await harness.typeText("Handle empty input");
+		await harness.pressKey("\r");
+		await harness.pressKey("a");
 
-		// Transitions cleanly to Code mode, restores write tools, clears comments, sends user message
-		expect(harness.getActiveTools()).toEqual(["read", "bash", "edit", "write"]);
-		expect(harness.sentUserMessages).toHaveLength(1);
-		expect(String(harness.sentUserMessages[0]!.content)).toContain("Handle empty input");
-		expect(String(harness.sentUserMessages[0]!.content)).toContain("[DONE:n]");
+		/* Дожидаемся завершения автоматически отправленного хода выполнения (Implemented parser. [DONE:1]) */
+		const deadline = Date.now() + 3000;
+		while (Date.now() < deadline && harness.calls.length < 2) {
+			await new Promise((r) => setTimeout(r, 10));
+		}
+		await harness.flush();
+
+		expect(harness.session.getActiveToolNames()).toEqual([
+			"read",
+			"bash",
+			"ask_user_question",
+			"edit",
+			"write",
+		]);
+		const allCall1Text = harness.calls[1]!.messages
+			.map((m) => (typeof m.content === "string" ? m.content : contentText(m.content)))
+			.join("\n");
+		expect(allCall1Text).toContain("Handle empty input");
+		expect(allCall1Text).toContain("[DONE:n]");
 
 		expect(getLatestPersistedState(harness)).toMatchObject({
 			mode: "code",
 			executingPlan: true,
 			planComments: {},
 			planSteps: [
-				{ step: 1, text: "Implement parser", completed: false },
+				{ step: 1, text: "Implement parser", completed: true },
 				{ step: 2, text: "Add integration tests", completed: false },
 			],
 		});
 
-		// Turn 1 completes step 1 via [DONE:1]
-		await harness.emit("turn_end", {
-			message: assistantMessage("Implemented parser. [DONE:1]"),
+		const sessionFile = harness.session.sessionFile!;
+		expect(sessionFile).toBeTruthy();
+		await harness.dispose();
+		harness = undefined;
+
+		/* Переоткрываем сохранённый на диске JSONL-файл сессии в новом экземпляре InteractiveMode */
+		harness = await createInteractiveHarness({
+			cwd: projectDir,
+			agentDir,
+			sessionManager: SessionManager.open(sessionFile),
+			width: 110,
+			height: 34,
+			responses: [fauxAssistantMessage("Tests green. [done:2]")],
 		});
-		expect(getLatestPersistedState(harness)?.planSteps).toEqual([
-			{ step: 1, text: "Implement parser", completed: true },
-			{ step: 2, text: "Add integration tests", completed: false },
-		]);
 
-		// Restart session with persisted entries -> restores mode, plan, and step 1 completion accurately
-		const persistedEntries = harness.ctx.sessionManager.getEntries();
-		await harness.shutdownSession();
+		expect(harness.screen().text()).toContain("План 1/2");
 
-		harness = createExtensionHarness({
-			entries: persistedEntries,
-			activeTools: ["read", "bash", "edit", "write"],
-			width: 100,
-			height: 32,
-		});
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-
-		const restoredWidget = mountWidgetComponent(harness, "conarti-plan");
-		expect(stripTerminalSequences(restoredWidget.render(100)[0]!)).toContain("План 1/2");
-
-		// Agent finishes step 2 via [done:2] -> notifies completion
-		await harness.emit("agent_end", {
-			messages: [assistantMessage("Tests green. [done:2]")],
-		});
+		await harness.submitInput("Finish step 2");
 		expect(getLatestPersistedState(harness)?.planSteps).toEqual([
 			{ step: 1, text: "Implement parser", completed: true },
 			{ step: 2, text: "Add integration tests", completed: true },
 		]);
-		expect(harness.notifications.some((n) => n.message.includes("Все шаги плана выполнены"))).toBe(true);
+		expect(harness.screen().text()).toContain("Все шаги плана выполнены");
 
-		await harness.shutdownSession();
+		await harness.dispose();
+		harness = undefined;
 
-		// Legacy "grok-ui-state" entry restores cleanly across restarts
-		harness = createExtensionHarness({
-			entries: [
-				{
-					type: "custom",
-					customType: "grok-ui-state",
-					data: {
-						mode: "safe",
-						planRaw: "1. Legacy step",
-						planComments: { 0: "Legacy note" },
-						planSteps: [{ step: 1, text: "Legacy step", completed: false }],
-						executingPlan: false,
-					},
-				},
-			],
+		/* Восстановление плана и комментариев из legacy-записи grok-ui-state */
+		harness = await createInteractiveHarness({
 			width: 100,
 			height: 32,
+			setupSession(sm) {
+				sm.appendCustomEntry("grok-ui-state", {
+					mode: "safe",
+					planRaw: "1. Legacy step",
+					planComments: { 0: "Legacy note" },
+					planSteps: [{ step: 1, text: "Legacy step", completed: false }],
+					executingPlan: false,
+				});
+			},
 		});
-		harness.mount(conartiPiUi);
-		await harness.startSession();
 
-		const openPromise = harness.runCommand("plan", "review");
-		expect(harness.activeCustomModal).toBeDefined();
-		const rendered = stripTerminalSequences(harness.activeCustomModal!.component.render(100).join("\n"));
-		expect(rendered).toContain("Legacy step");
-		expect(rendered).toContain("Legacy note");
-		harness.activeCustomModal!.done("close");
-		await openPromise;
+		await openSlashWithoutWaiting(harness, "/plan review");
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
+		const legacyScreen = harness.screen().text();
+		expect(legacyScreen).toContain("Legacy step");
+		expect(legacyScreen).toContain("Legacy note");
+		await harness.pressKey("\x1b");
 	});
 
-	it("decouples UI action callbacks into the UI Action Bridge and removes dead global callback fields from SessionWorkflow", async () => {
-		harness = createExtensionHarness({ width: 100, height: 32 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
+	it("decouples UI action callbacks into the UI Action Bridge and resets cleanly on shutdown", async () => {
+		harness = await createInteractiveHarness({ width: 100, height: 32 });
 
-		// SessionWorkflow has no imperative UI callback fields
 		const workflow = getSessionWorkflow() as unknown as Record<string, unknown>;
 		expect("requestRender" in workflow).toBe(false);
 		expect("runAppAction" in workflow).toBe(false);
 		expect("submitPrompt" in workflow).toBe(false);
 		expect("jumpPrompt" in workflow).toBe(false);
 
-		// UI Action Bridge forwards requestRender to host TUI
-		const beforeRenders = harness.tui.renderCount;
+		const writesBefore = harness.terminal.writes.length;
 		requestRender();
-		expect(harness.tui.renderCount).toBeGreaterThan(beforeRenders);
+		harness.flushFrame(true);
+		expect(harness.terminal.writes.length).toBeGreaterThan(writesBefore);
 
-		// UI Action Bridge forwards app actions to the mounted composer editor
-		const actionSpy = vi.fn();
-		const editorAny = harness.editor as unknown as { actionHandlers?: Map<string, () => void> };
-		editorAny.actionHandlers = new Map([["app.model.select", actionSpy]]);
+		const editor = getActiveComposerEditor();
+		expect(editor).toBeDefined();
+		let invoked = 0;
+		editor!.actionHandlers.set("app.model.select", () => {
+			invoked += 1;
+		});
 
 		expect(runAppAction("app.model.select")).toBe(true);
-		expect(actionSpy).toHaveBeenCalledTimes(1);
+		expect(invoked).toBe(1);
 		expect(runAppAction("app.nonexistent")).toBe(false);
 
-		// Shutdown clears the UI Action Bridge cleanly
-		await harness.shutdownSession();
-		expect(runAppAction("app.model.select")).toBe(false);
-		const afterShutdownRenders = harness.tui.renderCount;
-		requestRender();
-		expect(harness.tui.renderCount).toBe(afterShutdownRenders);
+		await harness.dispose();
 		harness = undefined;
+		expect(runAppAction("app.model.select")).toBe(false);
 	});
 });

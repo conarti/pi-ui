@@ -3,6 +3,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { fgRgb, renderPill, type HitBox } from "../../shared/ansi.ts";
+import { claimHover } from "../../shared/runtime-hooks.ts";
 import {
 	extractPlanSteps,
 	getSessionWorkflow,
@@ -100,6 +101,7 @@ export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void 
 	}
 
 	ctx.ui.setWidget("conarti-plan", (_tui, theme) => {
+		const hoverOwner = {};
 		let hovered: string | null = null;
 		let boxes: HitBox[] = [];
 
@@ -203,20 +205,28 @@ export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void 
 				return [truncateToWidth(` ${badge}${info}`, width, "…")];
 			},
 			handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+				const hit = boxes.find((b) => b.y === event.y && event.x >= b.xStart && event.x < b.xEnd);
 				if (event.type === "move") {
-					const hit = boxes.find((b) => b.y === event.y && event.x >= b.xStart && event.x < b.xEnd);
+					claimHover(hoverOwner, () => {
+						if (hovered !== null) {
+							hovered = null;
+							requestRender();
+						}
+					});
 					const next = hit?.id ?? null;
 					if (next !== hovered) {
 						hovered = next;
 						return { handled: true, render: true };
 					}
-					return undefined;
+					return hit ? { handled: true, render: false } : undefined;
+				}
+				if (event.type === "press" && event.button === "left" && hit) {
+					return { handled: true, render: false };
 				}
 				if (event.type === "click" && event.button === "left") {
-					const hit = boxes.find((b) => b.y === event.y && event.x >= b.xStart && event.x < b.xEnd);
 					if (hit) {
 						hit.onClick();
-						return { handled: true };
+						return { handled: true, render: true };
 					}
 				}
 				return undefined;
@@ -319,10 +329,28 @@ export function registerPlanStudioFeature(pi: ExtensionAPI): void {
 
 	pi.on("context", async (event) => {
 		const wf = getSessionWorkflow();
-		if (wf.mode === "plan") return undefined;
-		return {
-			messages: event.messages.filter((m: any) => m.customType !== "conarti-plan-context"),
-		};
+		const keepPlanContext = wf.mode === "plan";
+		const hasActiveExec =
+			wf.executingPlan && wf.planSteps.some((step) => !step.completed);
+		let lastExecIdx = -1;
+		if (hasActiveExec) {
+			for (let i = event.messages.length - 1; i >= 0; i -= 1) {
+				if ((event.messages[i] as { customType?: string }).customType === "conarti-plan-exec-context") {
+					lastExecIdx = i;
+					break;
+				}
+			}
+		}
+		const filtered = event.messages.filter((m, idx) => {
+			const customType = (m as { customType?: string }).customType;
+			if (customType === "conarti-plan-context") return keepPlanContext;
+			if (customType === "conarti-plan-exec-context") {
+				return hasActiveExec && idx === lastExecIdx;
+			}
+			return true;
+		});
+		if (filtered.length === event.messages.length) return undefined;
+		return { messages: filtered };
 	});
 
 	pi.on("turn_end", async (event, ctx) => {

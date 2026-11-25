@@ -1,178 +1,230 @@
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { Container, Markdown, MouseRegion, Spacer, Text, stripTerminalSequences } from "@earendil-works/pi-tui";
+import { renderAnswerOnly } from "../src/features/tool-calls/silent.ts";
+import { stopAllAnimations } from "../src/shared/animation-scheduler.ts";
 import {
-	AssistantMessageComponent,
-	CustomMessageComponent,
-	ToolExecutionComponent,
-	UserMessageComponent,
-	getMarkdownTheme,
-} from "@earendil-works/pi-coding-agent";
-import { Markdown, MouseRegion, Spacer, Text, stripTerminalSequences } from "@earendil-works/pi-tui";
-import conartiPiUi from "../src/index.ts";
-import { createExtensionHarness, type ExtensionHarness } from "./harness/index.ts";
+	createAssistantMessageEventStream,
+	createInteractiveHarness,
+	fauxAssistantMessage,
+	fauxThinking,
+	fauxToolCall,
+	type AssistantMessage,
+	type InteractiveHarness,
+} from "./harness/index.ts";
 
-function renderPlain(component: { render(width: number): readonly string[] }, width = 100): string {
-	return component.render(width).map(stripTerminalSequences).join("\n");
-}
+const ZERO_USAGE = {
+	input: 10,
+	output: 20,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 30,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
 
-function makeAssistantMessage(content: unknown[], extra: Record<string, unknown> = {}) {
-	return {
-		role: "assistant",
-		content,
-		api: "anthropic-messages",
-		provider: "anthropic",
-		model: "claude-sonnet",
-		usage: { input: 10, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 30, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-		stopReason: "stop",
-		timestamp: Date.now(),
-		...extra,
-	} as any;
-}
-
-describe("/silent mode transcript filtering", () => {
-	let harness: ExtensionHarness | undefined;
+describe("/silent mode transcript filtering (real InteractiveMode)", () => {
+	let harness: InteractiveHarness | undefined;
 
 	afterEach(async () => {
 		if (harness) {
-			await harness.runCommand("silent", "off");
-			await harness.shutdownSession();
+			await harness.dispose();
 			harness = undefined;
 		}
+		stopAllAnimations();
 	});
 
-	it("hides custom animated & collapsed ThinkingBlock, native MouseRegion thinking, intermediate turns, tool rows, and notices, then restores them when turned off", async () => {
-		harness = createExtensionHarness({ theme: "dark", width: 100, height: 32 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-
+	it("filters native MouseRegion thinking nodes and trailing spacers in renderAnswerOnly (pure Seam 2)", () => {
 		const mdTheme = getMarkdownTheme();
+		const contentContainer = new Container();
+		contentContainer.addChild(new MouseRegion(new Text("Native thinking label", 1, 0), () => undefined));
+		contentContainer.addChild(new Spacer(1));
+		contentContainer.addChild(new Markdown("Native answer stays visible.", 2, 0, mdTheme));
+		contentContainer.addChild(new Spacer(1));
+		contentContainer.addChild(new Text("Trailing stop notice", 1, 0));
 
-		// 1. User prompt
-		const userPrompt = new UserMessageComponent("Fix the login bug", mdTheme);
+		const fullPlain = contentContainer.render(100).map(stripTerminalSequences).join("\n");
+		expect(fullPlain).toContain("Native thinking label");
+		expect(fullPlain).toContain("Native answer stays visible.");
+		expect(fullPlain).toContain("Trailing stop notice");
 
-		// 2. Intermediate assistant turn with thinking + toolCall
-		const intermediateTurn = new AssistantMessageComponent(
-			makeAssistantMessage([
-				{ type: "thinking", thinking: "Checking auth handler" },
-				{ type: "toolCall", id: "tc-1", name: "read", arguments: { path: "src/auth.ts" } },
-			]),
-			false,
-			mdTheme,
-		);
+		const filteredPlain = renderAnswerOnly(
+			{ contentContainer },
+			100,
+			(w) => contentContainer.render(w),
+		)
+			.map(stripTerminalSequences)
+			.join("\n");
 
-		// 3. Tool execution row
-		const toolRow = new ToolExecutionComponent(
-			"read",
-			"tc-1",
-			{ path: "src/auth.ts" },
-			undefined,
-			undefined,
-			harness.tui.asTui(),
-			harness.ctx.cwd,
-		);
+		expect(filteredPlain).toContain("Native answer stays visible.");
+		expect(filteredPlain).not.toContain("Native thinking label");
+		expect(filteredPlain).not.toContain("Trailing stop notice");
 
-		// 4. Extension custom notice
-		const customNotice = new CustomMessageComponent(
-			{ role: "custom", customType: "ext-notice", content: "Content ready", display: true, timestamp: Date.now() },
-			undefined,
-			mdTheme,
-		);
+		/* Исходный контейнер не мутируется необратимо и сохраняет все дочерние узлы после рендера */
+		const afterPlain = contentContainer.render(100).map(stripTerminalSequences).join("\n");
+		expect(afterPlain).toContain("Native thinking label");
+		expect(afterPlain).toContain("Trailing stop notice");
+	});
 
-		// 5. Final assistant turn with collapsed custom ThinkingBlock + answer + stop notice
-		const finalTurn = new AssistantMessageComponent(
-			makeAssistantMessage(
-				[
-					{ type: "thinking", thinking: "Analyzing auth token validation" },
-					{ type: "text", text: "Login bug is fixed." },
-				],
-				{ stopReason: "aborted", errorMessage: "Cancelled by user" },
-			),
-			false,
-			mdTheme,
-		);
+	it("hides animated & collapsed ThinkingBlock, intermediate turns, tool rows, custom messages, and status notices in real InteractiveMode, then restores them on /silent off", async () => {
+		let pendingStream: ReturnType<typeof createAssistantMessageEventStream> | undefined;
+		let resolveStreamReady: (() => void) | undefined;
 
-		// 6. Streaming assistant turn with ONLY an animated custom ThinkingBlock
-		const streamingThinkingTurn = new AssistantMessageComponent(undefined, false, mdTheme);
-		streamingThinkingTurn.updateContent(
-			makeAssistantMessage([{ type: "thinking", thinking: "Streaming deep reasoning..." }]),
-			true,
-		);
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 110,
+			height: 38,
+			thinkingLevel: "medium",
+			extensionFactories: [
+				(pi) => {
+					pi.registerCommand("emit-test-notices", {
+						description: "Emit custom message and UI status notice for silent-mode test",
+						handler: async (_args, ctx) => {
+							pi.sendMessage({
+								customType: "ext-notice",
+								content: "Extension custom notice ready",
+								display: true,
+							});
+							ctx.ui.notify("Chat status notice line", "info");
+						},
+					});
+				},
+			],
+			responses: [
+				fauxAssistantMessage(
+					[
+						fauxThinking("Checking auth handler"),
+						fauxToolCall("read", { path: "src/auth.ts" }),
+					],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage(
+					[
+						fauxThinking("Analyzing auth token validation"),
+						{ type: "text", text: "Login bug is fixed." },
+					],
+					{ stopReason: "aborted", errorMessage: "Cancelled by user" },
+				),
+			],
+		});
 
-		// 7. Native MouseRegion thinking node + trailing spacer + answer
-		const nativeThinkingTurn = new AssistantMessageComponent(undefined, false, mdTheme);
-		const nativeContent = (nativeThinkingTurn as any).contentContainer;
-		nativeContent.clear();
-		nativeContent.addChild(new MouseRegion(new Text("Native thinking label", 1, 0), () => undefined));
-		nativeContent.addChild(new Spacer(1));
-		nativeContent.addChild(new Markdown("Native answer stays visible.", 2, 0, mdTheme));
+		writeFileSync(join(harness.cwd, "auth-fixture.txt"), "ok\n", "utf8");
+		writeFileSync(join(harness.cwd, "src-auth.ts"), "export const auth = true;\n", "utf8");
+		await harness.session.executeBash("mkdir -p src && cp src-auth.ts src/auth.ts");
 
-		// 8. Chat-level status notice directly in chatContainer
-		const chatNoticeSpacer = new Spacer(1);
-		const chatNotice = new Text("Reloaded extensions", 1, 0);
+		await harness.submitInput("Fix the login bug");
+		await harness.submitInput("/emit-test-notices");
 
-		harness.tui.chatContainer.addChild(userPrompt);
-		harness.tui.chatContainer.addChild(intermediateTurn);
-		harness.tui.chatContainer.addChild(toolRow);
-		harness.tui.chatContainer.addChild(customNotice);
-		harness.tui.chatContainer.addChild(chatNoticeSpacer);
-		harness.tui.chatContainer.addChild(chatNotice);
-		harness.tui.chatContainer.addChild(finalTurn);
-		harness.tui.chatContainer.addChild(streamingThinkingTurn);
-		harness.tui.chatContainer.addChild(nativeThinkingTurn);
+		/* Базовое состояние (/silent off): видны блок размышлений, тул чтения, уведомления и ответ */
+		const baselineText = harness.screen().text();
+		expect(baselineText).toContain("Fix the login bug");
+		expect(baselineText).toContain("Read src/auth.ts");
+		expect(baselineText).toContain("Thought");
+		expect(baselineText).toContain("Login bug is fixed.");
+		expect(baselineText).toContain("Operation aborted");
+		expect(baselineText).toContain("Extension custom notice ready");
+		expect(baselineText).toContain("Chat status notice line");
 
-		// Baseline (silent OFF): thinking blocks, notices, and answers are all visible
-		expect(renderPlain(finalTurn)).toContain("Thought");
-		expect(renderPlain(finalTurn)).toContain("Login bug is fixed.");
-		expect(renderPlain(finalTurn)).toContain("Cancelled by user");
-		expect(renderPlain(streamingThinkingTurn)).toContain("Thinking…");
-		expect(renderPlain(nativeThinkingTurn)).toContain("Native thinking label");
-		expect(renderPlain(harness.tui.chatContainer)).toContain("Reloaded extensions");
+		/* Включаем /silent on — в транскрипте остаются только промпт пользователя и финальный ответ */
+		await harness.submitInput("/silent on");
+		const silentText = harness.screen().text();
+		expect(silentText).toContain("Fix the login bug");
+		expect(silentText).toContain("Login bug is fixed.");
+		expect(silentText).not.toContain("Read src/auth.ts");
+		expect(silentText).not.toContain("Thought");
+		expect(silentText).not.toContain("Analyzing auth token validation");
+		expect(silentText).not.toContain("Operation aborted");
+		expect(silentText).not.toContain("Extension custom notice ready");
+		expect(silentText).not.toContain("Chat status notice line");
 
-		// Enable /silent
-		await harness.runCommand("silent", "on");
+		/* Запускаем стримящийся ход с одним только активным ThinkingBlock при включённом /silent */
+		const streamReady = new Promise<void>((resolve) => {
+			resolveStreamReady = resolve;
+		});
+		harness.setStreamSimple((_m, _c, opts) => {
+			const st = createAssistantMessageEventStream();
+			pendingStream = st;
+			opts?.signal?.addEventListener(
+				"abort",
+				() => {
+					const aborted: AssistantMessage = {
+						role: "assistant",
+						content: [],
+						api: "faux",
+						provider: "faux",
+						model: "faux-1",
+						usage: ZERO_USAGE,
+						stopReason: "aborted",
+						timestamp: Date.now(),
+					};
+					st.push({ type: "error", reason: "aborted", error: aborted });
+					st.end(aborted);
+				},
+				{ once: true },
+			);
+			resolveStreamReady?.();
+			return st;
+		});
 
-		// User prompt stays visible
-		expect(renderPlain(userPrompt)).toContain("Fix the login bug");
+		const streamingTurn = harness.submitInput("Second silent question");
+		await streamReady;
 
-		// Intermediate assistant turn, tool row, and custom notice are completely hidden
-		expect(intermediateTurn.render(100)).toEqual([]);
-		expect(toolRow.render(100)).toEqual([]);
-		expect(customNotice.render(100)).toEqual([]);
+		const ts = Date.now();
+		const partialMsg: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "thinking", thinking: "Streaming deep reasoning..." }],
+			api: "faux",
+			provider: "faux",
+			model: "faux-1",
+			usage: ZERO_USAGE,
+			stopReason: "stop",
+			timestamp: ts,
+		};
+		pendingStream!.push({ type: "start", partial: { ...partialMsg, content: [] } });
+		pendingStream!.push({ type: "thinking_start", contentIndex: 0, partial: partialMsg });
+		pendingStream!.push({
+			type: "thinking_delta",
+			contentIndex: 0,
+			delta: "Streaming deep reasoning...",
+			partial: partialMsg,
+		});
+		await harness.flush();
 
-		// Final turn hides collapsed ThinkingBlock + stop notice, keeps only final answer
-		const silentFinal = renderPlain(finalTurn);
-		expect(silentFinal).toContain("Login bug is fixed.");
-		expect(silentFinal).not.toContain("Thought");
-		expect(silentFinal).not.toContain("Analyzing auth token validation");
-		expect(silentFinal).not.toContain("Cancelled by user");
+		const midSilentText = harness.screen().text();
+		expect(midSilentText).toContain("Second silent question");
+		expect(midSilentText).not.toContain("Thinking…");
+		expect(midSilentText).not.toContain("Streaming deep reasoning");
 
-		// Streaming-only animated ThinkingBlock turn is completely hidden (no stray blank spacer)
-		expect(streamingThinkingTurn.render(100)).toEqual([]);
+		const doneMsg: AssistantMessage = {
+			...partialMsg,
+			content: [
+				{ type: "thinking", thinking: "Streaming deep reasoning..." },
+				{ type: "text", text: "Second concise answer." },
+			],
+		};
+		pendingStream!.push({
+			type: "thinking_end",
+			contentIndex: 0,
+			content: "Streaming deep reasoning...",
+			partial: partialMsg,
+		});
+		pendingStream!.push({ type: "done", reason: "stop", message: doneMsg });
+		pendingStream!.end(doneMsg);
+		await streamingTurn;
 
-		// Native MouseRegion thinking + spacer hidden, answer kept
-		const silentNative = renderPlain(nativeThinkingTurn);
-		expect(silentNative).toContain("Native answer stays visible.");
-		expect(silentNative).not.toContain("Native thinking label");
+		expect(harness.screen().text()).toContain("Second concise answer.");
+		expect(harness.screen().text()).not.toContain("Thought");
 
-		// Chat-level notices hidden in chatContainer render
-		const silentChat = renderPlain(harness.tui.chatContainer);
-		expect(silentChat).toContain("Fix the login bug");
-		expect(silentChat).toContain("Login bug is fixed.");
-		expect(silentChat).toContain("Native answer stays visible.");
-		expect(silentChat).not.toContain("Reloaded extensions");
-		expect(silentChat).not.toContain("Content ready");
-		expect(silentChat).not.toContain("Thought");
-		expect(silentChat).not.toContain("Thinking…");
-
-		// Turn /silent OFF: full content is restored
-		await harness.runCommand("silent", "off");
-
-		expect(renderPlain(finalTurn)).toContain("Thought");
-		expect(renderPlain(finalTurn)).toContain("Login bug is fixed.");
-		expect(renderPlain(finalTurn)).toContain("Cancelled by user");
-		expect(renderPlain(streamingThinkingTurn)).toContain("Thinking…");
-		expect(renderPlain(nativeThinkingTurn)).toContain("Native thinking label");
-		expect(toolRow.render(100).length).toBeGreaterThan(0);
-		expect(customNotice.render(100).length).toBeGreaterThan(0);
-		expect(renderPlain(harness.tui.chatContainer)).toContain("Reloaded extensions");
+		/* Выключаем /silent off — все скрытые карточки, размышления, тулы и уведомления возвращаются */
+		await harness.submitInput("/silent off");
+		const restoredText = harness.screen().text();
+		expect(restoredText).toContain("Read src/auth.ts");
+		expect(restoredText).toContain("Thought");
+		expect(restoredText).toContain("Login bug is fixed.");
+		expect(restoredText).toContain("Operation aborted");
+		expect(restoredText).toContain("Extension custom notice ready");
+		expect(restoredText).toContain("Chat status notice line");
+		expect(restoredText).toContain("Second concise answer.");
 	});
 });

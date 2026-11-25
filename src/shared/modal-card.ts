@@ -19,6 +19,7 @@ import {
 	type RgbTuple,
 	type ThemeSurfacePalette,
 } from "./ansi.ts";
+import { claimHover } from "./runtime-hooks.ts";
 
 export { getThemeSurfacePalette, type PillVariant, type RgbTuple, type ThemeSurfacePalette };
 
@@ -237,6 +238,7 @@ function resolveBorderRgb(palette: ThemeSurfacePalette, spec: ModalCardRenderSpe
 }
 
 export function createModalCard(): ModalCardController {
+	const hoverOwner = {};
 	let hoveredId: string | null = null;
 	let closeHit: HitBox | null = null;
 	let pillHits: HitBox[] = [];
@@ -371,6 +373,11 @@ export function createModalCard(): ModalCardController {
 			if (event.type === "move") {
 				const hit = findHit(event.x, event.y);
 				const nextHover = hit?.id ?? null;
+				if (nextHover !== null) {
+					claimHover(hoverOwner, () => {
+						hoveredId = null;
+					});
+				}
 				if (nextHover !== hoveredId) {
 					hoveredId = nextHover;
 					return { handled: true, render: true };

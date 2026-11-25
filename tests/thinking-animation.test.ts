@@ -1,288 +1,461 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-	AssistantMessageComponent,
-	CustomEditor,
-	ToolExecutionComponent,
-	getMarkdownTheme,
-	type WorkingIndicatorOptions,
-} from "@earendil-works/pi-coding-agent";
-import { Loader, stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import conartiPiUi from "../src/index.ts";
+import { defineTool } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
+import { clearRecordedThinkingTimings } from "../src/features/transcript/thinking-block.ts";
 import { stopAllAnimations } from "../src/shared/animation-scheduler.ts";
-import { createExtensionHarness, type ExtensionHarness } from "./harness/index.ts";
+import {
+	createAssistantMessageEventStream,
+	createInteractiveHarness,
+	type AssistantMessage,
+	type AssistantMessageEventStream,
+	type InteractiveHarness,
+} from "./harness/index.ts";
 
-function makeAssistantMessage(content: unknown[], extra: Record<string, unknown> = {}) {
+const ZERO_USAGE = {
+	input: 10,
+	output: 20,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 30,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+
+function makeStreamMessage(
+	content: AssistantMessage["content"],
+	extra: Partial<AssistantMessage> = {},
+): AssistantMessage {
 	return {
 		role: "assistant",
 		content,
-		api: "anthropic-messages",
-		provider: "anthropic",
-		model: "claude-sonnet",
-		usage: {
-			input: 10,
-			output: 20,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 30,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
+		api: "faux-thinking-stream",
+		provider: "faux",
+		model: "faux-1",
+		usage: ZERO_USAGE,
 		stopReason: "stop",
 		timestamp: Date.now(),
 		...extra,
-	} as any;
+	};
 }
 
-describe("30 fps breathing animation & refined Thinking blocks", () => {
-	let harness: ExtensionHarness | undefined;
+function createDeferredStreamQueue() {
+	const pending: AssistantMessageEventStream[] = [];
+	const waiters: Array<(stream: AssistantMessageEventStream) => void> = [];
+
+	return {
+		handler(options?: { signal?: AbortSignal }): AssistantMessageEventStream {
+			const stream = createAssistantMessageEventStream();
+			let ended = false;
+			const origEnd = stream.end.bind(stream);
+			stream.end = (result?: AssistantMessage) => {
+				if (ended) return;
+				ended = true;
+				origEnd(result);
+			};
+			options?.signal?.addEventListener(
+				"abort",
+				() => {
+					if (!ended) {
+						const aborted = makeStreamMessage([], {
+							stopReason: "aborted",
+							errorMessage: "Request was aborted",
+						});
+						stream.push({ type: "error", reason: "aborted", error: aborted });
+						stream.end(aborted);
+					}
+				},
+				{ once: true },
+			);
+			const waiter = waiters.shift();
+			if (waiter) {
+				waiter(stream);
+			} else {
+				pending.push(stream);
+			}
+			return stream;
+		},
+		nextStream(): Promise<AssistantMessageEventStream> {
+			const ready = pending.shift();
+			if (ready) {
+				return Promise.resolve(ready);
+			}
+			return new Promise((resolve) => {
+				waiters.push(resolve);
+			});
+		},
+	};
+}
+
+function findGlyphRgb(
+	harness: InteractiveHarness,
+	rowNeedle: string,
+	glyph: string,
+): [number, number, number] | undefined {
+	const screen = harness.screen();
+	for (let r = 0; r < screen.height; r += 1) {
+		const row = screen.rowText(r);
+		if (!row.includes(rowNeedle)) continue;
+		for (let c = 0; c < screen.width; c += 1) {
+			const cell = screen.cellAt(r, c);
+			if (cell?.char === glyph && cell.fg.kind === "rgb") {
+				return [cell.fg.r, cell.fg.g, cell.fg.b];
+			}
+		}
+	}
+	return undefined;
+}
+
+describe("30 fps breathing animation & refined Thinking blocks (real InteractiveMode)", () => {
+	let harness: InteractiveHarness | undefined;
+	const tempDirs: string[] = [];
 
 	afterEach(async () => {
+		vi.useRealTimers();
+		stopAllAnimations();
 		if (harness) {
-			await harness.runCommand("silent", "off");
-			await harness.shutdownSession();
+			await harness.dispose();
 			harness = undefined;
 		}
 		stopAllAnimations();
-		vi.useRealTimers();
+		clearRecordedThinkingTimings();
+		while (tempDirs.length > 0) {
+			rmSync(tempDirs.pop()!, { recursive: true, force: true });
+		}
 	});
 
 	it("drives composer working indicator and streaming Thinking spines from a single 30 fps timer with zero Loader timers and zero leaked timers on idle or shutdown", async () => {
 		vi.useFakeTimers();
-		harness = createExtensionHarness({ theme: "dark", width: 100, height: 32 });
-		const indicatorCalls: WorkingIndicatorOptions[] = [];
-		vi.spyOn(harness.ctx.ui, "setWorkingIndicator").mockImplementation((opts) => {
-			if (opts) indicatorCalls.push(opts);
+		const queue = createDeferredStreamQueue();
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 100,
+			height: 32,
+			thinkingLevel: "medium",
+			streamSimple: (_m, _c, opts) => queue.handler(opts),
 		});
-
-		harness.mount(conartiPiUi);
-		await harness.startSession();
+		vi.runOnlyPendingTimers();
 
 		expect(vi.getTimerCount()).toBe(0);
-		expect(indicatorCalls.length).toBeGreaterThan(0);
 
-		const initialIndicator = indicatorCalls.at(-1)!;
-		expect(initialIndicator.frames?.length).toBe(1);
-		expect(stripTerminalSequences(initialIndicator.frames?.[0] ?? "")).toBe("◆");
-
-		const hostLoader = new Loader(
-			harness.tui.asTui(),
-			(s) => s,
-			(s) => s,
-			"Working...",
-			initialIndicator,
+		const turnPromise = harness.submitInput("Analyze session animation");
+		const stream1 = await queue.nextStream();
+		const ts1 = Date.now();
+		const partial1 = makeStreamMessage(
+			[{ type: "thinking", thinking: "Line one\nLine two\nLine three" }],
+			{ timestamp: ts1 },
 		);
-		expect(vi.getTimerCount()).toBe(0);
+		stream1.push({ type: "start", partial: makeStreamMessage([], { timestamp: ts1 }) });
+		stream1.push({
+			type: "thinking_start",
+			contentIndex: 0,
+			partial: makeStreamMessage([{ type: "thinking", thinking: "" }], { timestamp: ts1 }),
+		});
+		stream1.push({
+			type: "thinking_delta",
+			contentIndex: 0,
+			delta: "Line one\nLine two\nLine three",
+			partial: partial1,
+		});
+		await harness.flush();
 
-		await harness.emit("agent_start", {});
-
-		const mdTheme = getMarkdownTheme();
-		const streamingTurn = new AssistantMessageComponent(undefined, false, mdTheme);
-		streamingTurn.updateContent(
-			makeAssistantMessage([
-				{
-					type: "thinking",
-					thinking: "Line one\nLine two\nLine three",
-				},
-			]),
-			true,
-		);
-
-		const frame0Lines = streamingTurn.render(80);
+		/* Единый 30 fps таймер обслуживает и волну индикатора композитора ◆, и хребты Thinking (0 таймеров у Loader) */
 		expect(vi.getTimerCount()).toBe(1);
+		expect(harness.screen().text()).toContain("┃ Thinking…");
+		expect(harness.screen().text()).toContain("◆");
 
-		const extractFirstRgb = (line: string) => {
-			const m = /\x1b\[38;2;(\d+;\d+;\d+)m/.exec(line);
-			return m?.[1];
-		};
-		const row0RgbBefore = extractFirstRgb(frame0Lines[1] ?? "");
-		const row1RgbBefore = extractFirstRgb(frame0Lines[2] ?? "");
-		expect(row0RgbBefore).toBeDefined();
-		expect(row1RgbBefore).toBeDefined();
-		expect(row0RgbBefore).not.toBe(row1RgbBefore);
+		const spineTopBefore = findGlyphRgb(harness, "Thinking…", "┃");
+		const spineRow1Before = findGlyphRgb(harness, "Line one", "▎");
+		const spineRow2Before = findGlyphRgb(harness, "Line two", "▎");
+		const workingDiamondBefore = findGlyphRgb(harness, "Working", "◆");
+		expect(spineTopBefore).toBeDefined();
+		expect(spineRow1Before).toBeDefined();
+		expect(spineRow2Before).toBeDefined();
+		expect(workingDiamondBefore).toBeDefined();
+		expect(spineRow1Before).not.toEqual(spineRow2Before);
 
 		vi.advanceTimersByTime(33 * 6);
-
-		const latestIndicator = indicatorCalls.at(-1)!;
-		expect(latestIndicator.frames?.length).toBe(1);
-		expect(latestIndicator.frames?.[0]).not.toBe(initialIndicator.frames?.[0]);
-		hostLoader.setIndicator(latestIndicator);
+		harness.flushFrame();
 		expect(vi.getTimerCount()).toBe(1);
 
-		const frame1Lines = streamingTurn.render(80);
-		const row0RgbAfter = extractFirstRgb(frame1Lines[1] ?? "");
-		expect(row0RgbAfter).not.toBe(row0RgbBefore);
+		const spineRow1After = findGlyphRgb(harness, "Line one", "▎");
+		const workingDiamondAfter = findGlyphRgb(harness, "Working", "◆");
+		expect(spineRow1After).not.toEqual(spineRow1Before);
+		expect(workingDiamondAfter).not.toEqual(workingDiamondBefore);
 
-		await harness.emit("agent_end", { messages: [] });
-		expect(vi.getTimerCount()).toBe(0);
-
-		await harness.emit("turn_start", {});
-		expect(vi.getTimerCount()).toBe(1);
-		await harness.emit("agent_settled", {});
-		expect(vi.getTimerCount()).toBe(0);
-
-		await harness.runCommand("silent", "on");
-		await harness.emit("agent_start", {});
-		expect(vi.getTimerCount()).toBe(1);
-		await harness.shutdownSession();
-		expect(vi.getTimerCount()).toBe(0);
-		hostLoader.stop();
-	});
-
-	it("renders streaming Thinking… plus at most 3 softly formatted markdown tail lines preserving inline code and bold structure", async () => {
-		vi.useFakeTimers();
-		harness = createExtensionHarness({ theme: "dark", width: 100, height: 32 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-
-		const mdTheme = getMarkdownTheme();
-		const streamingTurn = new AssistantMessageComponent(undefined, false, mdTheme);
-		streamingTurn.updateContent(
-			makeAssistantMessage([
-				{
-					type: "thinking",
-					thinking: [
-						"### Audit Phase",
-						"First line of earlier context",
-						"Second line of earlier context",
-						"- Inspect `validateSession` in **auth.ts**",
-						"- Check `refreshToken` expiry window",
-						"- Return `401` when token is stale",
-					].join("\n"),
-				},
-			]),
-			true,
+		const done1 = makeStreamMessage(
+			[
+				{ type: "thinking", thinking: "Line one\nLine two\nLine three" },
+				{ type: "text", text: "Animation verified." },
+			],
+			{ timestamp: ts1 },
 		);
+		stream1.push({
+			type: "thinking_end",
+			contentIndex: 0,
+			content: "Line one\nLine two\nLine three",
+			partial: partial1,
+		});
+		stream1.push({ type: "text_start", contentIndex: 1, partial: done1 });
+		stream1.push({ type: "text_delta", contentIndex: 1, delta: "Animation verified.", partial: done1 });
+		stream1.push({ type: "text_end", contentIndex: 1, content: "Animation verified.", partial: done1 });
+		stream1.push({ type: "done", reason: "stop", message: done1 });
+		stream1.end(done1);
+		await turnPromise;
 
-		const ansiLines = streamingTurn.render(90);
-		const plainLines = ansiLines.map(stripTerminalSequences);
-		const visibleRows = plainLines.map((l) => l.trim()).filter((l) => l.length > 0);
+		expect(vi.getTimerCount()).toBe(0);
 
-		expect(visibleRows).toHaveLength(4);
-		expect(visibleRows[0]).toBe("┃ Thinking…");
-		expect(visibleRows[1]).toBe("▎ - Inspect validateSession in auth.ts");
-		expect(visibleRows[2]).toBe("▎ - Check refreshToken expiry window");
-		expect(visibleRows[3]).toBe("▎ - Return 401 when token is stale");
+		/* В режиме /silent во время активного хода продолжает работать ровно один таймер композитора до завершения */
+		await harness.submitInput("/silent on");
+		const silentTurn = harness.submitInput("Silent background turn");
+		const stream2 = await queue.nextStream();
+		const ts2 = Date.now() + 100;
+		stream2.push({ type: "start", partial: makeStreamMessage([], { timestamp: ts2 }) });
+		await harness.flush();
+		expect(vi.getTimerCount()).toBe(1);
 
-		expect(plainLines.join("\n")).not.toContain("First line of earlier context");
-		expect(plainLines.join("\n")).not.toContain("Second line of earlier context");
-		expect(plainLines.join("\n")).not.toContain("`validateSession`");
-		expect(plainLines.join("\n")).not.toContain("**auth.ts**");
+		await harness.dispose();
+		harness = undefined;
+		expect(vi.getTimerCount()).toBe(0);
 
-		const inspectAnsiLine = ansiLines.find((l) =>
-			stripTerminalSequences(l).includes("Inspect validateSession in auth.ts"),
-		)!;
-		expect(inspectAnsiLine).toContain("\x1b[1m");
-		const rgbMatches = [...inspectAnsiLine.matchAll(/\x1b\[38;2;(\d+);(\d+);(\d+)m/g)];
-		expect(rgbMatches.length).toBeGreaterThanOrEqual(3);
-		for (const m of rgbMatches) {
-			const r = Number(m[1]);
-			const g = Number(m[2]);
-			const b = Number(m[3]);
-			expect(r).toBeLessThan(g);
-			expect(g).toBeLessThan(b);
-		}
+		const aborted = makeStreamMessage([], { stopReason: "aborted", timestamp: ts2 });
+		stream2.end(aborted);
+		await silentTurn.catch(() => {});
 	});
 
-	it("renders completed collapsed Thinking blocks as ❙ › Thought for Xs using per-block observed duration and ❙ › Thought for historical entries without clutter", async () => {
+	it("renders streaming Thinking… with at most 3 softly formatted markdown tail lines, applies strongFg to bold spans, and omits bare fence borders", async () => {
+		vi.useFakeTimers();
+		const queue = createDeferredStreamQueue();
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 100,
+			height: 32,
+			thinkingLevel: "medium",
+			streamSimple: (_m, _c, opts) => queue.handler(opts),
+		});
+		vi.runOnlyPendingTimers();
+
+		const turn1 = harness.submitInput("Audit auth session");
+		const s1 = await queue.nextStream();
+		const ts1 = Date.now();
+		const md1 = [
+			"### Audit Phase",
+			"First line of earlier context",
+			"Second line of earlier context",
+			"- Inspect `validateSession` in **auth.ts**",
+			"- Check `refreshToken` expiry window",
+			"- Return `401` when token is stale",
+		].join("\n");
+		const partial1 = makeStreamMessage([{ type: "thinking", thinking: md1 }], { timestamp: ts1 });
+		s1.push({ type: "start", partial: makeStreamMessage([], { timestamp: ts1 }) });
+		s1.push({ type: "thinking_start", contentIndex: 0, partial: partial1 });
+		s1.push({ type: "thinking_delta", contentIndex: 0, delta: md1, partial: partial1 });
+		await harness.flush();
+
+		const screen1 = harness.screen();
+		const text1 = screen1.text();
+		expect(text1).toContain("┃ Thinking…");
+		expect(text1).toContain("▎ - Inspect validateSession in auth.ts");
+		expect(text1).toContain("▎ - Check refreshToken expiry window");
+		expect(text1).toContain("▎ - Return 401 when token is stale");
+		expect(text1).not.toContain("First line of earlier context");
+		expect(text1).not.toContain("Second line of earlier context");
+		expect(text1).not.toContain("`validateSession`");
+		expect(text1).not.toContain("**auth.ts**");
+
+		const inspectPos = screen1.findText("auth.ts");
+		expect(inspectPos).toBeDefined();
+		const boldCell = screen1.cellAt(inspectPos!.row, inspectPos!.col);
+		expect(boldCell?.bold).toBe(true);
+		expect(boldCell?.fg).toEqual({ kind: "rgb", r: 156, g: 174, b: 200 });
+
+		/* Теперь передаём незакрытый кодовый блок: голая строка ```ts исключается из 3-строчного хвоста */
+		const md2 = [
+			"Check **auth.ts** exports",
+			"```ts",
+			"const tokenValid = true;",
+			"const sessionReady = true;",
+		].join("\n");
+		const partial2 = makeStreamMessage([{ type: "thinking", thinking: md2 }], { timestamp: ts1 });
+		s1.push({ type: "thinking_delta", contentIndex: 0, delta: "\n", partial: partial2 });
+		await harness.flush();
+
+		const text2 = harness.screen().text();
+		expect(text2).toContain("▎ Check auth.ts exports");
+		expect(text2).toContain("▎   const tokenValid = true;");
+		expect(text2).toContain("▎   const sessionReady = true;");
+		expect(text2).not.toContain("```ts");
+
+		const final1 = makeStreamMessage(
+			[
+				{ type: "thinking", thinking: md2 },
+				{ type: "text", text: "Audit complete." },
+			],
+			{ timestamp: ts1 },
+		);
+		s1.push({ type: "thinking_end", contentIndex: 0, content: md2, partial: partial2 });
+		s1.push({ type: "done", reason: "stop", message: final1 });
+		s1.end(final1);
+		await turn1;
+	});
+
+	it("renders completed collapsed Thinking blocks as ❙ › Thought for Xs per block, preserves timings across /reload, and shows ❙ › Thought for historical entries", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date("2026-11-24T12:00:00Z"));
-		harness = createExtensionHarness({ theme: "dark", width: 100, height: 32 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
+		const queue = createDeferredStreamQueue();
 
-		const mdTheme = getMarkdownTheme();
-		const liveMsgTs = Date.now();
-		const liveTurn = new AssistantMessageComponent(undefined, false, mdTheme);
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 100,
+			height: 32,
+			thinkingLevel: "medium",
+			streamSimple: (_m, _c, opts) => queue.handler(opts),
+			setupSession(sm) {
+				sm.appendMessage({
+					role: "user",
+					content: "Historical question",
+					timestamp: 1_700_000_000_000,
+				});
+				sm.appendMessage(
+					makeStreamMessage(
+						[
+							{ type: "thinking", thinking: "Historical thought from disk\nExtra line" },
+							{ type: "text", text: "Restored reply." },
+						],
+						{ timestamp: 1_700_000_000_500 },
+					),
+				);
+			},
+		});
 
-		liveTurn.updateContent(
-			makeAssistantMessage(
-				[{ type: "thinking", thinking: "First reasoning block\nSecond line of first block" }],
-				{ timestamp: liveMsgTs },
-			),
-			true,
+		const initialText = harness.screen().text();
+		expect(initialText).toContain("❙ › Thought");
+		expect(initialText).toContain("Restored reply.");
+		expect(initialText).not.toContain("Thought for");
+		expect(initialText).not.toContain("Historical thought from disk");
+
+		const liveTurn = harness.submitInput("Run two-stage reasoning");
+		const stream = await queue.nextStream();
+		const liveTs = Date.now();
+
+		const pBlock0 = makeStreamMessage(
+			[{ type: "thinking", thinking: "First reasoning block\nSecond line of first block" }],
+			{ timestamp: liveTs },
 		);
+		stream.push({ type: "start", partial: makeStreamMessage([], { timestamp: liveTs }) });
+		stream.push({ type: "thinking_start", contentIndex: 0, partial: pBlock0 });
+		stream.push({
+			type: "thinking_delta",
+			contentIndex: 0,
+			delta: "First reasoning block\nSecond line of first block",
+			partial: pBlock0,
+		});
+		await harness.flush();
+
 		vi.advanceTimersByTime(4200);
+		stream.push({
+			type: "thinking_end",
+			contentIndex: 0,
+			content: "First reasoning block\nSecond line of first block",
+			partial: pBlock0,
+		});
 
-		liveTurn.updateContent(
-			makeAssistantMessage(
-				[
-					{ type: "thinking", thinking: "First reasoning block\nSecond line of first block" },
-					{ type: "text", text: "Interim check." },
-					{ type: "thinking", thinking: "Second reasoning block" },
-				],
-				{ timestamp: liveMsgTs },
-			),
-			true,
+		const pBlock1 = makeStreamMessage(
+			[
+				{ type: "thinking", thinking: "First reasoning block\nSecond line of first block" },
+				{ type: "text", text: "Interim check." },
+				{ type: "thinking", thinking: "Second reasoning block" },
+			],
+			{ timestamp: liveTs },
 		);
-		vi.advanceTimersByTime(1800);
+		stream.push({ type: "text_start", contentIndex: 1, partial: pBlock1 });
+		stream.push({ type: "thinking_start", contentIndex: 2, partial: pBlock1 });
+		stream.push({
+			type: "thinking_delta",
+			contentIndex: 2,
+			delta: "Second reasoning block",
+			partial: pBlock1,
+		});
+		await harness.flush();
 
-		const completedLiveMsg = makeAssistantMessage(
+		vi.advanceTimersByTime(1800);
+		const completedMsg = makeStreamMessage(
 			[
 				{ type: "thinking", thinking: "First reasoning block\nSecond line of first block" },
 				{ type: "text", text: "Interim check." },
 				{ type: "thinking", thinking: "Second reasoning block" },
 				{ type: "text", text: "Final answer." },
 			],
-			{ timestamp: liveMsgTs },
+			{ timestamp: liveTs },
 		);
-		liveTurn.updateContent(completedLiveMsg, false);
+		stream.push({
+			type: "thinking_end",
+			contentIndex: 2,
+			content: "Second reasoning block",
+			partial: completedMsg,
+		});
+		stream.push({ type: "done", reason: "stop", message: completedMsg });
+		stream.end(completedMsg);
+		await liveTurn;
 
-		const plainLiveRows = liveTurn
-			.render(90)
-			.map(stripTerminalSequences)
-			.map((l) => l.trim())
-			.filter((l) => l.length > 0);
+		const liveScreenText = harness.screen().text();
+		expect(liveScreenText).toContain("❙ › Thought for 4s");
+		expect(liveScreenText).toContain("❙ › Thought for 2s");
+		expect(liveScreenText).not.toContain("First reasoning block");
+		expect(liveScreenText).not.toContain("Second reasoning block");
 
-		expect(plainLiveRows).toContain("❙ › Thought for 4s");
-		expect(plainLiveRows).toContain("❙ › Thought for 2s");
-		expect(plainLiveRows.join("\n")).not.toContain("First reasoning block");
-		expect(plainLiveRows.join("\n")).not.toContain("Second reasoning block");
-		expect(plainLiveRows.join("\n")).not.toContain("(2)");
-		expect(plainLiveRows.join("\n")).not.toContain("\u2014");
-
-		await harness.emit("session_start", { reason: "reload" });
-		const reloadedTurn = new AssistantMessageComponent(completedLiveMsg, false, mdTheme);
-		const plainReloaded = reloadedTurn
-			.render(90)
-			.map(stripTerminalSequences)
-			.map((l) => l.trim())
-			.filter((l) => l.length > 0);
-		expect(plainReloaded).toContain("❙ › Thought for 4s");
-		expect(plainReloaded).toContain("❙ › Thought for 2s");
-
-		const historicalTurn = new AssistantMessageComponent(
-			makeAssistantMessage(
-				[
-					{ type: "thinking", thinking: "Historical thought from disk\nExtra line" },
-					{ type: "text", text: "Restored reply." },
-				],
-				{ timestamp: 1_700_000_000_000 },
-			),
-			false,
-			mdTheme,
-		);
-		const plainHistorical = historicalTurn
-			.render(90)
-			.map(stripTerminalSequences)
-			.map((l) => l.trim())
-			.filter((l) => l.length > 0);
-		expect(plainHistorical).toContain("❙ › Thought");
-		expect(plainHistorical.join("\n")).not.toContain("Thought for");
-		expect(plainHistorical.join("\n")).not.toContain("Historical thought from disk");
+		await harness.reload();
+		const reloadedText = harness.screen().text();
+		expect(reloadedText).toContain("❙ › Thought for 4s");
+		expect(reloadedText).toContain("❙ › Thought for 2s");
 	});
 
-	it("toggles Thinking expansion on click with │ ⌄ Thought for Xs, continuous │ guide, formatted markdown, no micro-hints or Copy badges, and silent mode hiding", async () => {
+	it("toggles Thinking expansion via real mouse clicks with │ ⌄ Thought for Xs, continuous │ guide, hover preservation across text deltas, and /silent hiding", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date("2026-11-24T13:00:00Z"));
-		harness = createExtensionHarness({ theme: "dark", width: 100, height: 32 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
+		const queue = createDeferredStreamQueue();
 
-		const mdTheme = getMarkdownTheme();
-		const turn = new AssistantMessageComponent(undefined, false, mdTheme);
-		const ts = Date.now();
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 100,
+			height: 36,
+			thinkingLevel: "medium",
+			streamSimple: (_m, _c, opts) => queue.handler(opts),
+			setupSession(sm) {
+				sm.appendMessage({
+					role: "user",
+					content: "Earlier prompt",
+					timestamp: 1_650_000_000_000,
+				});
+				sm.appendMessage(
+					makeStreamMessage(
+						[
+							{ type: "thinking", thinking: "Restored historical reasoning" },
+							{ type: "text", text: "Earlier done." },
+						],
+						{ timestamp: 1_650_000_000_500 },
+					),
+				);
+			},
+		});
+
+		/* Раскрываем исторический блок без длительности кликом мыши */
+		const histPos = harness.screen().findText("❙ › Thought");
+		expect(histPos).toBeDefined();
+		await harness.mouseClick(histPos!.col + 2, histPos!.row);
+		const histExpandedText = harness.screen().text();
+		expect(histExpandedText).toContain("│ ⌄ Thought");
+		expect(histExpandedText).toContain("│ Restored historical reasoning");
+		expect(histExpandedText).not.toContain("Thought for");
+
+		/* Сворачиваем обратно после продвижения часов за порог двойного клика */
+		vi.advanceTimersByTime(500);
+		const histOpenPos = harness.screen().findText("│ ⌄ Thought");
+		await harness.mouseClick(histOpenPos!.col + 2, histOpenPos!.row);
+		expect(harness.screen().text()).toContain("❙ › Thought");
+
 		const thinkingMarkdown = [
 			"### Verify Signature",
 			"Check `parseToken` inside **jwt.ts**:",
@@ -292,58 +465,62 @@ describe("30 fps breathing animation & refined Thinking blocks", () => {
 			"```",
 		].join("\n");
 
-		turn.updateContent(
-			makeAssistantMessage([{ type: "thinking", thinking: thinkingMarkdown }], { timestamp: ts }),
-			true,
-		);
+		const turnPromise = harness.submitInput("Verify JWT signature");
+		const stream = await queue.nextStream();
+		const ts = Date.now();
+		const pThink = makeStreamMessage([{ type: "thinking", thinking: thinkingMarkdown }], {
+			timestamp: ts,
+		});
+		stream.push({ type: "start", partial: makeStreamMessage([], { timestamp: ts }) });
+		stream.push({ type: "thinking_start", contentIndex: 0, partial: pThink });
+		stream.push({ type: "thinking_delta", contentIndex: 0, delta: thinkingMarkdown, partial: pThink });
+		await harness.flush();
+
 		vi.advanceTimersByTime(3100);
-		turn.updateContent(
-			makeAssistantMessage(
-				[
-					{ type: "thinking", thinking: thinkingMarkdown },
-					{ type: "text", text: "Token verified." },
-				],
-				{ timestamp: ts },
-			),
-			false,
+		const pText1 = makeStreamMessage(
+			[
+				{ type: "thinking", thinking: thinkingMarkdown },
+				{ type: "text", text: "Token " },
+			],
+			{ timestamp: ts },
 		);
+		stream.push({ type: "thinking_end", contentIndex: 0, content: thinkingMarkdown, partial: pThink });
+		stream.push({ type: "text_start", contentIndex: 1, partial: pText1 });
+		stream.push({ type: "text_delta", contentIndex: 1, delta: "Token ", partial: pText1 });
+		await harness.flush();
 
-		const collapsedLines = turn.render(90);
-		const collapsedPlain = collapsedLines.map(stripTerminalSequences).join("\n");
-		expect(collapsedPlain).toContain("❙ › Thought for 3s");
-		expect(collapsedPlain).not.toContain("parseToken");
+		/* Наводим указатель на свёрнутый Thinking во время стриминга текста и проверяем сохранение hover при следующей дельте */
+		const liveCollapsedPos = harness.screen().findText("❙ › Thought for 3s");
+		expect(liveCollapsedPos).toBeDefined();
+		const spineBeforeHover = findGlyphRgb(harness, "Thought for 3s", "❙");
+		await harness.mouseMove(liveCollapsedPos!.col + 2, liveCollapsedPos!.row);
+		const spineHovered = findGlyphRgb(harness, "Thought for 3s", "❙");
+		expect(spineHovered).toEqual([97, 175, 239]);
+		expect(spineHovered).not.toEqual(spineBeforeHover);
 
-		const clickRow1 = (height: number) =>
-			turn.handleMouse?.({
-				type: "click",
-				button: "left",
-				x: 4,
-				y: 1,
-				width: 90,
-				height,
-				shift: false,
-				alt: false,
-				ctrl: false,
-			} as any);
+		const pText2 = makeStreamMessage(
+			[
+				{ type: "thinking", thinking: thinkingMarkdown },
+				{ type: "text", text: "Token verified." },
+			],
+			{ timestamp: ts },
+		);
+		stream.push({ type: "text_delta", contentIndex: 1, delta: "verified.", partial: pText2 });
+		await harness.flush();
+		expect(findGlyphRgb(harness, "Thought for 3s", "❙")).toEqual([97, 175, 239]);
 
-		expect(clickRow1(collapsedLines.length)?.handled).toBe(true);
+		stream.push({ type: "done", reason: "stop", message: pText2 });
+		stream.end(pText2);
+		await turnPromise;
 
-		turn.handleMouse?.({
-			type: "move",
-			button: "none",
-			x: 6,
-			y: 1,
-			width: 90,
-			height: 20,
-			shift: false,
-			alt: false,
-			ctrl: false,
-		} as any);
+		/* Кликаем по свёрнутой строке для раскрытия полного отформатированного размышления */
+		vi.advanceTimersByTime(500);
+		const clickExpandPos = harness.screen().findText("❙ › Thought for 3s");
+		expect(clickExpandPos).toBeDefined();
+		await harness.mouseClick(clickExpandPos!.col + 2, clickExpandPos!.row);
 
-		const expandedAnsi = turn.render(90);
-		const expandedPlain = expandedAnsi.map(stripTerminalSequences);
-		const expandedText = expandedPlain.join("\n");
-
+		const expandedScreen = harness.screen();
+		const expandedText = expandedScreen.text();
 		expect(expandedText).toContain("│ ⌄ Thought for 3s");
 		expect(expandedText).not.toContain("клик свернуть");
 		expect(expandedText).not.toContain("· клик");
@@ -353,408 +530,265 @@ describe("30 fps breathing animation & refined Thinking blocks", () => {
 		expect(expandedText).not.toContain("**jwt.ts**");
 		expect(expandedText).toContain("const verified = true;");
 
-		const answerIdx = expandedPlain.findIndex((l) => l.includes("Token verified."));
-		expect(answerIdx).toBeGreaterThan(2);
-		const thoughtSection = expandedPlain.slice(1, answerIdx - 1);
-		expect(thoughtSection.length).toBeGreaterThanOrEqual(5);
-		for (const row of thoughtSection) {
-			expect(row.trimStart().startsWith("│")).toBe(true);
-			expect(row).not.toContain("Copy");
+		const hdrPos = expandedScreen.findText("│ ⌄ Thought for 3s")!;
+		const ansPos = expandedScreen.findText("Token verified.")!;
+		expect(ansPos.row).toBeGreaterThan(hdrPos.row + 3);
+		for (let r = hdrPos.row; r < ansPos.row - 1; r += 1) {
+			const rowText = expandedScreen.rowText(r);
+			if (!rowText.trim()) continue;
+			expect(rowText.trimStart().startsWith("│")).toBe(true);
+			expect(rowText).not.toContain("Copy");
 		}
 
-		await harness.runCommand("silent", "on");
-		const silentText = turn.render(90).map(stripTerminalSequences).join("\n");
+		/* /silent on скрывает раскрытый Thinking, оставляя финальный ответ; /silent off восстанавливает раскрытое состояние */
+		await harness.submitInput("/silent on");
+		const silentText = harness.screen().text();
 		expect(silentText).toContain("Token verified.");
-		expect(silentText).not.toContain("Thought");
+		expect(silentText).not.toContain("Thought for 3s");
 		expect(silentText).not.toContain("parseToken");
 
-		await harness.runCommand("silent", "off");
-		const restoredLines = turn.render(90);
-		expect(restoredLines.map(stripTerminalSequences).join("\n")).toContain("│ ⌄ Thought for 3s");
+		await harness.submitInput("/silent off");
+		expect(harness.screen().text()).toContain("│ ⌄ Thought for 3s");
 
-		expect(clickRow1(restoredLines.length)?.handled).toBe(true);
-		const recollapsedText = turn.render(90).map(stripTerminalSequences).join("\n");
+		vi.advanceTimersByTime(500);
+		const clickCollapsePos = harness.screen().findText("│ ⌄ Thought for 3s")!;
+		await harness.mouseClick(clickCollapsePos.col + 2, clickCollapsePos.row);
+		const recollapsedText = harness.screen().text();
 		expect(recollapsedText).toContain("❙ › Thought for 3s");
 		expect(recollapsedText).not.toContain("parseToken");
-
-		const historicalTurn = new AssistantMessageComponent(
-			makeAssistantMessage(
-				[
-					{ type: "thinking", thinking: "Restored historical reasoning" },
-					{ type: "text", text: "Done." },
-				],
-				{ timestamp: 1_650_000_000_000 },
-			),
-			false,
-			mdTheme,
-		);
-		const histCollapsed = historicalTurn.render(90);
-		historicalTurn.handleMouse?.({
-			type: "click",
-			button: "left",
-			x: 4,
-			y: 1,
-			width: 90,
-			height: histCollapsed.length,
-			shift: false,
-			alt: false,
-			ctrl: false,
-		} as any);
-		const histExpanded = historicalTurn.render(90).map(stripTerminalSequences).join("\n");
-		expect(histExpanded).toContain("│ ⌄ Thought");
-		expect(histExpanded).not.toContain("Thought for");
-		expect(histExpanded).not.toContain("клик свернуть");
 	});
 
-	it("handles narrow widths without overflowing, adapts live between dark and light blue-slate palettes, and tracks event-streamed empty-start thinking runs", async () => {
+	it("locks duration at thinking_end, renders Thinking… on empty start without timers on redacted blocks, adapts live dark/light palettes at narrow widths, and retains timings across 15+ turns", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date("2026-11-24T14:00:00Z"));
-		harness = createExtensionHarness({ theme: "dark", width: 100, height: 32 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
+		const queue = createDeferredStreamQueue();
 
-		const mdTheme = getMarkdownTheme();
-		const msgTs = Date.now();
-		const startMsg = makeAssistantMessage([{ type: "thinking", thinking: "" }], { timestamp: msgTs });
-		await harness.emit("message_start", { message: startMsg });
-		vi.advanceTimersByTime(1200);
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 100,
+			height: 32,
+			thinkingLevel: "medium",
+			streamSimple: (_m, _c, opts) => queue.handler(opts),
+		});
+		vi.runOnlyPendingTimers();
 
-		const deltaMsg = makeAssistantMessage(
-			[{ type: "thinking", thinking: "Line A with `code`\r\nLine B" }],
-			{ timestamp: msgTs },
+		/* 1. Redacted пустой блок не отображается и не добавляет второго таймера поверх волны композитора */
+		const redactedTurn = harness.submitInput("Redacted reasoning check");
+		const sRedacted = await queue.nextStream();
+		const tsRed = Date.now();
+		const pRed = makeStreamMessage(
+			[{ type: "thinking", thinking: "", redacted: true } as AssistantMessage["content"][number]],
+			{ timestamp: tsRed },
 		);
-		await harness.emit("message_update", { message: deltaMsg });
-		vi.advanceTimersByTime(3800);
+		sRedacted.push({ type: "start", partial: pRed });
+		sRedacted.push({ type: "thinking_start", contentIndex: 0, partial: pRed });
+		await harness.flush();
+		expect(harness.screen().text()).not.toContain("Thinking…");
+		expect(vi.getTimerCount()).toBe(1);
 
-		const endMsg = makeAssistantMessage(
+		const doneRed = makeStreamMessage(
 			[
-				{ type: "thinking", thinking: "Line A with `code`\r\nLine B" },
-				{ type: "text", text: "Completed." },
+				{ type: "thinking", thinking: "", redacted: true } as AssistantMessage["content"][number],
+				{ type: "text", text: "Redacted ok." },
 			],
-			{ timestamp: msgTs },
+			{ timestamp: tsRed },
 		);
-		await harness.emit("message_end", { message: endMsg });
-
-		const eventTurn = new AssistantMessageComponent(endMsg, false, mdTheme);
-		expect(eventTurn.render(80).map(stripTerminalSequences).join("\n")).toContain(
-			"❙ › Thought for 5s",
-		);
-
-		const streamingNarrow = new AssistantMessageComponent(undefined, false, mdTheme);
-		streamingNarrow.updateContent(deltaMsg, true);
-		for (const w of [1, 6, 10, 18, 48]) {
-			for (const line of streamingNarrow.render(w)) {
-				expect(visibleWidth(line)).toBeLessThanOrEqual(w);
-			}
-		}
-
-		const darkHeader = streamingNarrow
-			.render(80)
-			.find((l) => stripTerminalSequences(l).includes("Thinking…"))!;
-		harness.setTheme("light");
-		const lightLines = streamingNarrow.render(80);
-		const lightHeader = lightLines.find((l) => stripTerminalSequences(l).includes("Thinking…"))!;
-		expect(lightHeader).not.toBe(darkHeader);
-		const spineMatch = /\x1b\[38;2;(\d+);(\d+);(\d+)m┃/.exec(lightHeader);
-		expect(spineMatch).not.toBeNull();
-		const [r, g, b] = [Number(spineMatch![1]), Number(spineMatch![2]), Number(spineMatch![3])];
-		expect(r).toBeLessThan(g);
-		expect(g).toBeLessThan(b);
-	});
-
-	it("keeps ToolRuntime indicators alive after agent_settled, respects compact-tools working flag without restoring 80ms Loader timers, and coexists with top-border editor wrappers", async () => {
-		vi.useFakeTimers();
-		const tempRoot = mkdtempSync(join(tmpdir(), "pi-ui-ticket12-"));
-		try {
-			const piDir = join(tempRoot, ".pi");
-			mkdirSync(piDir, { recursive: true });
-			writeFileSync(
-				join(piDir, "compact-tools.json"),
-				JSON.stringify({ style: "compact", working: true }),
-				"utf8",
-			);
-
-			harness = createExtensionHarness({
-				theme: "dark",
-				width: 100,
-				height: 32,
-				cwd: tempRoot,
-				projectTrusted: true,
-			});
-
-			const indicatorLog: Array<WorkingIndicatorOptions | undefined> = [];
-			vi.spyOn(harness.ctx.ui, "setWorkingIndicator").mockImplementation((opts) => {
-				indicatorLog.push(opts);
-			});
-
-			harness.mount(conartiPiUi);
-			await harness.startSession();
-
-			expect(indicatorLog.at(-1)).toEqual({ frames: [] });
-
-			await harness.emit("agent_start", {});
-			await harness.emit("tool_execution_start", {
-				toolCallId: "tc-a",
-				toolName: "read",
-				args: { path: "src/index.ts" },
-			});
-			const rowA = new ToolExecutionComponent(
-				"read",
-				"tc-a",
-				{ path: "src/index.ts" },
-				undefined,
-				undefined,
-				harness.tui.asTui(),
-				harness.ctx.cwd,
-			);
-			(rowA as any).markExecutionStarted();
-			rowA.render(80);
-
-			vi.advanceTimersByTime(33 * 5);
-			expect(indicatorLog.at(-1)).toEqual({ frames: [] });
-
-			await harness.emit("agent_settled", {});
-			expect(vi.getTimerCount()).toBe(0);
-
-			await harness.emit("agent_start", {});
-			await harness.emit("tool_execution_start", {
-				toolCallId: "tc-b",
-				toolName: "read",
-				args: { path: "src/shared/ansi.ts" },
-			});
-			const rowB = new ToolExecutionComponent(
-				"read",
-				"tc-b",
-				{ path: "src/shared/ansi.ts" },
-				undefined,
-				undefined,
-				harness.tui.asTui(),
-				harness.ctx.cwd,
-			);
-			(rowB as any).markExecutionStarted();
-			const beforeTick = rowB.render(80).join("\n");
-			vi.advanceTimersByTime(33 * 6);
-			const afterTick = rowB.render(80).join("\n");
-			expect(afterTick).not.toBe(beforeTick);
-
-			writeFileSync(join(piDir, "compact-tools.json"), JSON.stringify({ style: "off" }), "utf8");
-			await harness.runCommand("compact-tools", "off");
-			const restoredIndicator = indicatorLog.at(-1);
-			expect(restoredIndicator?.frames?.length).toBe(1);
-			expect(stripTerminalSequences(restoredIndicator?.frames?.[0] ?? "")).toBe("◆");
-
-			const prevFactory = harness.ctx.ui.getEditorComponent();
-			harness.ctx.ui.setEditorComponent((t, editorTheme, kb) => {
-				const ed =
-					prevFactory?.(t as any, editorTheme, kb) ??
-					new CustomEditor(t as any, editorTheme, kb, { embedWorkingStatus: true });
-				(ed as any).embedWorkingStatus = true;
-				return ed;
-			});
-
-			class HostBorderStatusShim extends Loader {
-				renderInBorder(width: number): string {
-					const line = super.render(width + 2)[1] ?? "";
-					return truncateToWidth(line.startsWith(" ") ? line.slice(1).trimEnd() : line.trimEnd(), width, "");
-				}
-				renderSpinnerInBorder(width: number): string {
-					return truncateToWidth((this as any).getRenderedIndicator(), width, "");
-				}
-			}
-
-			const borderStatus = new HostBorderStatusShim(
-				harness.tui.asTui(),
-				(s) => s,
-				(s) => s,
-				"Working... (esc to interrupt)",
-				restoredIndicator,
-			);
-			(harness.editor as any).setWorkingStatusIndicator(borderStatus);
-			for (const w of [14, 30, 64, 100]) {
-				const topLine = harness.editor!.render(w)[0]!;
-				expect(visibleWidth(topLine)).toBe(w);
-				expect(stripTerminalSequences(topLine)).toContain("◆");
-			}
-			borderStatus.stop();
-
-			await harness.emit("agent_end", { messages: [] });
-			expect(vi.getTimerCount()).toBe(0);
-		} finally {
-			rmSync(tempRoot, { recursive: true, force: true });
-		}
-	});
-
-	it("locks thinking duration at thinking_end / empty text_start, renders Thinking… on empty non-redacted start without leaking timers on redacted blocks, and retains session timings across 15+ char-by-char streamed turns", async () => {
-		vi.useFakeTimers();
-		vi.setSystemTime(new Date("2026-11-24T15:00:00Z"));
-		harness = createExtensionHarness({ theme: "dark", width: 100, height: 32 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-
-		const mdTheme = getMarkdownTheme();
-
-		const redactedTurn = new AssistantMessageComponent(undefined, false, mdTheme);
-		redactedTurn.updateContent(
-			makeAssistantMessage([{ type: "thinking", thinking: "", redacted: true }], {
-				timestamp: Date.now(),
-			}),
-			true,
-		);
-		expect(redactedTurn.render(80)).toEqual([]);
+		sRedacted.push({ type: "done", reason: "stop", message: doneRed });
+		sRedacted.end(doneRed);
+		await redactedTurn;
 		expect(vi.getTimerCount()).toBe(0);
 
-		const tsEndLock = Date.now() + 100;
-		const lockTurn = new AssistantMessageComponent(undefined, false, mdTheme);
-		const emptyStartMsg = makeAssistantMessage([{ type: "thinking", thinking: "" }], {
-			timestamp: tsEndLock,
-		});
-		await harness.emit("message_start", { message: emptyStartMsg });
-		lockTurn.updateContent(emptyStartMsg, true);
-		expect(lockTurn.render(80).map(stripTerminalSequences).join("\n")).toContain("┃ Thinking…");
+		/* 2. Пустой не-redacted старт сразу показывает ┃ Thinking…, а thinking_end фиксирует длительность 3s даже при 5s задержке текста */
+		const lockTurn = harness.submitInput("Early thinking_end lock");
+		const sLock = await queue.nextStream();
+		const tsLock = Date.now() + 100;
+		const pEmpty = makeStreamMessage([{ type: "thinking", thinking: "" }], { timestamp: tsLock });
+		sLock.push({ type: "start", partial: makeStreamMessage([], { timestamp: tsLock }) });
+		sLock.push({ type: "thinking_start", contentIndex: 0, partial: pEmpty });
+		await harness.flush();
+		expect(harness.screen().text()).toContain("┃ Thinking…");
+
+		/* Проверка узких ширин и переключения dark -> light прямо во время активного стриминга */
+		const darkSpineRgb = findGlyphRgb(harness, "Thinking…", "┃");
+		expect(darkSpineRgb).toBeDefined();
+		harness.setTheme("light");
+		const lightSpineRgb = findGlyphRgb(harness, "Thinking…", "┃");
+		expect(lightSpineRgb).toBeDefined();
+		expect(lightSpineRgb).not.toEqual(darkSpineRgb);
+		expect(lightSpineRgb![0]).toBeLessThan(lightSpineRgb![1]);
+		expect(lightSpineRgb![1]).toBeLessThan(lightSpineRgb![2]);
+
+		for (const narrowW of [18, 48]) {
+			const lines = harness.renderFrame(narrowW, 24);
+			for (const line of lines) {
+				expect(visibleWidth(line)).toBeLessThanOrEqual(narrowW);
+			}
+		}
+		await harness.resize(100, 32);
+		harness.setTheme("dark");
 
 		vi.advanceTimersByTime(3000);
-		const thinkingEndMsg = makeAssistantMessage(
+		const pThinkDone = makeStreamMessage(
 			[{ type: "thinking", thinking: "Finished reasoning early" }],
-			{ timestamp: tsEndLock },
+			{ timestamp: tsLock },
 		);
-		await harness.emit("message_update", {
-			message: thinkingEndMsg,
-			assistantMessageEvent: {
-				type: "thinking_end",
-				contentIndex: 0,
-				content: "Finished reasoning early",
-				partial: thinkingEndMsg,
-			},
+		sLock.push({
+			type: "thinking_end",
+			contentIndex: 0,
+			content: "Finished reasoning early",
+			partial: pThinkDone,
 		});
-		lockTurn.updateContent(thinkingEndMsg, true);
-		expect(lockTurn.render(80).map(stripTerminalSequences).join("\n")).toContain(
-			"❙ › Thought for 3s",
-		);
-		expect(vi.getTimerCount()).toBe(0);
+		await harness.flush();
+		expect(harness.screen().text()).toContain("❙ › Thought for 3s");
+		expect(vi.getTimerCount()).toBe(1);
 
 		vi.advanceTimersByTime(5000);
-		const finalLockMsg = makeAssistantMessage(
+		const doneLock = makeStreamMessage(
 			[
 				{ type: "thinking", thinking: "Finished reasoning early" },
 				{ type: "text", text: "Delayed answer." },
 			],
-			{ timestamp: tsEndLock },
+			{ timestamp: tsLock },
 		);
-		await harness.emit("message_end", { message: finalLockMsg });
-		lockTurn.updateContent(finalLockMsg, false);
-		expect(lockTurn.render(80).map(stripTerminalSequences).join("\n")).toContain(
-			"❙ › Thought for 3s",
-		);
+		sLock.push({ type: "done", reason: "stop", message: doneLock });
+		sLock.end(doneLock);
+		await lockTurn;
+		expect(harness.screen().text()).toContain("❙ › Thought for 3s");
 
-		const completedTurns: any[] = [];
-		for (let t = 0; t < 15; t++) {
+		/* 3. 15 посимвольно простримленных ходов сохраняют точную длительность первого хода после /reload */
+		for (let t = 0; t < 15; t += 1) {
+			const turnP = harness.submitInput(`Streamed turn #${t + 1}`);
+			const st = await queue.nextStream();
 			const turnTs = Date.now() + t + 1;
-			let acc = "";
-			const baseText = `Turn ${t} detailed thought `.padEnd(170, "x");
-			await harness.emit("message_start", {
-				message: makeAssistantMessage([{ type: "thinking", thinking: "" }], { timestamp: turnTs }),
+			const fullThought = `Turn ${t} detailed thought `.padEnd(170, "x");
+			st.push({
+				type: "start",
+				partial: makeStreamMessage([{ type: "thinking", thinking: "" }], { timestamp: turnTs }),
 			});
-			for (let ch = 0; ch < baseText.length; ch++) {
-				acc += baseText[ch]!;
-				await harness.emit("message_update", {
-					message: makeAssistantMessage([{ type: "thinking", thinking: acc }], {
-						timestamp: turnTs,
-					}),
+			st.push({
+				type: "thinking_start",
+				contentIndex: 0,
+				partial: makeStreamMessage([{ type: "thinking", thinking: "" }], { timestamp: turnTs }),
+			});
+			let acc = "";
+			for (let i = 0; i < fullThought.length; i += 25) {
+				const chunk = fullThought.slice(i, i + 25);
+				acc += chunk;
+				st.push({
+					type: "thinking_delta",
+					contentIndex: 0,
+					delta: chunk,
+					partial: makeStreamMessage([{ type: "thinking", thinking: acc }], { timestamp: turnTs }),
 				});
 			}
+			await harness.flush();
 			vi.advanceTimersByTime(3000);
-			const doneMsg = makeAssistantMessage(
+			const doneTurn = makeStreamMessage(
 				[
-					{ type: "thinking", thinking: acc },
-					{ type: "text", text: `Reply ${t}` },
+					{ type: "thinking", thinking: fullThought },
+					{ type: "text", text: `AnchorReply_${t}` },
 				],
 				{ timestamp: turnTs },
 			);
-			await harness.emit("message_end", { message: doneMsg });
-			completedTurns.push(doneMsg);
+			st.push({ type: "thinking_end", contentIndex: 0, content: fullThought, partial: doneTurn });
+			st.push({ type: "done", reason: "stop", message: doneTurn });
+			st.end(doneTurn);
+			await turnP;
 		}
 
-		await harness.emit("session_start", { reason: "reload" });
-		const reloadedFirst = new AssistantMessageComponent(completedTurns[0], false, mdTheme);
-		expect(reloadedFirst.render(80).map(stripTerminalSequences).join("\n")).toContain(
-			"❙ › Thought for 3s",
-		);
+		await harness.reload();
+		await harness.mouseWheel("up", 40, 10, 40);
+		const topReloaded = harness.screen().text();
+		expect(topReloaded).toContain("❙ › Thought for 3s");
 	});
 
-	it("applies strongFg color directly to bold spans, omits bare fence borders from the 3-line streaming tail, and preserves Thinking hover state across streaming text deltas", async () => {
+	it("keeps ToolRuntime 30 fps diamond alive across turns under compact-tools working: true without 80ms Loader timers and restores ◆ indicator on /compact-tools off", async () => {
 		vi.useFakeTimers();
-		harness = createExtensionHarness({ theme: "dark", width: 100, height: 32 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-
-		const mdTheme = getMarkdownTheme();
-		const streamingCode = new AssistantMessageComponent(undefined, false, mdTheme);
-		streamingCode.updateContent(
-			makeAssistantMessage([
-				{
-					type: "thinking",
-					thinking: [
-						"Check **auth.ts** exports",
-						"```ts",
-						"const tokenValid = true;",
-						"const sessionReady = true;",
-					].join("\n"),
-				},
-			]),
-			true,
+		const tempRoot = mkdtempSync(join(tmpdir(), "pi-ui-thinking-working-"));
+		tempDirs.push(tempRoot);
+		mkdirSync(join(tempRoot, ".pi"), { recursive: true });
+		writeFileSync(
+			join(tempRoot, ".pi", "compact-tools.json"),
+			`${JSON.stringify({ style: "compact", working: true }, null, 2)}\n`,
+			"utf8",
 		);
+		writeFileSync(join(tempRoot, "sample.ts"), "export const x = 1;\n", "utf8");
 
-		const codeAnsi = streamingCode.render(80);
-		const codePlain = codeAnsi.map(stripTerminalSequences).map((l) => l.trim()).filter(Boolean);
-		expect(codePlain).toEqual([
-			"┃ Thinking…",
-			"▎ Check auth.ts exports",
-			"▎   const tokenValid = true;",
-			"▎   const sessionReady = true;",
-		]);
+		let releaseToolGate: (() => void) | undefined;
+		const gatedTool = defineTool({
+			name: "gated_probe",
+			label: "Gated Probe",
+			description: "Pauses execution to inspect active tool animation under working: true",
+			parameters: Type.Object({ label: Type.String() }),
+			async execute() {
+				await new Promise<void>((resolve) => {
+					releaseToolGate = resolve;
+				});
+				return {
+					content: [{ type: "text", text: "probe finished" }],
+					details: {},
+				};
+			},
+		});
 
-		const boldLine = codeAnsi.find((l) => stripTerminalSequences(l).includes("Check auth.ts exports"))!;
-		expect(boldLine).toContain("\x1b[38;2;156;174;200mauth.ts");
+		const queue = createDeferredStreamQueue();
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			cwd: tempRoot,
+			projectTrusted: true,
+			width: 100,
+			height: 32,
+			customTools: [gatedTool],
+			streamSimple: (_m, _c, opts) => queue.handler(opts),
+		});
+		vi.runOnlyPendingTimers();
 
-		const hoverTurn = new AssistantMessageComponent(undefined, false, mdTheme);
-		const hoverTs = Date.now();
-		hoverTurn.updateContent(
-			makeAssistantMessage(
-				[
-					{ type: "thinking", thinking: "Initial reasoning" },
-					{ type: "text", text: "Part 1" },
-				],
-				{ timestamp: hoverTs },
-			),
-			true,
+		expect(vi.getTimerCount()).toBe(0);
+
+		/* Ход 1: во время исполнения тула работает ровно один 30 fps таймер без 80ms Loader */
+		const t1 = harness.submitInput("Run gated tool 1");
+		const s1 = await queue.nextStream();
+		const callMsg1 = makeStreamMessage(
+			[{ type: "toolCall", id: "gp-1", name: "gated_probe", arguments: { label: "alpha" } }],
+			{ stopReason: "toolUse" },
 		);
+		s1.push({ type: "done", reason: "toolUse", message: callMsg1 });
+		s1.end(callMsg1);
+		await harness.flush();
 
-		const beforeHoverLine = hoverTurn.render(80)[1]!;
-		hoverTurn.handleMouse?.({
-			type: "move",
-			button: "none",
-			x: 4,
-			y: 1,
-			width: 80,
-			height: 6,
-			shift: false,
-			alt: false,
-			ctrl: false,
-		} as any);
-		const hoveredLine = hoverTurn.render(80)[1]!;
-		expect(hoveredLine).not.toBe(beforeHoverLine);
+		expect(releaseToolGate).toBeDefined();
+		expect(vi.getTimerCount()).toBe(1);
+		const diamondBefore = findGlyphRgb(harness, "gated_probe", "◆");
+		vi.advanceTimersByTime(33 * 6);
+		harness.flushFrame();
+		const diamondAfter = findGlyphRgb(harness, "gated_probe", "◆");
+		expect(diamondBefore).toBeDefined();
+		expect(diamondAfter).toBeDefined();
+		expect(diamondAfter).not.toEqual(diamondBefore);
 
-		hoverTurn.updateContent(
-			makeAssistantMessage(
-				[
-					{ type: "thinking", thinking: "Initial reasoning" },
-					{ type: "text", text: "Part 1 and Part 2" },
-				],
-				{ timestamp: hoverTs },
-			),
-			true,
-		);
-		const afterDeltaLine = hoverTurn.render(80)[1]!;
-		expect(afterDeltaLine).toBe(hoveredLine);
+		releaseToolGate!();
+		releaseToolGate = undefined;
+		const s1Reply = await queue.nextStream();
+		const done1 = makeStreamMessage([{ type: "text", text: "First tool turn done." }]);
+		s1Reply.push({ type: "done", reason: "stop", message: done1 });
+		s1Reply.end(done1);
+		await t1;
+		expect(vi.getTimerCount()).toBe(0);
+
+		/* Ход 2 после завершения первого: анимация тула продолжает оживать, а /compact-tools off возвращает индикатор ◆ в композитор */
+		await harness.submitInput("/compact-tools off");
+		const t2 = harness.submitInput("Check restored composer working diamond");
+		const s2 = await queue.nextStream();
+		s2.push({ type: "start", partial: makeStreamMessage([]) });
+		await harness.flush();
+
+		expect(vi.getTimerCount()).toBe(1);
+		expect(findGlyphRgb(harness, "Working", "◆")).toBeDefined();
+
+		const done2 = makeStreamMessage([{ type: "text", text: "All good." }]);
+		s2.push({ type: "done", reason: "stop", message: done2 });
+		s2.end(done2);
+		await t2;
+		expect(vi.getTimerCount()).toBe(0);
 	});
 });
