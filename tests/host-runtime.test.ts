@@ -1,41 +1,67 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	AssistantMessageComponent,
+	defineTool,
 	ToolExecutionComponent,
 	UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
-import { Container, HStack, ScrollView, TuiAltScreen, VStack, stripTerminalSequences, type TUI } from "@earendil-works/pi-tui";
-import conartiPiUi from "../src/index.ts";
-import {
-	getActiveHostRuntime,
-	setHostRuntimeAdapter,
-	type HostRuntimeAdapter,
-} from "../src/shared/host-runtime.ts";
+import { Type } from "typebox";
+import { HStack, ScrollView, TuiAltScreen, VStack } from "@earendil-works/pi-tui";
+import { getActiveHostRuntime, unwrapHostTui } from "../src/shared/host-runtime.ts";
 import { hookMethod } from "../src/shared/runtime-hooks.ts";
-import { createExtensionHarness, type ExtensionHarness } from "./harness/index.ts";
+import {
+	createInteractiveHarness,
+	fauxAssistantMessage,
+	fauxThinking,
+	fauxToolCall,
+	type InteractiveHarness,
+} from "./harness/index.ts";
 
-describe("Host Runtime seam", () => {
-	let harness: ExtensionHarness | undefined;
+function buildMultiLineText(prefix: string, lines: number): string {
+	const out: string[] = [];
+	for (let i = 1; i <= lines; i += 1) {
+		out.push(`${prefix} row ${i}: transcript line for fullscreen chrome testing.`);
+	}
+	return out.join("\n");
+}
+
+function hasRenderedOutlineRail(harness: InteractiveHarness): boolean {
+	const screen = harness.screen();
+	const railStart = screen.width - 3;
+	const railEnd = screen.width - 1;
+	for (let r = 0; r < screen.height; r += 1) {
+		if (/[●○▲▼│]/.test(screen.sliceText(r, railStart, railEnd))) {
+			return true;
+		}
+	}
+	return false;
+}
+
+describe("Host Runtime seam (real InteractiveMode)", () => {
+	let harness: InteractiveHarness | undefined;
 	const tempDirs: string[] = [];
 
 	function createProjectDir(compactConfig?: Record<string, unknown>): string {
-		const dir = mkdtempSync(join(tmpdir(), "pi-ui-ticket5-"));
+		const dir = mkdtempSync(join(tmpdir(), "pi-ui-host-rt-"));
 		tempDirs.push(dir);
 		if (compactConfig) {
 			mkdirSync(join(dir, ".pi"), { recursive: true });
-			writeFileSync(join(dir, ".pi", "compact-tools.json"), JSON.stringify(compactConfig, null, 2));
+			writeFileSync(
+				join(dir, ".pi", "compact-tools.json"),
+				`${JSON.stringify(compactConfig, null, 2)}\n`,
+				"utf8",
+			);
 		}
 		return dir;
 	}
 
 	afterEach(async () => {
 		vi.useRealTimers();
-		setHostRuntimeAdapter(undefined);
 		if (harness) {
-			await harness.shutdownSession();
+			await harness.dispose();
 			harness = undefined;
 		}
 		while (tempDirs.length > 0) {
@@ -43,74 +69,126 @@ describe("Host Runtime seam", () => {
 		}
 	});
 
-	it("acquires host TUI once per session_start with zero belowEditor probe widgets", async () => {
-		harness = createExtensionHarness({ theme: "dark", width: 120, height: 32 });
-		const customSpy = vi.spyOn(harness.ctx.ui, "custom");
-		const setWidgetSpy = vi.spyOn(harness.ctx.ui, "setWidget");
+	it("acquires host TUI Proxy in fullscreen mode with unwrapped VStack layoutRoot and zero belowEditor probe widgets", async () => {
+		harness = await createInteractiveHarness({ theme: "dark", width: 120, height: 32 });
 
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-
-		// Host TUI acquired once via a single probe
-		expect(customSpy).toHaveBeenCalledTimes(1);
-
-		// Zero empty belowEditor probe widgets registered by tool-call controllers
-		const belowEditorCalls = setWidgetSpy.mock.calls.filter(([, , opts]) => {
-			const placement = (opts as { placement?: string } | undefined)?.placement;
-			return placement === "belowEditor";
-		});
-		expect(belowEditorCalls).toEqual([]);
-		expect([...harness.widgets.keys()].filter((key) => key.startsWith("compact-tools-"))).toEqual([]);
-
-		// Shared handle exposes TUI, primary ScrollView, chat container, and fullscreen layout
 		const runtime = getActiveHostRuntime();
 		expect(runtime).toBeDefined();
-		expect(runtime!.tui).toBe(harness.tui.asTui());
+		expect(runtime!.tui).toBe(harness.tui);
+		expect(unwrapHostTui(runtime!.tui)).not.toBe(runtime!.tui);
+		expect(unwrapHostTui(runtime!.tui)).toBeInstanceOf(TuiAltScreen);
 		expect(runtime!.isFullscreen).toBe(true);
-		expect(runtime!.scroll).toBe(harness.tui.scroll);
+		expect(runtime!.scroll).toBeInstanceOf(ScrollView);
 		expect(runtime!.scroll?.scrollbar).toBe("auto");
-		expect(runtime!.chatContainer).toBe(harness.tui.chatContainer);
-
-		expect(harness.tui.layoutRoot).toBeInstanceOf(VStack);
-		const entries = (harness.tui.layoutRoot as unknown as { entries?: Array<{ component: unknown }> }).entries ?? [];
-		expect(entries.some((entry) => entry.component instanceof HStack)).toBe(false);
+		expect(runtime!.chatContainer).toBeDefined();
 		expect(runtime!.viewportSlots?.topSlot).toBeDefined();
 		expect(runtime!.viewportSlots?.rightRail).toBeDefined();
+
+		const layoutRoot = (harness.tui as unknown as { layoutRoot?: unknown }).layoutRoot;
+		expect(layoutRoot).toBeInstanceOf(VStack);
+		const entries =
+			(layoutRoot as { entries?: Array<{ component: unknown }> }).entries ?? [];
+		expect(entries.some((entry) => entry.component instanceof HStack)).toBe(false);
+
+		/* Контейнер widgetContainerBelow (индекс 5 в tui.children) не содержит пустых пробных виджетов */
+		const rootChildren = (harness.tui as unknown as { children?: Array<{ children?: unknown[] }> }).children ?? [];
+		const widgetBelow = rootChildren[5];
+		expect(widgetBelow?.children ?? []).toEqual([]);
 	});
 
-	it("falls back gracefully in non-fullscreen TUI mode without a ScrollView or layoutRoot", async () => {
-		harness = createExtensionHarness({ theme: "dark", width: 120, height: 32 });
-		const chatContainer = new Container();
-		const nonFullscreenTui = {
-			children: [chatContainer, new Container(), new Container(), new Container(), new Container(), new Container(), new Container()],
-			terminal: { columns: 120, rows: 32, write: vi.fn() },
-			requestRender: vi.fn(),
-		} as unknown as TUI;
-
-		const adapter: HostRuntimeAdapter = {
-			acquire: async (ctx) => ({
-				tui: nonFullscreenTui,
-				keybindings: harness!.keybindings,
-				theme: () => ctx.ui.theme,
-			}),
-		};
-		setHostRuntimeAdapter(adapter);
-
-		const customSpy = vi.spyOn(harness.ctx.ui, "custom");
-		harness.mount(conartiPiUi);
-		await expect(harness.startSession()).resolves.toBeUndefined();
-
-		// Injectable adapter bypassed ctx.ui.custom
-		expect(customSpy).not.toHaveBeenCalled();
+	it("transitions live between regular and fullscreen TUI modes, rebinding ViewportChromeCompositor onto new renderers and dismissing Hover Popups cleanly", async () => {
+		/* 1. Старт в regular-режиме -> живое переключение в fullscreen */
+		harness = await createInteractiveHarness({
+			tuiMode: "regular",
+			theme: "dark",
+			width: 120,
+			height: 28,
+			responses: [
+				fauxAssistantMessage(buildMultiLineText("TurnOne", 18)),
+				fauxAssistantMessage(
+					`${buildMultiLineText("TurnTwo", 10)}\nQuotable line across mode switch`,
+				),
+			],
+		});
 
 		const runtime = getActiveHostRuntime();
 		expect(runtime).toBeDefined();
 		expect(runtime!.isFullscreen).toBe(false);
 		expect(runtime!.scroll).toBeUndefined();
-		expect(runtime!.chatContainer).toBe(chatContainer);
+		expect(runtime!.viewportSlots).toBeUndefined();
+		expect(runtime!.chatContainer).toBeDefined();
 
-		// Shutdown clears active host runtime cleanly
-		await harness.shutdownSession();
+		await harness.submitInput("Prompt in regular mode 1");
+		await harness.submitInput("Prompt in regular mode 2");
+
+		const switchedToFullscreen = await harness.setTuiMode("fullscreen");
+		expect(switchedToFullscreen).toBe(true);
+		expect(runtime!.isFullscreen).toBe(true);
+		expect(runtime!.scroll).toBeInstanceOf(ScrollView);
+		expect(runtime!.viewportSlots?.topSlot).toBeDefined();
+		expect(runtime!.viewportSlots?.rightRail).toBeDefined();
+		expect(hasRenderedOutlineRail(harness)).toBe(true);
+
+		const firstAltRenderer = unwrapHostTui(harness.tui);
+		expect(firstAltRenderer).toBeInstanceOf(TuiAltScreen);
+
+		/* Открываем неблокирующий Hover Popup выделения (╭ ❝ Цитировать ╮) перед обратным переключением режима */
+		const fsScreen = harness.screen();
+		const quoteTarget = fsScreen.findText("Quotable line across mode switch");
+		expect(quoteTarget).toBeDefined();
+		await harness.mouseDrag(
+			quoteTarget!.col,
+			quoteTarget!.row,
+			quoteTarget!.col + 12,
+			quoteTarget!.row,
+		);
+		expect(harness.screen().text()).toContain("╭ ❝ Цитировать ╮");
+
+		/* 2. Переключение fullscreen -> regular не должно блокироваться транзиентным Hover Popup и должно снимать композитор */
+		const switchedToRegular = await harness.setTuiMode("regular");
+		expect(switchedToRegular).toBe(true);
+		expect(runtime!.isFullscreen).toBe(false);
+		expect(runtime!.scroll).toBeUndefined();
+		expect(runtime!.viewportSlots).toBeUndefined();
+
+		/* 3. Повторное переключение regular -> fullscreen создаёт новый экземпляр TuiAltScreen и перепривязывает хром */
+		const switchedBackToFullscreen = await harness.setTuiMode("fullscreen");
+		expect(switchedBackToFullscreen).toBe(true);
+		const secondAltRenderer = unwrapHostTui(harness.tui);
+		expect(secondAltRenderer).toBeInstanceOf(TuiAltScreen);
+		expect(secondAltRenderer).not.toBe(firstAltRenderer);
+		expect(runtime!.isFullscreen).toBe(true);
+		expect(runtime!.viewportSlots?.topSlot).toBeDefined();
+		expect(runtime!.viewportSlots?.rightRail).toBeDefined();
+		expect(hasRenderedOutlineRail(harness)).toBe(true);
+
+		/* Прокрутка вверх на новом TuiAltScreen отрисовывает Sticky Prompt первого хода */
+		await harness.mouseWheel("up", 40, 10, 8);
+		const stickyTop = [0, 1, 2, 3].map((r) => harness!.screen().rowText(r)).join("\n");
+		expect(stickyTop).toContain("Prompt in regular mode 1");
+		await harness.mouseWheel("down", 40, 10, 12);
+
+		/* Открываем блокирующий Modal Card (/palette) и проверяем, что он запрещает смену режима TUI до закрытия по Escape */
+		await harness.paste("/palette", true);
+		await harness.sendInput("\r");
+		expect(harness.screen().text()).toContain("Поиск команд");
+		expect(await harness.setTuiMode("regular")).toBe(false);
+		await harness.pressKey("\x1b");
+		expect(harness.screen().text()).not.toContain("Поиск команд");
+
+		/* Проверяем, что на новом экземпляре TuiAltScreen снова работает попап цитирования по выделению мышью */
+		const reboundScreen = harness.screen();
+		const reboundTarget = reboundScreen.findText("Quotable line across mode switch");
+		expect(reboundTarget).toBeDefined();
+		await harness.mouseDrag(
+			reboundTarget!.col,
+			reboundTarget!.row,
+			reboundTarget!.col + 12,
+			reboundTarget!.row,
+		);
+		expect(harness.screen().text()).toContain("╭ ❝ Цитировать ╮");
+
+		await harness.dispose();
 		expect(getActiveHostRuntime()).toBeUndefined();
 		harness = undefined;
 	});
@@ -124,7 +202,7 @@ describe("Host Runtime seam", () => {
 			},
 		};
 
-		// Simulate an older extension wrapping proto.render and saving the unwrapped original under a legacy symbol
+		/* Имитация устаревшего расширения, сохранившего исходный метод под legacy-символом */
 		const legacyOriginalSym = Symbol.for("test.legacy.original.render");
 		const unwrapped = proto.render;
 		Object.defineProperty(proto, legacyOriginalSym, { value: unwrapped });
@@ -132,145 +210,158 @@ describe("Host Runtime seam", () => {
 			return `legacy:${unwrapped.call(this, value)}`;
 		};
 
-		hookMethod(proto, "render", "test.consolidated", (self, args, orig) => `v1:${orig.apply(self, args)}`, [legacyOriginalSym]);
+		hookMethod(
+			proto,
+			"render",
+			"test.consolidated",
+			(_self, args, orig) => `v1:${orig.apply(_self, args)}`,
+			[legacyOriginalSym],
+		);
 		const firstWrapper = proto.render;
 		expect(proto.render("a")).toBe("v1:orig:a");
 		expect(originalCalls).toBe(1);
 
-		// Hot-swap behavior on reload: same wrapper reference, no stacking
-		hookMethod(proto, "render", "test.consolidated", (self, args, orig) => `v2:${orig.apply(self, args)}`, [legacyOriginalSym]);
+		/* Повторная регистрация при /reload обновляет обработчик на месте без вложенных обёрток */
+		hookMethod(
+			proto,
+			"render",
+			"test.consolidated",
+			(_self, args, orig) => `v2:${orig.apply(_self, args)}`,
+			[legacyOriginalSym],
+		);
 		expect(proto.render).toBe(firstWrapper);
 		expect(proto.render("b")).toBe("v2:orig:b");
 		expect(originalCalls).toBe(2);
 	});
 
-	it("hot-swaps cleanly across reloads and style switches without stacking wrappers or leaking timers", async () => {
-		vi.useFakeTimers();
+	it("hot-swaps cleanly across real /reload and style switches without stacking wrappers or leaking timers", async () => {
 		const projectDir = createProjectDir({ style: "compact", thinking: true, working: true });
-		harness = createExtensionHarness({ theme: "dark", cwd: projectDir, projectTrusted: true });
+		writeFileSync(join(projectDir, "sample.txt"), "hello reload\n", "utf8");
 
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-		await harness.runCommand("silent", "on");
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			cwd: projectDir,
+			projectTrusted: true,
+			width: 120,
+			height: 30,
+			responses: [
+				fauxAssistantMessage(
+					[
+						fauxThinking("Inspecting sample file\nDetailed internal reasoning body"),
+						fauxToolCall("read", { path: "sample.txt" }),
+					],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage(buildMultiLineText("FirstReloadReply", 16)),
+				fauxAssistantMessage(buildMultiLineText("SecondReloadReply", 16)),
+			],
+		});
 
-		// Trigger timers and lazy activity hooks during active run
-		await harness.emit("agent_start", {});
-		vi.advanceTimersByTime(300);
+		await harness.submitInput("/silent on");
+		await harness.submitInput("Run first turn before reload");
 
 		const updateContentAfterFirst = AssistantMessageComponent.prototype.updateContent;
 		const assistantRenderAfterFirst = AssistantMessageComponent.prototype.render;
 		const toolRenderAfterFirst = ToolExecutionComponent.prototype.render;
 		const userRenderAfterFirst = UserMessageComponent.prototype.render;
-		const altProto = TuiAltScreen.prototype as any;
+		const altProto = TuiAltScreen.prototype as unknown as Record<string, unknown>;
 		const altDoRenderAfterFirst = altProto.doRender;
 		const altMouseAfterFirst = altProto.handleMouseEvent;
+		const altCompositeAfterFirst = altProto.compositeScrollToEndIndicator;
 
-		// Simulate /reload: shutdown(reload) -> fresh extension mount -> session_start(reload)
-		await harness.emit("session_shutdown", { reason: "reload" });
-		expect(vi.getTimerCount()).toBe(0);
+		/* Выполняем настоящий /reload через InteractiveMode */
+		await harness.reload();
+		await harness.submitInput("Run second turn after reload");
+		await harness.submitInput("/silent off");
 
-		const reloaded = createExtensionHarness({ theme: "dark", cwd: projectDir, projectTrusted: true });
-		reloaded.mount(conartiPiUi);
-		await reloaded.emit("session_start", { reason: "reload" });
-		await reloaded.emit("agent_start", {});
-		vi.advanceTimersByTime(160);
-		await reloaded.runCommand("silent", "off");
-
-		// Wrapper identities must be unchanged (no stacking)
 		expect(AssistantMessageComponent.prototype.updateContent).toBe(updateContentAfterFirst);
 		expect(AssistantMessageComponent.prototype.render).toBe(assistantRenderAfterFirst);
 		expect(ToolExecutionComponent.prototype.render).toBe(toolRenderAfterFirst);
 		expect(UserMessageComponent.prototype.render).toBe(userRenderAfterFirst);
 		expect(altProto.doRender).toBe(altDoRenderAfterFirst);
 		expect(altProto.handleMouseEvent).toBe(altMouseAfterFirst);
+		expect(altProto.compositeScrollToEndIndicator).toBe(altCompositeAfterFirst);
 
-		// Switch styles: claude -> codex -> off -> compact
-		const setWidgetSpy = vi.spyOn(reloaded.ctx.ui, "setWidget");
-		await reloaded.runCommand("compact-tools", "claude");
-		await reloaded.runCommand("compact-tools", "codex");
-		await reloaded.runCommand("compact-tools", "off");
-		await reloaded.emit("agent_end", { messages: [] });
-		// Turning style off + ending run must stop all timers
+		/* После /reload Outline Rail остаётся привязанным к текущему TuiAltScreen */
+		expect(hasRenderedOutlineRail(harness)).toBe(true);
+
+		/* Переключаем стили тулов под fake timers и проверяем отсутствие утечек таймеров и belowEditor-виджетов */
+		vi.useFakeTimers();
+		await harness.submitInput("/compact-tools claude");
+		await harness.submitInput("/compact-tools codex");
+		await harness.submitInput("/compact-tools off");
+		harness.flushFrame();
 		expect(vi.getTimerCount()).toBe(0);
 
-		await reloaded.runCommand("compact-tools", "compact");
+		await harness.submitInput("/compact-tools compact");
+		harness.flushFrame();
 
-		// Zero belowEditor probe widgets created across style switches
-		const belowEditorCalls = setWidgetSpy.mock.calls.filter(([, , opts]) => {
-			const placement = (opts as { placement?: string } | undefined)?.placement;
-			return placement === "belowEditor";
-		});
-		expect(belowEditorCalls).toEqual([]);
+		const rootChildren = (harness.tui as unknown as { children?: Array<{ children?: unknown[] }> }).children ?? [];
+		expect(rootChildren[5]?.children ?? []).toEqual([]);
 
-		await reloaded.shutdownSession();
+		await harness.dispose();
 		expect(vi.getTimerCount()).toBe(0);
 		harness = undefined;
 	});
 
-	it("preserves compact-tools thinking and working config flags through the unified Host Runtime seam", async () => {
-		vi.useFakeTimers();
-		const projectDir = createProjectDir({ style: "compact", thinking: true, working: true });
-		harness = createExtensionHarness({ theme: "dark", cwd: projectDir, projectTrusted: true });
+	it("preserves compact-tools thinking and working config flags and groups exploration reads in claude style without belowEditor widgets", async () => {
+		const projectDir = createProjectDir({ style: "claude", thinking: true, working: true });
+		writeFileSync(join(projectDir, "a.ts"), "export const a = 1;\n", "utf8");
+		writeFileSync(join(projectDir, "b.ts"), "export const b = 2;\n", "utf8");
 
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-
-		// thinking: true binds ThinkingCycleController (sets hidden label and registers assistant-thinking transformer)
-		expect(harness.hiddenThinkingLabels.length).toBeGreaterThan(0);
-		expect(harness.markdownTransformers.length).toBeGreaterThan(0);
-		const transformed = harness.markdownTransformers.reduce(
-			(md, fn) => fn(md, { messageType: "assistant-thinking", availableWidth: 80 }),
-			"Inspect files\nChecking src/index.ts in detail",
-		);
-		expect(stripTerminalSequences(transformed)).toContain("Inspect files");
-		expect(stripTerminalSequences(transformed)).not.toContain("Checking src/index.ts in detail");
-
-		// working: true binds ProgressController (updates working message and stops cleanly on agent_settled)
-		await harness.emit("agent_start", {});
-		await harness.emit("tool_execution_start", { toolCallId: "tc-1", toolName: "read", args: { path: "src/index.ts" } });
-		vi.advanceTimersByTime(160);
-		const plainWorking = harness.workingMessages
-			.filter((m): m is string => typeof m === "string")
-			.map((m) => stripTerminalSequences(m));
-		expect(plainWorking.some((m) => m.includes("Reading file"))).toBe(true);
-
-		await harness.emit("tool_execution_end", { toolCallId: "tc-1", toolName: "read" });
-		await harness.emit("agent_settled", {});
-		expect(harness.workingMessages.at(-1)).toBeUndefined();
-		expect(vi.getTimerCount()).toBe(0);
-	});
-
-	it("binds ToolGroupController via HostRuntimeHandle with zero belowEditor widgets in claude/codex styles", async () => {
-		const projectDir = createProjectDir({ style: "claude" });
-		harness = createExtensionHarness({ theme: "dark", cwd: projectDir, projectTrusted: true });
-		const setWidgetSpy = vi.spyOn(harness.ctx.ui, "setWidget");
-
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-
-		// Add two exploration read rows to the chat container
-		const makeReadRow = (id: string, path: string) =>
-			Object.assign(Object.create(ToolExecutionComponent.prototype), {
-				toolName: "read",
-				toolCallId: id,
-				args: { path },
-				result: { content: [{ type: "text", text: "line 1" }] },
-				isPartial: false,
-				expanded: false,
-				render: () => [`read ${path}`],
-				invalidate() {},
-			});
-		harness.tui.chatContainer.addChild(makeReadRow("tc-r1", "src/a.ts"));
-		harness.tui.chatContainer.addChild(makeReadRow("tc-r2", "src/b.ts"));
-
-		const rendered = harness.tui.chatContainer.render(100).map((line) => stripTerminalSequences(line)).join("\n");
-		expect(rendered).toContain("Read 2 files");
-
-		// No belowEditor probe widget (including compact-tools-groups) was mounted or disposed
-		const belowEditorCalls = setWidgetSpy.mock.calls.filter(([key, , opts]) => {
-			const placement = (opts as { placement?: string } | undefined)?.placement;
-			return placement === "belowEditor" || key === "compact-tools-groups";
+		let observedWorkingDuringTool = false;
+		const inspectProbeTool = defineTool({
+			name: "inspect_probe",
+			label: "Inspect Probe",
+			description: "Deterministic probe tool to observe active working progress row",
+			parameters: Type.Object({}),
+			async execute() {
+				const midTurnText = harness!.screen().text();
+				if (midTurnText.includes("Using inspect probe")) {
+					observedWorkingDuringTool = true;
+				}
+				return {
+					content: [{ type: "text", text: "probe ok" }],
+					details: {},
+				};
+			},
 		});
-		expect(belowEditorCalls).toEqual([]);
+
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			cwd: projectDir,
+			projectTrusted: true,
+			width: 120,
+			height: 32,
+			customTools: [inspectProbeTool],
+			responses: [
+				fauxAssistantMessage(
+					[
+						fauxThinking("Compare exported constants\nHidden second line of thinking"),
+						fauxToolCall("read", { path: "a.ts" }),
+						fauxToolCall("read", { path: "b.ts" }),
+						fauxToolCall("inspect_probe", {}),
+					],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("Finished reading both files."),
+			],
+		});
+
+		await harness.submitInput("Inspect both TypeScript modules");
+
+		const finalScreen = harness.screen();
+		const fullText = finalScreen.text();
+
+		/* Группировщик claude объединяет два последовательных чтения в сводку Read 2 files */
+		expect(fullText).toContain("Read 2 files");
+		/* Многострочный блок размышлений свёрнут до заголовка без второго абзаца */
+		expect(fullText).not.toContain("Hidden second line of thinking");
+		/* Во время исполнения тула при working: true рендерится активная строка прогресса */
+		expect(observedWorkingDuringTool).toBe(true);
+		expect(fullText).toContain("Finished reading both files.");
+
+		const rootChildren = (harness.tui as unknown as { children?: Array<{ children?: unknown[] }> }).children ?? [];
+		expect(rootChildren[5]?.children ?? []).toEqual([]);
 	});
 });

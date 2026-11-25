@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import {
 	convertToPng,
+	InteractiveMode,
 	type ExtensionContext,
 	type KeybindingsManager,
 	type Theme,
@@ -18,6 +19,7 @@ import {
 	type FullscreenShellContext,
 	type MountedViewportSlots,
 } from "./fullscreen-layout.ts";
+import { hasBlockingModalOverlay } from "./modal-card.ts";
 import { beginHoverMovePass, finishHoverMovePass, hookMethod } from "./runtime-hooks.ts";
 import { setRequestRender } from "./ui-action-bridge.ts";
 
@@ -74,11 +76,48 @@ const ALL_MOTION_SEQ = "\x1b[?1003h";
 const MOTION_APPLIED = Symbol.for("conarti.pi-ui.mouse-motion");
 const ACTIVE_RUNTIME_KEY = Symbol.for("conarti.pi-ui.host-runtime.v1");
 const COMPOSITOR_MAP_KEY = Symbol.for("conarti.pi-ui.viewport-compositors.v1");
+const TRANSIENT_HOVER_DISMISSERS_KEY = Symbol.for("conarti.pi-ui.transient-hover-dismissers.v1");
+
+interface InternalHostRuntimeHandle extends HostRuntimeHandle {
+	syncRendererState(): void;
+}
 
 interface RuntimeSlot {
-	active?: HostRuntimeHandle;
+	active?: InternalHostRuntimeHandle;
 	adapter?: HostRuntimeAdapter;
 	clipboard?: HostClipboardProvider;
+}
+
+function getTransientHoverDismissers(): Map<string, () => void> {
+	const g = globalThis as Record<symbol, Map<string, () => void> | undefined>;
+	if (!g[TRANSIENT_HOVER_DISMISSERS_KEY]) {
+		g[TRANSIENT_HOVER_DISMISSERS_KEY] = new Map();
+	}
+	return g[TRANSIENT_HOVER_DISMISSERS_KEY]!;
+}
+
+/**
+ * Регистрирует колбэк закрытия транзиентного неблокирующего Hover Popup,
+ * чтобы переключение режима TUI (`fullscreen` <-> `regular`) не блокировалось висящими попапами.
+ */
+export function registerTransientHoverDismisser(id: string, dismiss: () => void): () => void {
+	const map = getTransientHoverDismissers();
+	map.set(id, dismiss);
+	return () => {
+		if (map.get(id) === dismiss) {
+			map.delete(id);
+		}
+	};
+}
+
+export function dismissTransientHoverPopups(): void {
+	for (const dismiss of [...getTransientHoverDismissers().values()]) {
+		try {
+			dismiss();
+		} catch {
+			/* Ошибки закрытия одиночного попапа не должны прерывать очистку остальных */
+		}
+	}
 }
 
 function getRuntimeSlot(): RuntimeSlot {
@@ -95,6 +134,25 @@ function getCompositorMap(): WeakMap<object, ViewportChromeCompositor> {
 		g[COMPOSITOR_MAP_KEY] = new WeakMap();
 	}
 	return g[COMPOSITOR_MAP_KEY]!;
+}
+
+/**
+ * Разворачивает Proxy-ссылку `InteractiveMode` (`this.ui`) до текущего рендерера (`this.renderer`),
+ * чтобы `WeakMap` и проверки идентичности совпадали с `self` внутри прототипных хуков `TuiAltScreen`.
+ */
+export function unwrapHostTui<T>(tui: T): T {
+	if (tui && typeof tui === "object" && typeof (tui as { valueOf?: unknown }).valueOf === "function") {
+		const unwrapped = (tui as { valueOf(): unknown }).valueOf();
+		if (unwrapped && typeof unwrapped === "object") {
+			return unwrapped as T;
+		}
+	}
+	return tui;
+}
+
+export function isSameHostTui(a: unknown, b: unknown): boolean {
+	if (!a || !b) return false;
+	return a === b || unwrapHostTui(a) === unwrapHostTui(b);
 }
 
 export function setHostRuntimeAdapter(adapter: HostRuntimeAdapter | undefined): void {
@@ -177,8 +235,60 @@ function hasLayoutHost(tui: unknown): tui is TUI & LayoutHost {
 }
 
 function installViewportChromeHooks(): void {
+	const interactiveProto = (InteractiveMode as unknown as { prototype?: object } | undefined)
+		?.prototype;
+	if (interactiveProto) {
+		hookMethod(
+			interactiveProto,
+			"switchTuiMode",
+			"viewport.syncOnSwitchTuiMode",
+			(self, args, original) => {
+				const runtime = getRuntimeSlot().active;
+				const currentUi = (self as { ui?: TUI; renderer?: TUI }).ui ?? (self as { renderer?: TUI }).renderer;
+				if (currentUi && !hasBlockingModalOverlay(currentUi)) {
+					dismissTransientHoverPopups();
+					pruneOrphanedProbeOverlays(unwrapHostTui(currentUi), false);
+				}
+				const switched = original.apply(self, args);
+				if (switched && runtime && currentUi && isSameHostTui(runtime.tui, currentUi)) {
+					runtime.syncRendererState();
+				}
+				return switched;
+			},
+		);
+	}
+
 	const altProto = (TuiAltScreen as unknown as { prototype?: object } | undefined)?.prototype;
 	if (!altProto) return;
+
+	hookMethod(
+		altProto,
+		"beforeTerminalStart",
+		"viewport.beforeTerminalStart",
+		(self, args, original) => {
+			const res = original.apply(self, args);
+			const runtime = getRuntimeSlot().active;
+			if (runtime && isSameHostTui(runtime.tui, self)) {
+				enablePointerMotionTracking(self as TUI);
+				runtime.syncRendererState();
+			}
+			return res;
+		},
+	);
+
+	hookMethod(
+		altProto,
+		"setLayoutRoot",
+		"viewport.syncOnSetLayoutRoot",
+		(self, args, original) => {
+			const res = original.apply(self, args);
+			const runtime = getRuntimeSlot().active;
+			if (runtime && (isSameHostTui(runtime.tui, self) || getCompositorMap().has(self))) {
+				runtime.syncRendererState();
+			}
+			return res;
+		},
+	);
 
 	hookMethod(
 		altProto,
@@ -301,9 +411,12 @@ function pruneOrphanedProbeOverlays(tui: TUI, preserveLast: boolean): void {
 }
 
 function enablePointerMotionTracking(tui: TUI): void {
-	if (!(tui as any)[MOTION_APPLIED]) {
-		(tui as any).terminal?.write?.(ALL_MOTION_SEQ);
-		(tui as any)[MOTION_APPLIED] = true;
+	const renderer = unwrapHostTui(tui) as unknown as Record<symbol, unknown> & {
+		terminal?: { write?: (data: string) => void };
+	};
+	if (!renderer[MOTION_APPLIED]) {
+		renderer.terminal?.write?.(ALL_MOTION_SEQ);
+		renderer[MOTION_APPLIED] = true;
 	}
 }
 
@@ -590,86 +703,156 @@ export async function acquireHostRuntime(
 	const theme = acquired.theme ?? (() => ctx.ui.theme);
 	const explicitClipboard = options?.clipboard ?? acquired.clipboard;
 
-	const layoutHost = hasLayoutHost(tui) ? tui : undefined;
-	/* Сначала ищем основной ScrollView в layoutRoot, т.к. до первого doRender() getPrimaryScrollView() возвращает implicitScrollView */
-	const scroll =
-		(layoutHost ? findPrimaryScroll(layoutHost.layoutRoot) : undefined) ??
-		((tui as TUI & { getPrimaryScrollView?: () => ScrollView | undefined }).getPrimaryScrollView?.());
+	const resolveFullscreenLayout = (): {
+		renderer: TUI;
+		layoutHost: (TUI & LayoutHost) | undefined;
+		scroll: ScrollView | undefined;
+	} => {
+		const renderer = unwrapHostTui(tui);
+		const layoutHost = hasLayoutHost(renderer) ? renderer : undefined;
+		/* Сначала ищем основной ScrollView в layoutRoot, т.к. до первого doRender() getPrimaryScrollView() возвращает implicitScrollView */
+		const scroll = layoutHost
+			? (findPrimaryScroll(layoutHost.layoutRoot) ??
+					(
+						renderer as TUI & { getPrimaryScrollView?: () => ScrollView | undefined }
+					).getPrimaryScrollView?.())
+			: undefined;
+		return { renderer, layoutHost, scroll };
+	};
 
-	const isFullscreen = Boolean(layoutHost && scroll);
-	if (scroll) {
-		healLegacyTranscriptPatches(scroll);
-	}
 	installViewportChromeHooks();
-	enablePointerMotionTracking(tui);
 
-	const chatContainer = findChatContainer(tui, scroll);
-	let disposeMountedSlots: (() => void) | undefined;
+	let registeredSlotBuilder:
+		| ((shell: FullscreenShellContext) => MountedViewportSlots)
+		| undefined;
+	let activeCompositor: ViewportChromeCompositor | undefined;
+	let mountedRenderer: object | undefined;
 	let currentViewportSlots: MountedViewportSlots | undefined;
 	let disposed = false;
 
-	const handle: HostRuntimeHandle = {
+	const detachCompositor = () => {
+		const compositor = activeCompositor;
+		const prevRenderer = mountedRenderer;
+		activeCompositor = undefined;
+		mountedRenderer = undefined;
+		currentViewportSlots = undefined;
+		if (!compositor) return;
+		const compositorMap = getCompositorMap();
+		if (prevRenderer && compositorMap.get(prevRenderer) === compositor) {
+			compositorMap.delete(prevRenderer);
+		}
+		const liveRenderer = unwrapHostTui(tui);
+		if (compositorMap.get(liveRenderer) === compositor) {
+			compositorMap.delete(liveRenderer);
+		}
+		compositor.dispose();
+	};
+
+	const syncRendererState = () => {
+		if (disposed) {
+			detachCompositor();
+			return;
+		}
+		const { renderer, layoutHost, scroll } = resolveFullscreenLayout();
+		if (!layoutHost || !scroll) {
+			if (activeCompositor) {
+				detachCompositor();
+			}
+			return;
+		}
+
+		healLegacyTranscriptPatches(scroll);
+		enablePointerMotionTracking(renderer);
+
+		if (!registeredSlotBuilder || !keybindings) {
+			if (activeCompositor) {
+				detachCompositor();
+			}
+			return;
+		}
+
+		if (
+			activeCompositor &&
+			mountedRenderer === renderer &&
+			activeCompositor.scrollRef === scroll
+		) {
+			return;
+		}
+
+		detachCompositor();
+
+		const shellCtx: FullscreenShellContext = {
+			tui,
+			theme,
+			keybindings,
+			scroll,
+			requestRender: () => tui.requestRender(),
+		};
+
+		const slots = registeredSlotBuilder(shellCtx);
+		currentViewportSlots = slots;
+
+		const compositor = new ViewportChromeCompositor(tui, scroll, slots);
+		activeCompositor = compositor;
+		mountedRenderer = renderer;
+		getCompositorMap().set(renderer, compositor);
+		tui.requestRender();
+	};
+
+	syncRendererState();
+
+	const handle: InternalHostRuntimeHandle = {
 		ctx,
 		tui,
 		keybindings,
 		get clipboard() {
 			return explicitClipboard ?? slot.clipboard ?? defaultHostClipboardProvider;
 		},
-		isFullscreen,
-		scroll,
-		chatContainer,
+		get isFullscreen() {
+			syncRendererState();
+			const { layoutHost, scroll } = resolveFullscreenLayout();
+			return Boolean(layoutHost && scroll);
+		},
+		get scroll() {
+			syncRendererState();
+			return resolveFullscreenLayout().scroll;
+		},
+		get chatContainer() {
+			const { scroll } = resolveFullscreenLayout();
+			return findChatContainer(tui, scroll);
+		},
 		get viewportSlots() {
+			syncRendererState();
 			return currentViewportSlots;
 		},
 		theme,
 		requestRender() {
 			tui.requestRender();
 		},
+		syncRendererState,
 		mountViewportSlots(buildSlots) {
-			if (!isFullscreen || !layoutHost || !scroll || !keybindings) {
+			if (disposed || !keybindings) {
 				return undefined;
 			}
-			disposeMountedSlots?.();
-			disposeMountedSlots = undefined;
-
-			const shellCtx: FullscreenShellContext = {
-				tui,
-				theme,
-				keybindings,
-				scroll,
-				requestRender: () => tui.requestRender(),
-			};
-
-			const slots = buildSlots(shellCtx);
-			currentViewportSlots = slots;
-
-			const compositor = new ViewportChromeCompositor(tui, scroll, slots);
-			const compositorMap = getCompositorMap();
-			compositorMap.set(tui, compositor);
-			tui.requestRender();
+			registeredSlotBuilder = buildSlots;
+			detachCompositor();
+			syncRendererState();
 
 			const dispose = () => {
-				if (compositorMap.get(tui) === compositor) {
-					compositorMap.delete(tui);
+				if (registeredSlotBuilder === buildSlots) {
+					registeredSlotBuilder = undefined;
 				}
-				if (currentViewportSlots === slots) {
-					currentViewportSlots = undefined;
-				}
-				compositor.dispose();
+				detachCompositor();
 				tui.requestRender();
-				if (disposeMountedSlots === dispose) {
-					disposeMountedSlots = undefined;
-				}
 			};
-			disposeMountedSlots = dispose;
 			return dispose;
 		},
 		dispose() {
 			if (disposed) return;
 			disposed = true;
-			disposeMountedSlots?.();
-			disposeMountedSlots = undefined;
-			currentViewportSlots = undefined;
+			registeredSlotBuilder = undefined;
+			detachCompositor();
+			dismissTransientHoverPopups();
 			if (slot.active === handle) {
 				slot.active = undefined;
 			}

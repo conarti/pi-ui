@@ -180,7 +180,9 @@ function patchTranscriptAlignment(tui: TUI, hostScroll?: ScrollView): void {
 	hookMethod(document, "render", "activity.transcriptRender", (self, args, original) => {
 		const lines: string[] = original.apply(self, args);
 		if (!sharedActivityState().active) return lines;
-		const height = scroll?.viewportHeight;
+		if ((tui as { mode?: string }).mode === "regular") return lines;
+		const liveScroll = (getActiveHostRuntime()?.scroll ?? scroll) as { viewportHeight?: number } | undefined;
+		const height = liveScroll?.viewportHeight;
 		return typeof height === "number" ? bottomAlignTranscript(lines, height) : lines;
 	}, [LEGACY_TRANSCRIPT_RENDER]);
 }

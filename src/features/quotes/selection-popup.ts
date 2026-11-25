@@ -25,6 +25,9 @@ import {
 import {
 	getActiveHostRuntime,
 	installViewportScrollDismissHooks,
+	isSameHostTui,
+	registerTransientHoverDismisser,
+	unwrapHostTui,
 } from "../../shared/host-runtime.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
@@ -169,6 +172,7 @@ export class SelectionQuoteOverlayController {
 	private handle: OverlayHandle | undefined;
 	private options: OverlayOptions | undefined;
 	private activeTui: TUI | undefined;
+	private activeRenderer: object | undefined;
 	private visible = false;
 	private currentBounds: { col: number; row: number; width: number; height: number } | undefined;
 
@@ -213,10 +217,12 @@ export class SelectionQuoteOverlayController {
 			return;
 		}
 
-		if (this.activeTui && this.activeTui !== tui) {
+		const nextRenderer = unwrapHostTui(tui);
+		if (this.activeRenderer && this.activeRenderer !== nextRenderer) {
 			this.hide();
 		}
 		this.activeTui = tui;
+		this.activeRenderer = nextRenderer;
 
 		if (!this.popup) {
 			this.popup = new QuoteSelectionPopup(this.getTheme, () => this.activeTui?.requestRender());
@@ -284,12 +290,14 @@ export class SelectionQuoteOverlayController {
 		if (!this.visible && !this.handle) return;
 		this.visible = false;
 		this.currentBounds = undefined;
-		const targetTui = this.activeTui as
-			| (TUI & {
+		const targetRenderer = (this.activeRenderer ??
+			(this.activeTui ? unwrapHostTui(this.activeTui) : undefined)) as
+			| {
 					overlayStack?: unknown[];
 					renderedOverlayLayouts?: Array<{ entry?: { component?: unknown } }>;
-			  })
+			  }
 			| undefined;
+		this.activeRenderer = undefined;
 		if (this.popup) {
 			this.popup.resetGesture();
 			this.popup.selectedTextSnapshot = "";
@@ -304,9 +312,9 @@ export class SelectionQuoteOverlayController {
 			}
 		}
 		/* Синхронно очищаем renderedOverlayLayouts, чтобы первый же клик или тройной клик не попадал в скрытый попап */
-		if (targetTui && Array.isArray(targetTui.renderedOverlayLayouts) && this.popup) {
+		if (targetRenderer && Array.isArray(targetRenderer.renderedOverlayLayouts) && this.popup) {
 			const popupRef = this.popup;
-			targetTui.renderedOverlayLayouts = targetTui.renderedOverlayLayouts.filter(
+			targetRenderer.renderedOverlayLayouts = targetRenderer.renderedOverlayLayouts.filter(
 				(layout) => layout?.entry?.component !== popupRef,
 			);
 		}
@@ -363,6 +371,8 @@ function withNonCapturingOverlaysTransparent<T>(self: any, fn: () => T): T {
 export function installSelectionQuoteRuntimeHooks(
 	controller: SelectionQuoteOverlayController,
 ): void {
+	registerTransientHoverDismisser("quotes.selection", () => controller.hide());
+
 	installViewportScrollDismissHooks(
 		"quotes.selection",
 		() => controller.isShowing,
@@ -402,7 +412,7 @@ export function installSelectionQuoteRuntimeHooks(
 					| { button: number; x: number; y: number; release: boolean }
 					| undefined;
 				const runtime = getActiveHostRuntime();
-				if (!raw || !runtime || !runtime.isFullscreen || runtime.tui !== self) {
+				if (!raw || !runtime || !runtime.isFullscreen || !isSameHostTui(runtime.tui, self)) {
 					return original.apply(self, args);
 				}
 
@@ -483,7 +493,7 @@ export function installSelectionQuoteRuntimeHooks(
 							}),
 						);
 
-						controller.show(self, cleaned, {
+						controller.show(runtime.tui, cleaned, {
 							focusCol: effectiveFocusCol,
 							focusRow: focusCoords.row,
 							anchorCol: anchorCoords?.col,

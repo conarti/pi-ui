@@ -16,6 +16,7 @@ import {
 	paintSurfaceRow,
 	type RgbTuple,
 } from "../../shared/ansi.ts";
+import { registerTransientHoverDismisser, unwrapHostTui } from "../../shared/host-runtime.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import type { SerializedPromptChip } from "./registry.ts";
 
@@ -174,8 +175,11 @@ export class PromptChipOverlayController {
 	private activeSource: PreviewTriggerSource | undefined;
 	private activeChipKey: string | undefined;
 	private activeTui: TUI | undefined;
+	private activeRenderer: object | undefined;
 
-	constructor(private readonly getTheme: () => Theme) {}
+	constructor(private readonly getTheme: () => Theme) {
+		registerTransientHoverDismisser("promptChips.preview", () => this.hide());
+	}
 
 	get isShowing(): boolean {
 		return this.visible && Boolean(this.handle);
@@ -200,10 +204,12 @@ export class PromptChipOverlayController {
 			return;
 		}
 
-		if (this.activeTui && this.activeTui !== tui) {
+		const nextRenderer = unwrapHostTui(tui);
+		if (this.activeRenderer && this.activeRenderer !== nextRenderer) {
 			this.hide();
 		}
 		this.activeTui = tui;
+		this.activeRenderer = nextRenderer;
 
 		if (!this.popup) {
 			this.popup = new PromptChipPreviewPopup(this.getTheme);
@@ -260,6 +266,7 @@ export class PromptChipOverlayController {
 		this.visible = false;
 		this.activeSource = undefined;
 		this.activeChipKey = undefined;
+		this.activeRenderer = undefined;
 		const currentHandle = this.handle;
 		this.handle = undefined;
 		if (currentHandle) {
