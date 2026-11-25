@@ -1,15 +1,27 @@
 import { generateUnifiedPatch, type AgentToolResult, type Theme } from "@earendil-works/pi-coding-agent";
 import {
+	getCapabilities,
+	Image,
 	stripTerminalSequences,
 	truncateToWidth,
 	visibleWidth,
 	type Component,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 import {
 	getAnimationElapsedMs,
 	sampleBreathingWaveRgb,
 } from "../../shared/animation-scheduler.ts";
 import { getActiveGlobalTheme, isLightTheme, type RgbTuple } from "../../shared/ansi.ts";
+import { claimHover } from "../../shared/runtime-hooks.ts";
+import { requestRender } from "../../shared/ui-action-bridge.ts";
+import {
+	getPrototypeSettledGlyph,
+	getPrototypeVariant,
+	isPrototypeActive,
+	samplePrototypeRunningGlyph,
+} from "../transcript/prototype-state.ts";
 import { colorizeRgb } from "./color.ts";
 import {
 	classifyShellCommand as classifyShellExploration,
@@ -24,6 +36,7 @@ import {
 	formatResultLineSummary,
 	getEditDiff,
 	getEditPatch,
+	hasImageContent,
 	isReadTextResult,
 	readStartLine,
 	splitReadFooter,
@@ -217,13 +230,131 @@ export function formatExploredSummary<TRow extends ExplorationRowInput>(
 	return parts.length > 0 ? `${verb} ${parts.join(", ")}` : verb;
 }
 
+export interface DensityGroupSummary {
+	readonly summary: string;
+	readonly changes?: { added: number; removed: number };
+}
+
+export function formatAllGroupedSummary<
+	TRow extends ExplorationRowInput & {
+		result?: AgentToolResult<unknown> & { isError?: boolean };
+	},
+>(
+	rows: readonly TRow[],
+	canRun: (row: TRow) => boolean = () => true,
+): DensityGroupSummary {
+	const variant = getPrototypeVariant();
+	const running = rows.some((row) => (!row.result || row.isPartial) && canRun(row));
+	const editedPaths = new Set<string>();
+	let unnamedEdits = 0;
+	let commandCount = 0;
+	let customCount = 0;
+	let totalAdded = 0;
+	let totalRemoved = 0;
+	const exploreRows: TRow[] = [];
+
+	for (const row of rows) {
+		const args: ToolArgs =
+			typeof row.args === "object" && row.args !== null ? (row.args as ToolArgs) : {};
+		if (classifyExploration(row.toolName, args) !== undefined) {
+			exploreRows.push(row);
+			continue;
+		}
+		if (row.toolName === "edit" || row.toolName === "write") {
+			const p = pathOf(args).trim();
+			if (p) editedPaths.add(p);
+			else unnamedEdits += 1;
+			if (row.result && !row.isPartial && !row.result.isError) {
+				const diff = countDiffChangesFromResult(row.toolName, args, row.result);
+				totalAdded += diff.changes.added;
+				totalRemoved += diff.changes.removed;
+			}
+			continue;
+		}
+		if (
+			row.toolName === "bash" ||
+			row.toolName === "powershell" ||
+			row.toolName === "codemode"
+		) {
+			commandCount += 1;
+			continue;
+		}
+		customCount += 1;
+	}
+
+	const editCount = editedPaths.size + unnamedEdits;
+	const { files: expFiles, searches: expSearches, directories: expDirs } =
+		countExploration(exploreRows);
+
+	if (variant === "C") {
+		const ruParts: string[] = [];
+		if (editCount > 0) {
+			ruParts.push(`${running ? "Правка" : "Изменено"}: ${editCount} ф.`);
+		}
+		if (commandCount > 0) {
+			ruParts.push(`${running ? "Запуск" : "Выполнено"}: ${commandCount} ком.`);
+		}
+		if (expFiles + expSearches + expDirs > 0) {
+			const eItems: string[] = [];
+			if (expFiles > 0) eItems.push(`${expFiles} ф.`);
+			if (expSearches > 0) eItems.push(`${expSearches} поиск.`);
+			if (expDirs > 0) eItems.push(`${expDirs} дир.`);
+			ruParts.push(`${running ? "Изучение" : "Изучено"}: ${eItems.join(", ")}`);
+		}
+		if (customCount > 0) {
+			ruParts.push(`${customCount} инстр.`);
+		}
+		return {
+			summary: ruParts.join(" · ") || (running ? "Выполнение…" : "Выполнено"),
+			changes: totalAdded > 0 || totalRemoved > 0 ? { added: totalAdded, removed: totalRemoved } : undefined,
+		};
+	}
+
+	/* Если все вызовы в группе — исследовательские, сохраняем чистый формат Explored */
+	if (editCount === 0 && commandCount === 0 && customCount === 0) {
+		return { summary: formatExploredSummary(rows, canRun) };
+	}
+
+	const clauses: string[] = [];
+	if (editCount > 0) {
+		clauses.push(
+			`${running ? "Editing" : "Edited"} ${editCount} ${editCount === 1 ? "file" : "files"}`,
+		);
+	}
+	if (commandCount > 0) {
+		const verb = clauses.length === 0 ? (running ? "Running" : "Ran") : running ? "running" : "ran";
+		clauses.push(`${verb} ${commandCount} ${commandCount === 1 ? "command" : "commands"}`);
+	}
+	if (expFiles + expSearches + expDirs > 0) {
+		const expParts: string[] = [];
+		if (expFiles > 0) expParts.push(`${expFiles} ${expFiles === 1 ? "file" : "files"}`);
+		if (expSearches > 0) expParts.push(`${expSearches} ${expSearches === 1 ? "search" : "searches"}`);
+		if (expDirs > 0) expParts.push(`${expDirs} ${expDirs === 1 ? "dir" : "dirs"}`);
+		const verb =
+			clauses.length === 0 ? (running ? "Exploring" : "Explored") : running ? "exploring" : "explored";
+		clauses.push(`${verb} ${expParts.join(", ")}`);
+	}
+	if (customCount > 0) {
+		const verb = clauses.length === 0 ? (running ? "Calling" : "Called") : "called";
+		clauses.push(`${verb} ${customCount} ${customCount === 1 ? "tool" : "tools"}`);
+	}
+
+	return {
+		summary: clauses.join(", "),
+		changes:
+			totalAdded > 0 || totalRemoved > 0
+				? { added: totalAdded, removed: totalRemoved }
+				: undefined,
+	};
+}
+
 export interface DensityPalette {
 	readonly theme: Theme;
 	readonly light: boolean;
 	readonly key: string;
-	diamond(status: RowStatus, expanded: boolean): string;
-	title(text: string, status: RowStatus, expanded: boolean): string;
-	target(text: string, expanded: boolean): string;
+	diamond(status: RowStatus, expanded: boolean, hovered?: boolean): string;
+	title(text: string, status: RowStatus, expanded: boolean, hovered?: boolean): string;
+	target(text: string, expanded: boolean, hovered?: boolean): string;
 	dim(text: string): string;
 	body(text: string): string;
 	rail(text: string): string;
@@ -242,27 +373,36 @@ export function densityPalette(fallbackTheme: Theme): DensityPalette {
 	const theme = getActiveGlobalTheme(fallbackTheme);
 	const light = isLightTheme(theme);
 	const colorMode = theme.getColorMode?.() ?? "truecolor";
-	const key = `${light ? "light" : "dark"}:${colorMode}:${(theme as { name?: string })?.name ?? ""}:${theme.getFgAnsi?.("text") ?? ""}`;
+	const variant = getPrototypeVariant();
+	const protoOn = variant !== "off";
+	const settledGlyph = protoOn ? getPrototypeSettledGlyph(variant) : TOOL_DIAMOND;
+	const key = `${variant}:${light ? "light" : "dark"}:${colorMode}:${(theme as { name?: string })?.name ?? ""}:${theme.getFgAnsi?.("text") ?? ""}`;
 
 	return {
 		theme,
 		light,
 		key,
-		diamond(status: RowStatus, expanded: boolean): string {
+		diamond(status: RowStatus, expanded: boolean, hovered = false): string {
 			if (status === "running") {
+				if (protoOn) {
+					return samplePrototypeRunningGlyph(0, { theme, light, variant });
+				}
 				return paintDensityWaveGlyph(theme, light, 0, TOOL_DIAMOND);
 			}
 			if (status === "error") {
-				return theme.fg("error", TOOL_DIAMOND);
+				return theme.fg("error", settledGlyph);
 			}
-			if (expanded && status === "success") {
-				return paintDensityRgb(theme, light ? [37, 99, 235] : [97, 175, 239], TOOL_DIAMOND);
+			if (hovered || (expanded && status === "success")) {
+				return paintDensityRgb(theme, light ? [37, 99, 235] : [97, 175, 239], settledGlyph);
 			}
-			return paintDensityRgb(theme, light ? [112, 128, 152] : [92, 110, 136], TOOL_DIAMOND);
+			return paintDensityRgb(theme, light ? [112, 128, 152] : [92, 110, 136], settledGlyph);
 		},
-		title(text: string, status: RowStatus, expanded: boolean): string {
+		title(text: string, status: RowStatus, expanded: boolean, hovered = false): string {
 			if (status === "error") {
 				return theme.fg("error", expanded ? theme.bold(text) : text);
+			}
+			if (hovered) {
+				return paintDensityRgb(theme, light ? [29, 78, 216] : [156, 204, 250], text);
 			}
 			if (status === "running" || expanded) {
 				const painted = paintDensityRgb(theme, light ? [24, 48, 82] : [172, 194, 222], text);
@@ -270,15 +410,15 @@ export function densityPalette(fallbackTheme: Theme): DensityPalette {
 			}
 			return paintDensityRgb(theme, light ? [68, 86, 112] : [136, 154, 178], text);
 		},
-		target(text: string, expanded: boolean): string {
+		target(text: string, expanded: boolean, hovered = false): string {
 			if (!text) return "";
 			return paintDensityRgb(
 				theme,
 				light
-					? expanded
+					? hovered || expanded
 						? [29, 78, 216]
 						: [56, 78, 108]
-					: expanded
+					: hovered || expanded
 						? [145, 195, 248]
 						: [148, 168, 196],
 				text,
@@ -459,10 +599,11 @@ function buildHeaderParts(
 
 class DensityLiveLines implements Component {
 	private cache?: { key: string; width: number; lines: string[] };
+	private hovered = false;
 
 	constructor(
-		private readonly computeKey: (width: number, pal: DensityPalette) => string,
-		private readonly draw: (width: number, pal: DensityPalette) => string[],
+		private readonly computeKey: (width: number, pal: DensityPalette, hovered: boolean) => string,
+		private readonly draw: (width: number, pal: DensityPalette, hovered: boolean) => string[],
 		private readonly fallbackTheme: Theme,
 	) {}
 
@@ -470,9 +611,9 @@ class DensityLiveLines implements Component {
 		if (width <= 0) return [];
 		const safeWidth = Math.max(1, width);
 		const pal = densityPalette(this.fallbackTheme);
-		const key = `${pal.key}|${this.computeKey(safeWidth, pal)}`;
+		const key = `${pal.key}|${this.hovered ? "h1" : "h0"}|${this.computeKey(safeWidth, pal, this.hovered)}`;
 		if (!this.cache || this.cache.key !== key || this.cache.width !== safeWidth) {
-			const raw = this.draw(safeWidth, pal);
+			const raw = this.draw(safeWidth, pal, this.hovered);
 			this.cache = {
 				key,
 				width: safeWidth,
@@ -482,6 +623,21 @@ class DensityLiveLines implements Component {
 			};
 		}
 		return this.cache.lines;
+	}
+
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (!isPrototypeActive() || event.type !== "move") return undefined;
+		claimHover(this, () => {
+			if (this.hovered) {
+				this.hovered = false;
+				requestRender();
+			}
+		});
+		if (!this.hovered) {
+			this.hovered = true;
+			return { handled: true, render: true };
+		}
+		return undefined;
 	}
 
 	invalidate(): void {
@@ -525,15 +681,22 @@ export function renderDensityCall(options: {
 				liveNested,
 			].join("|");
 		},
-		(width, pal) => {
+		(width, pal, hovered) => {
 			const status = getStatus();
 			const expanded = state.expanded === true;
-			const diamond = pal.diamond(status, expanded);
+			const diamond = pal.diamond(status, expanded, hovered);
 			const { verb, target } = buildHeaderParts(name, args, status);
-			const styledVerb = pal.title(verb, status, expanded);
-			const styledTarget = target ? ` ${pal.target(target, expanded)}` : "";
+			const styledVerb = pal.title(verb, status, expanded, hovered);
+			const styledTarget = target ? ` ${pal.target(target, expanded, hovered)}` : "";
 			const meta = formatParentheticalMeta(pal, status, state, name, getNestedSummary?.());
-			const head = ` ${diamond} ${styledVerb}${styledTarget}${meta}`;
+			const variant = getPrototypeVariant();
+			const hoverChevron =
+				hovered && status !== "running" && variant !== "off"
+					? ` ${pal.dim(expanded ? "⌄" : "›")}`
+					: "";
+			const leadPrefix = variant === "C" ? " ├ " : " ";
+			const styledPrefix = variant === "C" ? pal.rail(leadPrefix) : leadPrefix;
+			const head = `${styledPrefix}${diamond} ${styledVerb}${styledTarget}${meta}${hoverChevron}`;
 			const lines = [truncateToWidth(head, width, "…")];
 
 			if (status === "running" && isCommandLikeTool(name) && !state.density) {
@@ -668,7 +831,9 @@ export function renderDensityResult(options: {
 
 	let lineSummary: string | undefined;
 	if (!isPartial && !isError) {
-		if (cmdLike) {
+		if (hasImageContent(result)) {
+			lineSummary = formatResultLineSummary(name, args, result, output);
+		} else if (cmdLike) {
 			const count = extractedCmd?.lines.length ?? 0;
 			lineSummary = count > 0 ? `${count} ${count === 1 ? "line" : "lines"}` : undefined;
 		} else if (name !== "edit" && name !== "write") {
@@ -725,8 +890,29 @@ export function renderDensityResult(options: {
 			}
 
 			if (!expanded) {
+				if (hasImageContent(result) && !isError) {
+					/* На терминалах с Kitty/iTerm2 сам ToolExecutionComponent рисует нативный Image ниже заголовка. */
+					if (getCapabilities().images) return [];
+					const imgBlocks = result.content.filter(
+						(item): item is { type: "image"; data: string; mimeType: string } =>
+							item?.type === "image" &&
+							typeof (item as { data?: unknown }).data === "string" &&
+							typeof (item as { mimeType?: unknown }).mimeType === "string",
+					);
+					return imgBlocks.flatMap((img) =>
+						new Image(
+							img.data,
+							img.mimeType,
+							{ fallbackColor: (s) => pal.dim(s) },
+							{ maxWidthCells: Math.min(60, avail) },
+						)
+							.render(avail)
+							.map((line) => `${rail}${line}`),
+					);
+				}
+
 				if ((name === "edit" || name === "write") && !isError) {
-					if (density === "compact") return [];
+					if (density === "compact" || density === "grouped" || density === "balanced") return [];
 					const allLines = diffInfo?.lines ?? [];
 					const hasContext = allLines.some((line) => line.kind === "context");
 					const contextual = hasContext ? trimDiffContext(allLines, 2) : allLines;

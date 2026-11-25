@@ -4,9 +4,9 @@ import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
 	DISPLAY_MODES,
 	DISPLAY_STYLES,
+	PROTO_TOOL_DENSITIES,
 	SUPPORTED_TOOLS,
 	SUPPORTED_TOOL_SET,
-	TOOL_DENSITIES,
 	type CompactToolName,
 	type CompactToolsConfig,
 	type DisplayMode,
@@ -139,11 +139,17 @@ export function mergeConfig(base: CompactToolsConfig, value: unknown, path: stri
 	}
 	const mode = value.mode === undefined ? base.mode : (parseChoice<DisplayMode>(value.mode, DISPLAY_MODES, "mode", path) ?? base.mode);
 	const rawStyle = value.style === undefined ? undefined : parseChoice<DisplayStyle>(value.style, DISPLAY_STYLES, "style", path);
-	const rawDensity = value.density === undefined ? undefined : parseChoice<ToolDensity>(value.density, TOOL_DENSITIES, "density", path);
+	const rawDensity = value.density === undefined ? undefined : parseChoice<ToolDensity>(value.density, PROTO_TOOL_DENSITIES, "density", path);
 	let style: DisplayStyle = base.style;
 	let density: ToolDensity = base.density;
 	if (rawStyle !== undefined) {
-		if (rawStyle === "detailed" || rawStyle === "diff-focus" || rawStyle === "compact") {
+		if (
+			rawStyle === "detailed" ||
+			rawStyle === "diff-focus" ||
+			rawStyle === "balanced" ||
+			rawStyle === "grouped" ||
+			rawStyle === "compact"
+		) {
 			style = "density";
 			density = rawStyle;
 		} else {

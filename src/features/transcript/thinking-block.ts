@@ -6,6 +6,7 @@ import {
 	stripTerminalSequences,
 	truncateToWidth,
 	visibleWidth,
+	wrapTextWithAnsi,
 	type Component,
 	type MarkdownTheme,
 	type TuiMouseEvent,
@@ -16,9 +17,16 @@ import {
 	deactivateAnimationSurface,
 	paintBreathingWaveGlyph,
 } from "../../shared/animation-scheduler.ts";
-import { fgRgb, getActiveGlobalTheme, isLightTheme } from "../../shared/ansi.ts";
+import { bgRgb, fgRgb, getActiveGlobalTheme, isLightTheme } from "../../shared/ansi.ts";
 import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
+import {
+	getPrototypeVariant,
+	isPrototypeActive,
+	resolveThinkingDisplay,
+	samplePrototypeRunningGlyph,
+	type ActivePrototypeVariant,
+} from "./prototype-state.ts";
 
 const MAX_THOUGHTS_WIDTH = 120;
 const STREAMING_THOUGHT_TAIL_LINES = 3;
@@ -237,7 +245,7 @@ function createSoftThinkingMarkdown(text: string, themeRef: Theme, light: boolea
 
 export class ThinkingBlock implements Component {
 	readonly [THINKING_BLOCK_MARKER] = true;
-	private readonly hoverSlot: { hovered: boolean };
+	private readonly hoverSlot: { hovered: boolean; headerHovered?: boolean };
 	private markdownCache?: { light: boolean; md: Markdown };
 
 	constructor(
@@ -248,10 +256,12 @@ export class ThinkingBlock implements Component {
 		private readonly themeRef: Theme,
 		private readonly durationMs?: number,
 		markdownSlot?: { light: boolean; md: Markdown },
-		hoverSlot?: { hovered: boolean },
+		hoverSlot?: { hovered: boolean; headerHovered?: boolean },
+		private readonly startedAt?: number,
+		private readonly runKey?: string,
 	) {
 		this.markdownCache = markdownSlot;
-		this.hoverSlot = hoverSlot ?? { hovered: false };
+		this.hoverSlot = hoverSlot ?? { hovered: false, headerHovered: false };
 	}
 
 	invalidate(): void {
@@ -270,14 +280,228 @@ export class ThinkingBlock implements Component {
 		return this.markdownCache.md.render(contentWidth).map((line) => line.replace(/ +$/u, ""));
 	}
 
+	private renderCleanProseLines(
+		sourceText: string,
+		textAvail: number,
+		light: boolean,
+		tintInlineCode: boolean,
+	): string[] {
+		const bodyColor = (s: string) =>
+			light ? fgRgb(100, 116, 139, s) : fgRgb(116, 130, 152, s);
+		const codeColor = (s: string) =>
+			light ? fgRgb(52, 98, 162, s) : fgRgb(132, 168, 206, s);
+
+		const rawLines = sourceText
+			.replace(/\r\n?/gu, "\n")
+			.split("\n")
+			.filter((line) => !/^\s*(?:`{3,}|~{3,})[^\s`~]*\s*$/u.test(line))
+			.map((line) =>
+				line
+					.replace(/^\s*#{1,6}\s+/u, "")
+					.replace(/^\s*[-*+]\s+/u, "· ")
+					.replace(/\*\*([^*\n]+)\*\*/gu, "$1")
+					.trimEnd(),
+			);
+
+		const wrapped: string[] = [];
+		for (const rawLine of rawLines) {
+			if (!rawLine.trim()) {
+				if (wrapped.length > 0 && wrapped[wrapped.length - 1] !== "") {
+					wrapped.push("");
+				}
+				continue;
+			}
+			const styledLine = tintInlineCode
+				? rawLine
+						.split(/(`[^`\n]+`)/gu)
+						.map((seg) =>
+							seg.startsWith("`") && seg.endsWith("`") && seg.length >= 2
+								? codeColor(seg.slice(1, -1))
+								: bodyColor(seg),
+						)
+						.join("")
+				: bodyColor(rawLine);
+			for (const w of wrapTextWithAnsi(styledLine, Math.max(8, textAvail))) {
+				wrapped.push(w);
+			}
+		}
+		while (wrapped.length > 0 && wrapped[wrapped.length - 1] === "") {
+			wrapped.pop();
+		}
+		return wrapped;
+	}
+
+	private renderPrototypeVariant(
+		variant: ActivePrototypeVariant,
+		width: number,
+		light: boolean,
+		activeTheme: Theme,
+	): string[] {
+		const outerPad = width >= 48 ? 2 : 1;
+		const margin = " ".repeat(outerPad);
+		const cappedWidth = Math.max(12, Math.min(width - outerPad * 2, MAX_THOUGHTS_WIDTH));
+		const textAvail = Math.max(8, cappedWidth - 4);
+		const isHovered = Boolean(this.hoverSlot.hovered);
+		const display = resolveThinkingDisplay({
+			rawText: this.thinkingText,
+			runKey: this.runKey,
+			isStreaming: this.isStreamingNow,
+		});
+		const proseLines = this.renderCleanProseLines(
+			display.text,
+			textAvail,
+			light,
+			variant === "B",
+		);
+		const nonEmptyProse = proseLines.filter((l) => stripTerminalSequences(l).trim().length > 0);
+		const liveStreamingDuration =
+			this.isStreamingNow && this.startedAt !== undefined
+				? formatThinkingDuration(Math.max(0, Date.now() - this.startedAt))
+				: undefined;
+		const seamBadge = display.badge
+			? ` ${light ? fgRgb(37, 99, 235, `[${display.badge}]`) : fgRgb(118, 184, 248, `[${display.badge}]`)}`
+			: "";
+		const dimHint = (s: string) => (light ? fgRgb(148, 163, 184, s) : fgRgb(86, 100, 122, s));
+		const headerMuted = (s: string) =>
+			isHovered
+				? light
+					? fgRgb(37, 99, 235, s)
+					: fgRgb(145, 195, 248, s)
+				: light
+					? fgRgb(100, 116, 139, s)
+					: fgRgb(118, 132, 154, s);
+
+		const out: string[] = [];
+
+		if (variant === "C") {
+			const surfaceRgb: readonly [number, number, number] = light
+				? [241, 245, 249]
+				: [24, 30, 42];
+			const cardW = Math.min(width - outerPad * 2, Math.max(28, cappedWidth));
+			const paintRow = (inner: string): string => {
+				const clipped = truncateToWidth(inner, cardW, "…");
+				const pad = " ".repeat(Math.max(0, cardW - visibleWidth(clipped)));
+				const tinted = bgRgb(surfaceRgb[0], surfaceRgb[1], surfaceRgb[2], `${clipped}${pad}`);
+				const full = `${margin}${tinted}`;
+				return full + " ".repeat(Math.max(0, width - visibleWidth(full)));
+			};
+
+			if (this.isStreamingNow) {
+				const glyph = samplePrototypeRunningGlyph(0, { light, theme: activeTheme, variant: "C" });
+				const timer = liveStreamingDuration ? ` · ${liveStreamingDuration}` : "";
+				out.push(paintRow(` ${glyph} ${headerMuted(`Размышление${timer}`)}${seamBadge} `));
+				for (const rowText of nonEmptyProse.slice(-STREAMING_THOUGHT_TAIL_LINES)) {
+					const rail = waveAccentGlyph(out.length, "│", light);
+					out.push(paintRow(` ${rail} ${rowText} `));
+				}
+				return out;
+			}
+
+			const durText = formatThinkingDuration(this.durationMs);
+			const cLabel = durText ? `Мысль · ${durText}` : "Мысль";
+			const countText = nonEmptyProse.length > 0 ? dimHint(` · ${nonEmptyProse.length} стр.`) : "";
+			const hex = isHovered
+				? light
+					? fgRgb(37, 99, 235, "⬢")
+					: fgRgb(118, 186, 250, "⬢")
+				: dimHint("⬢");
+
+			if (!this.isExpanded) {
+				out.push(paintRow(` ${hex} ${headerMuted(cLabel)}${countText}${seamBadge} ${dimHint("▸")} `));
+				return out;
+			}
+
+			out.push(
+				paintRow(
+					` ${hex} ${headerMuted(cLabel)}${seamBadge} ${dimHint(isHovered ? "▾ свернуть" : "▾")} `,
+				),
+			);
+			const openRail = light ? fgRgb(148, 163, 184, "│") : fgRgb(72, 88, 114, "│");
+			for (const rowText of proseLines) {
+				out.push(paintRow(rowText ? ` ${openRail} ${rowText} ` : ` ${openRail} `));
+			}
+			return out;
+		}
+
+		/* Variant A (Quiet Whisper) & Variant B (Prism Rail) */
+		if (this.isStreamingNow) {
+			const leadGlyph = samplePrototypeRunningGlyph(0, {
+				light,
+				theme: activeTheme,
+				variant,
+			});
+			const streamWord = variant === "A" ? "Размышляю…" : "Thinking…";
+			const timerSuffix = liveStreamingDuration ? dimHint(` · ${liveStreamingDuration}`) : "";
+			const hdrRow = truncateToWidth(
+				`${margin}${leadGlyph} ${headerMuted(streamWord)}${timerSuffix}${seamBadge}`,
+				width,
+				"…",
+			);
+			out.push(hdrRow + " ".repeat(Math.max(0, width - visibleWidth(hdrRow))));
+
+			const tail = nonEmptyProse.slice(-STREAMING_THOUGHT_TAIL_LINES);
+			for (let i = 0; i < tail.length; i++) {
+				const spine = waveAccentGlyph(i + 1, "▎", light);
+				const row = truncateToWidth(`${margin}${spine} ${tail[i]!}`, width, "…");
+				out.push(row + " ".repeat(Math.max(0, width - visibleWidth(row))));
+			}
+			return out;
+		}
+
+		const label = formatThoughtLabel(this.durationMs);
+
+		if (!this.isExpanded) {
+			const collapsedSpine = isHovered
+				? light
+					? fgRgb(37, 99, 235, "❙")
+					: fgRgb(97, 175, 239, "❙")
+				: light
+					? fgRgb(148, 163, 184, "❙")
+					: fgRgb(78, 92, 114, "❙");
+			const hoverCue = variant === "B" && isHovered ? dimHint("  · клик раскрыть") : "";
+			const line = truncateToWidth(
+				`${margin}${collapsedSpine} ${headerMuted(`› ${label}`)}${seamBadge}${hoverCue}`,
+				width,
+				"…",
+			);
+			return [line + " ".repeat(Math.max(0, width - visibleWidth(line)))];
+		}
+
+		const openSpine = light ? fgRgb(148, 163, 184, "│") : fgRgb(76, 92, 118, "│");
+		const topSpine = isHovered
+			? light
+				? fgRgb(37, 99, 235, variant === "B" ? "┃" : "│")
+				: fgRgb(97, 175, 239, variant === "B" ? "┃" : "│")
+			: openSpine;
+		const hoverCue = variant === "B" && isHovered ? dimHint("  · клик свернуть") : "";
+		const hdr = truncateToWidth(
+			`${margin}${topSpine} ${headerMuted(`⌄ ${label}`)}${seamBadge}${hoverCue}`,
+			width,
+			"…",
+		);
+		out.push(hdr + " ".repeat(Math.max(0, width - visibleWidth(hdr))));
+
+		for (const rowText of proseLines) {
+			const bodyLine = rowText ? `${margin}${openSpine} ${rowText}` : `${margin}${openSpine}`;
+			const row = truncateToWidth(bodyLine, width, "…");
+			out.push(row + " ".repeat(Math.max(0, width - visibleWidth(row))));
+		}
+		return out;
+	}
+
 	render(width: number): string[] {
 		if (width <= 0) return [];
+		const activeTheme = getActiveGlobalTheme(this.themeRef);
+		const light = isLightTheme(activeTheme);
+		const variant = getPrototypeVariant();
+		if (variant !== "off") {
+			return this.renderPrototypeVariant(variant, width, light, activeTheme);
+		}
+
 		const outerPad = width >= 48 ? 2 : 1;
 		const margin = " ".repeat(outerPad);
 		const cappedWidth = Math.max(8, Math.min(width - outerPad * 2, MAX_THOUGHTS_WIDTH));
 		const textAvail = Math.max(4, cappedWidth - 2);
-		const activeTheme = getActiveGlobalTheme(this.themeRef);
-		const light = isLightTheme(activeTheme);
 		const isHovered = this.hoverSlot.hovered;
 
 		const headerMuted = (s: string) =>
@@ -349,24 +573,30 @@ export class ThinkingBlock implements Component {
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		const protoActive = isPrototypeActive();
+		const onHeaderRow = !this.isExpanded || event.y === 0;
 		if (event.type === "move") {
+			const shouldHighlight = protoActive ? onHeaderRow : true;
 			claimHover(this.hoverSlot, () => {
 				if (this.hoverSlot.hovered) {
 					this.hoverSlot.hovered = false;
 					requestRender();
 				}
 			});
-			if (!this.hoverSlot.hovered) {
-				this.hoverSlot.hovered = true;
+			if (this.hoverSlot.hovered !== shouldHighlight) {
+				this.hoverSlot.hovered = shouldHighlight;
 				return { handled: true, render: true };
 			}
 			return undefined;
 		}
-		/* Перехватываем press на строке заголовка, чтобы быстрый повторный клик (<500мс) не запускал выделение слова в TuiAltScreen */
-		if (event.type === "press" && event.button === "left" && (!this.isExpanded || event.y === 0)) {
+		if (this.isStreamingNow && protoActive) {
+			return undefined;
+		}
+		/* Перехватываем press и click в раскрытом блоке только на заголовке (y === 0), чтобы не ломать выделение текста в теле */
+		if (event.type === "press" && event.button === "left" && onHeaderRow) {
 			return { handled: true, render: false };
 		}
-		if (event.type === "click" && event.button === "left") {
+		if (event.type === "click" && event.button === "left" && (!protoActive || onHeaderRow)) {
 			this.onToggle();
 			return { handled: true, render: true };
 		}
@@ -374,8 +604,44 @@ export class ThinkingBlock implements Component {
 	}
 }
 
+const GLOBAL_THINKING_EXPAND_KEY = Symbol.for("conarti.pi-ui.thinking-expand-all.v1");
+
+function getGlobalThinkingExpandState(): { expandAll: boolean; lastHostHide?: boolean } {
+	const g = globalThis as Record<
+		symbol,
+		{ expandAll: boolean; lastHostHide?: boolean } | undefined
+	>;
+	if (!g[GLOBAL_THINKING_EXPAND_KEY]) {
+		g[GLOBAL_THINKING_EXPAND_KEY] = { expandAll: false };
+	}
+	return g[GLOBAL_THINKING_EXPAND_KEY]!;
+}
+
+export function resetGlobalThinkingExpandState(): void {
+	const slot = getGlobalThinkingExpandState();
+	slot.expandAll = false;
+	slot.lastHostHide = undefined;
+}
+
 export function installAssistantTranscriptBlocks(): void {
 	const proto = AssistantMessageComponent.prototype as any;
+
+	hookMethod(
+		proto,
+		"setHideThinkingBlock",
+		"transcript.thinkingGlobalToggle",
+		(_self, args, original) => {
+			const [nextHide] = args as [boolean];
+			if (isPrototypeActive()) {
+				const slot = getGlobalThinkingExpandState();
+				if (slot.lastHostHide !== nextHide) {
+					slot.lastHostHide = nextHide;
+					slot.expandAll = !slot.expandAll;
+				}
+			}
+			return original.apply(_self, args);
+		},
+	);
 
 	hookMethod(
 		proto,
@@ -490,7 +756,10 @@ export function installAssistantTranscriptBlocks(): void {
 					}
 
 					const override: boolean | undefined = self.thinkingVisibilityOverrides?.get?.(runIndex);
-					const isExpanded = override !== undefined ? !override : false;
+					const defaultExpanded = isPrototypeActive()
+						? getGlobalThinkingExpandState().expandAll
+						: false;
+					const isExpanded = override !== undefined ? !override : defaultExpanded;
 
 					if (thinkingParts.length === 0) {
 						if (!activelyThinkingNow || allRedacted || (self.hideThinkingBlock && override === undefined)) {
@@ -546,6 +815,8 @@ export function installAssistantTranscriptBlocks(): void {
 							durationMs,
 							mdSlot,
 							hoverSlot,
+							runTiming?.startedAt,
+							runKey,
 						),
 					);
 					needsSpacer = true;

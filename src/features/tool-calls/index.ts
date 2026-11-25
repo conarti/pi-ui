@@ -9,6 +9,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { acquireHostRuntime, getActiveHostRuntime, type HostRuntimeHandle } from "../../shared/host-runtime.ts";
+import { subscribePrototypeChanges } from "../transcript/prototype-state.ts";
 import { classifyCallStatus, formatDurationMs, normalizeLineEndings, type RowStatus } from "./core.ts";
 import { paletteOf } from "./color.ts";
 import { hasAuthorRenderers, syncNativeToolTimer } from "./rendering.ts";
@@ -849,6 +850,7 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 	};
 	registerDensityCommand(pi, () => runtime.config, handleLiveSwitch);
 	registerCompactToolsCommand(pi, () => runtime.config, handleLiveSwitch);
+	let unsubscribeProto: (() => void) | undefined;
 	// Configure UI routing before Pi rebuilds transcript rows. Tool declarations
 	// and the active loadout must remain exactly as the host selected them.
 	const cwd = process.cwd();
@@ -858,6 +860,12 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 		const failures: UIFailure[] = [];
 		detachUI({ restoreNative: true }, failures);
 		sessionContext = ctx;
+		unsubscribeProto?.();
+		unsubscribeProto = subscribePrototypeChanges(() => {
+			if (!sessionContext) return;
+			handleLiveSwitch(sessionContext.cwd, sessionContext.isProjectTrusted(), sessionContext);
+			runtime.repaint();
+		});
 		if (event.reason !== "reload") {
 			setSessionStyleOverride(undefined);
 			runtime.clearTimings();
@@ -927,6 +935,8 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 		runtime.noteExecutionEnd(event.toolCallId, (event as { durationMs?: number }).durationMs);
 	});
 	pi.on("session_shutdown", (event) => {
+		unsubscribeProto?.();
+		unsubscribeProto = undefined;
 		const failures: UIFailure[] = [];
 		detachUI({ clearTimings: event.reason !== "reload" }, failures);
 		reportFailures(sessionContext, failures);

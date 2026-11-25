@@ -29,6 +29,10 @@ import { getSessionWorkflow, MODE_META } from "../../shared/session-workflow.ts"
 import { setAppActionRunner, setRequestRender } from "../../shared/ui-action-bridge.ts";
 import { setSessionMode } from "../plan-studio/index.ts";
 import { showPlanStudio } from "../plan-studio/studio-overlay.ts";
+import {
+	cyclePrototypeVariant,
+	getActiveVariantMeta,
+} from "../transcript/prototype-state.ts";
 import { bindComposerWorkingIndicator, buildWaveIndicator } from "./working-indicator.ts";
 
 export { buildWaveIndicator };
@@ -705,6 +709,24 @@ export class PiUiComposerEditor extends CustomEditor {
 					theme,
 				}),
 				onClick: () => void showPlanStudio(pi, ctx),
+			});
+		}
+		if (!process.env.VITEST) {
+			const protoMeta = getActiveVariantMeta();
+			const protoLabel = protoMeta
+				? `${protoMeta.settledGlyph} PROTO: ${protoMeta.shortLabel} ↻`
+				: "PROTO: off ↻";
+			allPills.push({
+				id: "proto",
+				str: renderPill(protoLabel, {
+					hovered: this.hoveredBadge === "proto",
+					active: Boolean(protoMeta),
+					variant: "secondary",
+					theme,
+				}),
+				onClick: () => {
+					cyclePrototypeVariant();
+				},
 			});
 		}
 

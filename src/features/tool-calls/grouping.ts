@@ -25,20 +25,24 @@ import {
 	type Segment,
 } from "./codex.ts";
 import { getActiveHostRuntime, type HostRuntimeHandle } from "../../shared/host-runtime.ts";
-import { hookMethod } from "../../shared/runtime-hooks.ts";
+import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
+import { requestRender } from "../../shared/ui-action-bridge.ts";
+import { getPrototypeVariant, isPrototypeActive } from "../transcript/prototype-state.ts";
+import { TTFT_PULSE_MARKER } from "../transcript/response-metrics.ts";
 import { formatDurationMs, type RowStatus } from "./core.ts";
 import {
 	densityPalette,
+	formatAllGroupedSummary,
 	formatDensityDuration,
 	formatExploredSummary,
 } from "./density.ts";
-import { getTextResult } from "./invocation.ts";
+import { getTextResult, hasImageContent } from "./invocation.ts";
 import { outputPadLines } from "./layout.ts";
 import { chromePainter, paintIndicator } from "./palette.ts";
 import type { ToolRuntime } from "./runtime.ts";
 import { findChat, isKind, isSilent } from "./silent.ts";
 import { captureViewport } from "./viewport.ts";
-import type { ToolArgs } from "./types.ts";
+import type { ToolArgs, ToolDensity } from "./types.ts";
 
 /** Claude Code's words for each way of looking around, in the order it lists them. */
 const PHRASES: ReadonlyArray<{ kind: LookKind; running: string; done: string; singular: string; plural: string }> = [
@@ -181,7 +185,7 @@ type HeaderCache = {
 	lines: string[];
 };
 
-type GroupState = { expanded: boolean; lastHostExpanded: boolean; header?: HeaderCache };
+type GroupState = { expanded: boolean; lastHostExpanded: boolean; hovered?: boolean; header?: HeaderCache };
 
 /** The colors a group line is drawn in, resolved once per frame rather than once per group. */
 type Paint = { theme: Theme; chrome: (text: string) => string; key: string };
@@ -232,6 +236,26 @@ export class ToolGroupComponent extends Container {
 			return { handled: true };
 		};
 		const handleHeaderMouse = (event: { type?: string; button?: string; y?: number }) => {
+			if (event.type === "move" && isPrototypeActive()) {
+				const onBlankLead =
+					event.y === 0 &&
+					lastHeaderLines.length > 1 &&
+					stripTerminalSequences(lastHeaderLines[0] ?? "").trim() === "";
+				const nextHover = !onBlankLead;
+				claimHover(this.state, () => {
+					if (this.state.hovered) {
+						this.state.hovered = false;
+						this.state.header = undefined;
+						requestRender();
+					}
+				});
+				if (Boolean(this.state.hovered) !== nextHover) {
+					this.state.hovered = nextHover;
+					this.state.header = undefined;
+					return { handled: true, render: true };
+				}
+				return undefined;
+			}
 			if (event.button !== "left") return undefined;
 			if (
 				event.y === 0 &&
@@ -259,16 +283,73 @@ export class ToolGroupComponent extends Container {
 			handleMouse: handleHeaderMouse,
 		} as Component);
 		if (!state.expanded) return;
-		for (const member of members) this.addChild(member as Component);
+		if (isPrototypeActive()) {
+			/* В раскрытой группе прототипа убираем лишние ведущие пустые строки между шагами */
+			for (const member of members) {
+				if (isKind(member, ToolExecutionComponent)) {
+					const comp = member as Component;
+					this.addChild({
+						render: (w: number) => {
+							const rendered = comp.render(w);
+							return rendered.length > 1 && rendered[0] === "" ? rendered.slice(1) : rendered;
+						},
+						invalidate: () => comp.invalidate(),
+						handleMouse: (ev: unknown) => {
+							if (typeof (comp as { handleMouse?: (e: unknown) => unknown }).handleMouse !== "function") {
+								return undefined;
+							}
+							const mouseEv = ev as { y?: number };
+							return (comp as { handleMouse: (e: unknown) => unknown }).handleMouse(
+								typeof mouseEv.y === "number" ? { ...mouseEv, y: mouseEv.y + 1 } : mouseEv,
+							);
+						},
+					} as Component);
+				} else {
+					this.addChild(member as Component);
+				}
+			}
+		} else {
+			for (const member of members) this.addChild(member as Component);
+		}
 		if (footer) this.addChild({ render: footer, invalidate() {}, handleMouse: handleFooterMouse } as Component);
 	}
 }
 
 export type GroupStyle = "density" | "claude" | "codex";
+type GroupBucket = "all" | "explore" | "edit" | "command" | "custom";
 
-function isGroupable(child: unknown, style: GroupStyle = "claude"): child is ToolRowLike {
-	if (!isKind(child, ToolExecutionComponent)) return false;
-	return style === "codex" ? exploreOf(child as ToolRowLike) !== undefined : kindOf(child as ToolRowLike) !== undefined;
+function resolveRowGroupBucket(
+	child: unknown,
+	style: GroupStyle,
+	density: ToolDensity = "detailed",
+): GroupBucket | undefined {
+	if (!isKind(child, ToolExecutionComponent)) return undefined;
+	const row = child as ToolRowLike;
+	/* Строки с инлайн-изображениями никогда не прячем в свёрнутую текстовую сводку */
+	if (hasImageContent(row.result)) return undefined;
+
+	if (style === "codex") {
+		return exploreOf(row) !== undefined ? "explore" : undefined;
+	}
+	if (style === "claude" || !isPrototypeActive()) {
+		return kindOf(row) !== undefined ? "explore" : undefined;
+	}
+	if (density === "compact") {
+		return "all";
+	}
+	if (density === "grouped") {
+		if (kindOf(row) !== undefined) return "explore";
+		if (row.toolName === "edit" || row.toolName === "write") return "edit";
+		if (
+			row.toolName === "bash" ||
+			row.toolName === "powershell" ||
+			row.toolName === "codemode"
+		) {
+			return "command";
+		}
+		return "custom";
+	}
+	return kindOf(row) !== undefined ? "explore" : undefined;
 }
 
 type AssistantLike = { lastMessage?: { content?: Array<{ type: string; text?: string }> } };
@@ -285,23 +366,30 @@ function isThinkingOnly(child: unknown): boolean {
  * status lines Pi writes into the chat itself, such as "Tool output: collapsed".
  */
 function isFoldable(child: unknown): boolean {
-	return isThinkingOnly(child) || isKind(child, Text) || isKind(child, Spacer);
+	if (child && typeof child === "object" && (child as Record<PropertyKey, unknown>)[TTFT_PULSE_MARKER]) {
+		return false;
+	}
+	if (isThinkingOnly(child)) {
+		/* В Variant C каждый блок размышления остаётся отдельной карточкой даже внутри серии инструментов */
+		return getPrototypeVariant() !== "C";
+	}
+	return isKind(child, Text) || isKind(child, Spacer);
 }
 
 /**
- * Replace each run of reads, searches, and listings with one group. What sits
- * between two of them folds into the group, as Claude Code keeps thinking out
- * of the way; anything else, text, a command, an edit, ends the run.
+ * Replace runs of groupable tool calls with summary groups according to active Tool Density.
  */
 export function groupChildren(
 	children: readonly unknown[],
 	makeGroup: (rows: ToolRowLike[], members: unknown[]) => Component,
 	style: GroupStyle = "claude",
+	density: ToolDensity = "detailed",
 ): unknown[] {
 	const grouped: unknown[] = [];
 	let rows: ToolRowLike[] = [];
 	let members: unknown[] = [];
 	let pending: unknown[] = [];
+	let currentBucket: GroupBucket | undefined;
 	const flush = () => {
 		if (style === "density" && rows.length === 1) {
 			grouped.push(...members);
@@ -310,10 +398,16 @@ export function groupChildren(
 		}
 		rows = [];
 		members = [];
+		currentBucket = undefined;
 	};
 	for (const child of children) {
-		if (isGroupable(child, style)) {
-			rows.push(child);
+		const bucket = resolveRowGroupBucket(child, style, density);
+		if (bucket !== undefined) {
+			if (currentBucket !== undefined && currentBucket !== bucket) {
+				flush();
+			}
+			currentBucket = bucket;
+			rows.push(child as ToolRowLike);
 			members.push(...pending, child);
 			pending = [];
 			continue;
@@ -356,7 +450,12 @@ export class ToolGroupController {
 				const children = self.children as unknown[];
 				this.paint = this.resolvePaint();
 				openExplorations.clear();
-				self.children = groupChildren(children, (rows, members) => this.makeGroup(rows, members, resolvedHost.tui), style);
+				self.children = groupChildren(
+					children,
+					(rows, members) => this.makeGroup(rows, members, resolvedHost.tui),
+					style,
+					this.runtime.config.density,
+				);
 				try {
 					return original.apply(self, args);
 				} finally {
@@ -395,7 +494,11 @@ export class ToolGroupController {
 		const groupState = state;
 		const draw = (group: readonly ToolRowLike[], width: number, expanded: boolean) => {
 			const pad = group[0]?.outputPad;
-			return outputPadLines(this.drawCached(group, width + (pad === 0 ? 1 : 0), expanded, groupState), width, pad);
+			return outputPadLines(
+				this.drawCached(group, width + (pad === 0 ? 1 : 0), expanded, groupState, members),
+				width,
+				pad,
+			);
 		};
 		if (this.runtime.config.style !== "codex") return new ToolGroupComponent(rows, members, state, draw, () => tui.requestRender());
 		// Codex opens a group to the whole of each call, and closes it from one "− Show less" beneath them.
@@ -441,12 +544,18 @@ export class ToolGroupController {
 	 * expansion, or the theme changes, so those lines are kept. A running group's
 	 * line pulses and counts time, so it is drawn every frame.
 	 */
-	private drawCached(rows: readonly ToolRowLike[], width: number, expanded: boolean, state: GroupState): string[] {
+	private drawCached(
+		rows: readonly ToolRowLike[],
+		width: number,
+		expanded: boolean,
+		state: GroupState,
+		members: readonly unknown[] = rows,
+	): string[] {
 		const paint = this.paint ?? this.resolvePaint();
 		if (!paint) return [];
-		if (lastRunning(rows, this.canRun)) return this.draw(rows, width, expanded, paint);
+		if (lastRunning(rows, this.canRun)) return this.draw(rows, width, expanded, paint, state, members);
 		if (state.header && headerStill(state.header, rows, paint.key, width, expanded)) return state.header.lines;
-		const lines = this.draw(rows, width, expanded, paint);
+		const lines = this.draw(rows, width, expanded, paint, state, members);
 		state.header = {
 			paint: paint.key,
 			width,
@@ -462,8 +571,17 @@ export class ToolGroupController {
 	}
 
 	/** Claude's quiet completed exploration; active and interrupted calls keep a status cue. */
-	private draw(rows: readonly ToolRowLike[], width: number, expanded: boolean, paint: Paint): string[] {
-		if (this.runtime.config.style === "density") return this.drawDensity(rows, width, expanded, paint);
+	private draw(
+		rows: readonly ToolRowLike[],
+		width: number,
+		expanded: boolean,
+		paint: Paint,
+		state?: GroupState,
+		members: readonly unknown[] = rows,
+	): string[] {
+		if (this.runtime.config.style === "density") {
+			return this.drawDensity(rows, width, expanded, paint, Boolean(state?.hovered), members);
+		}
 		if (this.runtime.config.style === "codex") return this.drawCodex(rows, width, expanded, paint);
 		// Ctrl+O replaces the summary with individual calls, as Claude's transcript
 		// does. A locally clicked group retains its header as a collapse target.
@@ -546,11 +664,20 @@ export class ToolGroupController {
 		return lines;
 	}
 
-	private drawDensity(rows: readonly ToolRowLike[], width: number, expanded: boolean, paint: Paint): string[] {
+	private drawDensity(
+		rows: readonly ToolRowLike[],
+		width: number,
+		expanded: boolean,
+		paint: Paint,
+		hovered = false,
+		members: readonly unknown[] = rows,
+	): string[] {
 		const pal = densityPalette(paint.theme);
 		const fit = (line: string) => truncateToWidth(line, Math.max(1, width), "…");
 		const running = lastRunning(rows, this.canRun);
 		const statuses = rows.map((row) => memberStatus(row, this.canRun));
+		const protoOn = isPrototypeActive();
+		const variant = getPrototypeVariant();
 
 		for (const [idx, row] of rows.entries()) {
 			if (statuses[idx] === "running") {
@@ -568,9 +695,22 @@ export class ToolGroupController {
 					? "pending"
 					: "success";
 
-		const summary = formatExploredSummary(rows, this.canRun);
-		const diamond = pal.diamond(status, expanded);
-		const styledSummary = pal.title(summary, status, expanded);
+		const groupedInfo = protoOn
+			? formatAllGroupedSummary(rows, this.canRun)
+			: { summary: formatExploredSummary(rows, this.canRun) };
+		const diamond = pal.diamond(status, expanded, hovered);
+		const styledSummary = pal.title(groupedInfo.summary, status, expanded, hovered);
+		const foldedThoughts =
+			variant === "A"
+				? members.filter((m) => isThinkingOnly(m)).length
+				: 0;
+
+		let diffBadge = "";
+		if (protoOn && groupedInfo.changes && !running) {
+			const plus = pal.theme.fg("toolDiffAdded", `+${groupedInfo.changes.added}`);
+			const minus = pal.theme.fg("toolDiffRemoved", `-${groupedInfo.changes.removed}`);
+			diffBadge = ` ${plus} ${minus}`;
+		}
 
 		let meta = "";
 		if (running) {
@@ -599,12 +739,21 @@ export class ToolGroupController {
 				}
 			}
 			const parts: string[] = [];
+			if (foldedThoughts > 0) {
+				parts.push(`${foldedThoughts} ${foldedThoughts === 1 ? "thought" : "thoughts"}`);
+			}
 			if (failedCount > 0) parts.push(`${failedCount} failed`);
 			const dur = hasDuration ? formatDensityDuration(totalMs) : undefined;
 			if (dur) parts.push(dur);
 			if (parts.length > 0) meta = ` ${pal.dim(`(${parts.join(" · ")})`)}`;
 		}
 
-		return ["", fit(` ${diamond} ${styledSummary}${meta}`)];
+		const disclosure =
+			protoOn && (hovered || variant === "C")
+				? ` ${pal.dim(expanded ? (variant === "C" ? "▾" : "⌄") : variant === "C" ? "▸" : "›")}`
+				: "";
+		const prefix = variant === "C" ? pal.rail(" ├ ") : " ";
+
+		return ["", fit(`${prefix}${diamond} ${styledSummary}${diffBadge}${meta}${disclosure}`)];
 	}
 }

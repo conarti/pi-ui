@@ -11,8 +11,9 @@ export type BuiltInDefinition = ToolDefinition<any, any, any>;
 export const DISPLAY_MODES = ["normal", "silent"] as const;
 export type DisplayMode = (typeof DISPLAY_MODES)[number];
 export const TOOL_DENSITIES = ["detailed", "diff-focus", "compact"] as const;
-export type ToolDensity = (typeof TOOL_DENSITIES)[number];
-export const DISPLAY_STYLES = ["density", "detailed", "diff-focus", "compact", "claude", "codex", "off"] as const;
+export const PROTO_TOOL_DENSITIES = ["compact", "grouped", "balanced", "diff-focus", "detailed"] as const;
+export type ToolDensity = (typeof PROTO_TOOL_DENSITIES)[number];
+export const DISPLAY_STYLES = ["density", "detailed", "diff-focus", "balanced", "grouped", "compact", "claude", "codex", "off"] as const;
 export type DisplayStyle = (typeof DISPLAY_STYLES)[number];
 
 export interface CustomToolsConfig {

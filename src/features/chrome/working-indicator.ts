@@ -6,6 +6,11 @@ import {
 	stopAllAnimations,
 	type WaveSampleOptions,
 } from "../../shared/animation-scheduler.ts";
+import {
+	buildLiveWorkingPresentation,
+	isPrototypeActive,
+	samplePrototypeRunningGlyph,
+} from "../transcript/prototype-state.ts";
 
 const COMPOSER_SURFACE_KEY = "composer.working-indicator";
 const WORKING_CONTROLLER_KEY = Symbol.for("conarti.pi-ui.composer-working-controller.v1");
@@ -24,9 +29,24 @@ function getWorkingState(): ComposerWorkingState {
 }
 
 export function buildWaveIndicator(options?: WaveSampleOptions): WorkingIndicatorOptions {
+	if (isPrototypeActive()) {
+		return {
+			frames: [samplePrototypeRunningGlyph(0, options)],
+		};
+	}
 	return {
 		frames: [renderComposerWorkingFrame(options)],
 	};
+}
+
+function applyWorkingIndicatorFrame(ctx: ExtensionContext): void {
+	if (!isPrototypeActive()) {
+		ctx.ui.setWorkingIndicator(buildWaveIndicator({ theme: ctx.ui.theme }));
+		return;
+	}
+	const pres = buildLiveWorkingPresentation({ theme: ctx.ui.theme });
+	ctx.ui.setWorkingIndicator({ frames: [pres.indicatorFrame] });
+	ctx.ui.setWorkingMessage(pres.borderMessage);
 }
 
 export function bindComposerWorkingIndicator(ctx: ExtensionContext): void {
@@ -74,18 +94,21 @@ export function startComposerWorkingWave(): void {
 	activateAnimationSurface(COMPOSER_SURFACE_KEY, () => {
 		const current = getWorkingState();
 		const activeCtx = current.ctx;
-		if (current.suppressed || !activeCtx || activeCtx.mode !== "tui" || !activeCtx.hasUI) {
+		if ( current.suppressed || !activeCtx || activeCtx.mode !== "tui" || !activeCtx.hasUI) {
 			deactivateAnimationSurface(COMPOSER_SURFACE_KEY);
 			return;
 		}
-		activeCtx.ui.setWorkingIndicator(buildWaveIndicator({ theme: activeCtx.ui.theme }));
+		applyWorkingIndicatorFrame(activeCtx);
 	});
 }
 
 export function stopComposerWorkingWave(clearContext = false): void {
 	deactivateAnimationSurface(COMPOSER_SURFACE_KEY);
+	const state = getWorkingState();
+	if (state.ctx && state.ctx.mode === "tui" && state.ctx.hasUI && isPrototypeActive()) {
+		state.ctx.ui.setWorkingMessage(undefined);
+	}
 	if (clearContext) {
-		const state = getWorkingState();
 		state.ctx = undefined;
 		state.suppressed = false;
 	}

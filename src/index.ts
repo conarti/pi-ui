@@ -25,6 +25,8 @@ import { registerPromptChipsFeature } from "./features/prompt-chips/index.ts";
 import { registerPromptSuggestionFeature } from "./features/prompt-suggestion/index.ts";
 import { registerQuotesFeature } from "./features/quotes/index.ts";
 import { registerTranscriptFeature } from "./features/transcript/index.ts";
+import { registerPrototypeShowcaseFeature } from "./features/transcript/prototype-showcase.ts";
+import { registerResponseMetricsFeature } from "./features/transcript/response-metrics.ts";
 import { acquireHostRuntime, disposeActiveHostRuntime } from "./shared/host-runtime.ts";
 import { installKeyboardLayoutSupport } from "./shared/keyboard-layout.ts";
 import { getSessionWorkflow } from "./shared/session-workflow.ts";
@@ -39,14 +41,16 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 		await acquireHostRuntime(ctx);
 	});
 
-	/* 1. Карточки транскрипта, волновая анимация, Prompt Chips и цитаты */
+	/* 1. Карточки транскрипта, волновая анимация, метрики ответа, Prompt Chips и цитаты */
 	registerTranscriptFeature(pi);
 	registerComposerWorkingAnimation(pi);
+	registerResponseMetricsFeature(pi);
 	registerPromptChipsFeature(pi);
 	registerQuotesFeature(pi);
 
 	/* 2. Рендереры вызовов тулов, сводки codemode и тихий режим */
 	registerToolCallsFeature(pi);
+	registerPrototypeShowcaseFeature(pi);
 
 	/* 3. Интерактивный опросник ask_user_question */
 	registerAskUserFeature(pi);

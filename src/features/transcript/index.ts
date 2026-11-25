@@ -6,6 +6,7 @@ import {
 	clearRecordedThinkingTimings,
 	installAssistantTranscriptBlocks,
 	observeAssistantThinkingMessage,
+	resetGlobalThinkingExpandState,
 	stopThinkingWave,
 } from "./thinking-block.ts";
 import {
@@ -23,6 +24,7 @@ export function registerTranscriptFeature(pi: ExtensionAPI): void {
 	pi.on("session_start", async (event) => {
 		if (event.reason !== "reload") {
 			clearRecordedThinkingTimings();
+			resetGlobalThinkingExpandState();
 		}
 	});
 

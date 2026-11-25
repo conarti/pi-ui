@@ -21,12 +21,14 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
 	DISPLAY_STYLES,
+	PROTO_TOOL_DENSITIES,
 	TOOL_DENSITIES,
 	type CompactToolsConfig,
 	type DisplayStyle,
 	type ToolDensity,
 } from "./types.ts";
 import { loadConfig } from "./config.ts";
+import { getActiveVariantMeta, isPrototypeActive } from "../transcript/prototype-state.ts";
 
 type Scope = "global" | "project";
 const SCOPES: readonly Scope[] = ["global", "project"];
@@ -40,15 +42,25 @@ const COMPACT_HELP =
 const BUSY = "Wait for the current response to finish before changing tool styles.";
 
 const DENSITY_CHOICES: Record<ToolDensity, string> = {
+	compact: "Compact - all consecutive tool calls & thoughts folded into 1 summary row (default)",
+	grouped: "Grouped - consecutive reads, edits, and commands folded separately by category",
+	balanced: "Balanced - completed edits (+N -M) and commands collapsed to 1 row each",
+	"diff-focus": "Diff Focus - inline edit/write diffs, completed commands collapsed to 1 row",
+	detailed: "Detailed - inline edit/write diffs + command 2 head + 3 tail previews",
+};
+
+const BASELINE_DENSITY_CHOICES: Record<(typeof TOOL_DENSITIES)[number], string> = {
 	detailed: "Detailed - inline edit/write diffs + command 2 head + 3 tail previews (default)",
 	"diff-focus": "Diff Focus - inline edit/write diffs, completed commands collapsed to 1 row",
 	compact: "Compact - completed edit, command, and tool runs folded into summary rows",
 };
 
 const STYLE_CHOICES: Record<Exclude<DisplayStyle, "density">, string> = {
-	detailed: DENSITY_CHOICES.detailed,
-	"diff-focus": DENSITY_CHOICES["diff-focus"],
 	compact: DENSITY_CHOICES.compact,
+	grouped: DENSITY_CHOICES.grouped,
+	balanced: DENSITY_CHOICES.balanced,
+	"diff-focus": DENSITY_CHOICES["diff-focus"],
+	detailed: DENSITY_CHOICES.detailed,
 	claude: "Claude - legacy grouped exploration rows",
 	codex: "Codex - legacy explored groups and output tails",
 	off: "Off - restore Pi's native UI",
@@ -69,18 +81,33 @@ export function setSessionStyleOverride(override: SessionStyleOverride | undefin
 	(globalThis as Record<symbol, SessionStyleOverride | undefined>)[SESSION_OVERRIDE_KEY] = override;
 }
 
+function isDensityPresetName(value: string): value is ToolDensity {
+	return (PROTO_TOOL_DENSITIES as readonly string[]).includes(value);
+}
+
 export function loadEffectiveConfig(cwd?: string, projectTrusted = false): CompactToolsConfig {
 	const base = loadConfig(cwd, projectTrusted);
 	const override = getSessionStyleOverride();
-	if (!override) return base;
-	if (override.style === "detailed" || override.style === "diff-focus" || override.style === "compact") {
-		return { ...base, style: "density", density: override.style };
+	if (override) {
+		if (isDensityPresetName(override.style)) {
+			return { ...base, style: "density", density: override.style };
+		}
+		return {
+			...base,
+			style: override.style,
+			...(override.density ? { density: override.density } : {}),
+		};
 	}
-	return {
-		...base,
-		style: override.style,
-		...(override.density ? { density: override.density } : {}),
-	};
+	const variantMeta = getActiveVariantMeta();
+	if (
+		variantMeta &&
+		base.style === "density" &&
+		!globalSetsStyle(cwd ?? process.cwd()) &&
+		!(cwd && projectSetsStyle(cwd, projectTrusted))
+	) {
+		return { ...base, density: variantMeta.defaultDensity };
+	}
+	return base;
 }
 
 export function configPath(cwd: string, scope: Scope): string {
@@ -124,12 +151,11 @@ export function saveStyle(path: string, style: DisplayStyle): void {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
 	mkdirSync(dirname(path), { recursive: true });
-	const payload: Record<string, unknown> =
-		style === "detailed" || style === "diff-focus" || style === "compact"
-			? { ...data, style, density: style }
-			: style === "density"
-				? { ...data, style: "density", density: "detailed" }
-				: { ...data, style };
+	const payload: Record<string, unknown> = isDensityPresetName(style)
+		? { ...data, style, density: style }
+		: style === "density"
+			? { ...data, style: "density", density: "detailed" }
+			: { ...data, style };
 	const temporary = join(dirname(path), `.compact-tools-${randomUUID()}.tmp`);
 	try {
 		writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600, flag: "wx" });
@@ -241,7 +267,7 @@ function applySelection(
 	}
 
 	/* Без явного scope и без существующего файла настроек переключаем плотность только в памяти сессии. */
-	if (selection === "detailed" || selection === "diff-focus" || selection === "compact") {
+	if (isDensityPresetName(selection)) {
 		setSessionStyleOverride({ style: "density", density: selection });
 	} else if (selection === "density") {
 		setSessionStyleOverride({ style: "density", density: "detailed" });
@@ -263,18 +289,20 @@ export function registerDensityCommand(
 	pi.registerCommand("density", {
 		description: "Switch Tool Density live (detailed, diff-focus, compact)",
 		getArgumentCompletions: (prefix) => {
+			const activeDensities = isPrototypeActive() ? PROTO_TOOL_DENSITIES : TOOL_DENSITIES;
 			const typed = prefix.trimStart().toLowerCase();
 			const parts = typed.split(/\s+/);
-			const scoped = parts.length === 2 && TOOL_DENSITIES.includes(parts[0] as ToolDensity);
+			const scoped = parts.length === 2 && (activeDensities as readonly string[]).includes(parts[0]!);
 			const values = scoped
 				? SCOPES.map((scope) => `${parts[0]} ${scope}`)
-				: [...TOOL_DENSITIES, "status", "help"];
+				: [...activeDensities, "status", "help"];
 			const items = values
 				.filter((value) => value.startsWith(typed) && value !== typed.trimEnd())
 				.map((value) => ({ value, label: value }));
 			return items.length ? items : null;
 		},
 		handler: async (args, ctx) => {
+			const activeDensities = isPrototypeActive() ? PROTO_TOOL_DENSITIES : TOOL_DENSITIES;
 			const rawParts = args.trim() ? args.trim().toLowerCase().split(/\s+/) : [];
 			const normalizedFirst =
 				rawParts[0] === "diff_focus" || rawParts[0] === "difffocus" ? "diff-focus" : rawParts[0];
@@ -290,7 +318,7 @@ export function registerDensityCommand(
 			}
 			if (
 				parts.length > 2 ||
-				(parts.length > 0 && !TOOL_DENSITIES.includes(parts[0] as ToolDensity)) ||
+				(parts.length > 0 && !isDensityPresetName(parts[0]!)) ||
 				(parts[1] !== undefined && !SCOPES.includes(parts[1] as Scope))
 			) {
 				ctx.ui.notify(DENSITY_HELP, "warning");
@@ -305,11 +333,19 @@ export function registerDensityCommand(
 					return;
 				}
 				const current = getConfig();
-				const selected = await ctx.ui.select(
-					`Tool Density (current: ${current.density})`,
-					Object.values(DENSITY_CHOICES),
-				);
-				preset = TOOL_DENSITIES.find((value) => DENSITY_CHOICES[value] === selected);
+				if (isPrototypeActive()) {
+					const selected = await ctx.ui.select(
+						`Tool Density (current: ${current.density})`,
+						PROTO_TOOL_DENSITIES.map((d) => DENSITY_CHOICES[d]),
+					);
+					preset = PROTO_TOOL_DENSITIES.find((value) => DENSITY_CHOICES[value] === selected);
+				} else {
+					const selected = await ctx.ui.select(
+						`Tool Density (current: ${current.density})`,
+						TOOL_DENSITIES.map((d) => BASELINE_DENSITY_CHOICES[d]),
+					);
+					preset = TOOL_DENSITIES.find((value) => BASELINE_DENSITY_CHOICES[value] === selected);
+				}
 				if (!preset) return;
 			}
 

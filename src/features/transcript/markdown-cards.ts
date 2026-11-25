@@ -19,6 +19,7 @@ import {
 	hookMethod,
 } from "../../shared/runtime-hooks.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
+import { isPrototypeActive } from "./prototype-state.ts";
 
 interface CodeZone {
 	id: string;
@@ -264,6 +265,7 @@ export function installMarkdownCardsAndHeadings(): void {
 			}
 
 			if (
+				!isPrototypeActive() &&
 				(hoveredZone === "reply" || copiedZone === "reply") &&
 				!zones.some((z) => z.headerRow === 0)
 			) {
@@ -324,7 +326,12 @@ export function installMarkdownCardsAndHeadings(): void {
 						}
 					}
 				}
-				if (!nextZone && event.y === 0 && String(self.text ?? "").trim().length > 0) {
+				if (
+					!isPrototypeActive() &&
+					!nextZone &&
+					event.y === 0 &&
+					String(self.text ?? "").trim().length > 0
+				) {
 					nextZone = "reply";
 				}
 
