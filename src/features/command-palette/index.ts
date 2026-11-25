@@ -11,6 +11,7 @@ import {
 	visibleWidth,
 	type Component,
 	type Focusable,
+	type TUI,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
@@ -24,7 +25,7 @@ import {
 	hasBlockingModalOverlay,
 	openModalCard,
 } from "../../shared/modal-card.ts";
-import { hookMethod } from "../../shared/runtime-hooks.ts";
+import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
 import { getSessionWorkflow, MODE_META } from "../../shared/session-workflow.ts";
 import { requestRender, runAppAction } from "../../shared/ui-action-bridge.ts";
 import { showContextInspector } from "../context-inspector/index.ts";
@@ -287,6 +288,7 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 		ctx,
 		(_tui, theme, _kb, done) => {
 			const card = createModalCard();
+			const rowHoverOwner = {};
 			const searchInput = createSingleLineInput();
 			let selectedIdx = 0;
 			let scrollOffset = 0;
@@ -426,6 +428,11 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 					const cardOutcome = card.handleMouse(event);
 					if (event.type === "move") {
 						const nextHover = cardOutcome.handled ? null : (rowMap.get(event.y) ?? null);
+						if (nextHover !== null) {
+							claimHover(rowHoverOwner, () => {
+								hoveredIdx = null;
+							});
+						}
 						const rowChanged = nextHover !== hoveredIdx;
 						hoveredIdx = nextHover;
 						return { handled: true, render: cardOutcome.render || rowChanged };
@@ -491,7 +498,7 @@ export function registerCommandPaletteFeature(pi: ExtensionAPI): void {
 		},
 	});
 
-	/* В реальном ExtensionRunner хоста ctrl+k зарезервирован за tui.editor.deleteToLineEnd, поэтому перехватываем его на входе терминала */
+	/* Ctrl+K зарезервирован в Pi под tui.editor.deleteToLineEnd (restrictOverride: true), поэтому перехватываем напрямую на входе TUI */
 	pi.on("session_start", (_event, ctx) => {
 		unsubscribeInput?.();
 		unsubscribeInput = undefined;
@@ -509,15 +516,28 @@ export function registerCommandPaletteFeature(pi: ExtensionAPI): void {
 				}
 				return undefined;
 			}
-			if (!isKeyRelease(data) && !isKeyRepeat(data) && matchesLayoutChord(data, "ctrl+k")) {
-				const tui = getActiveHostRuntime()?.tui;
-				if (tui && hasBlockingModalOverlay(tui)) {
+			if (
+				isKeyRelease(data) ||
+				isKeyRepeat(data) ||
+				(!matchesKey(data, "ctrl+k") && !matchesLayoutChord(data, "ctrl+k"))
+			) {
+				return undefined;
+			}
+			const hostTui = getActiveHostRuntime()?.tui;
+			if (hostTui) {
+				const inspectable = hostTui as TUI & { getTopmostVisibleOverlay?: () => unknown };
+				if (
+					typeof inspectable.getTopmostVisibleOverlay === "function" &&
+					inspectable.getTopmostVisibleOverlay()
+				) {
 					return undefined;
 				}
-				void showCommandPalette(pi, ctx);
-				return { consume: true };
+				if (hasBlockingModalOverlay(hostTui)) {
+					return { consume: true };
+				}
 			}
-			return undefined;
+			void showCommandPalette(pi, ctx);
+			return { consume: true };
 		});
 	});
 

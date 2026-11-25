@@ -10,6 +10,7 @@ import {
 import {
 	CURSOR_MARKER,
 	Editor,
+	isKeyRelease,
 	matchesKey,
 	renderFakeCursor,
 	sliceByColumn,
@@ -21,6 +22,8 @@ import {
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 import { fgRgb, isLightTheme, renderPill, type HitBox, type RgbTuple } from "../../shared/ansi.ts";
+import { matchesLayoutChord } from "../../shared/keyboard-layout.ts";
+import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import { getSessionWorkflow, MODE_META } from "../../shared/session-workflow.ts";
 import { setAppActionRunner, setRequestRender } from "../../shared/ui-action-bridge.ts";
@@ -62,10 +65,19 @@ export interface ComposerHooks {
 	restoreUndoState?(snapshot: unknown, editor: PiUiComposerEditor): void;
 }
 
+export interface ComposerPromptSuggestionBridge {
+	getSuggestion(): string | undefined;
+	hasActivePromptChips?(): boolean;
+	acceptSuggestion(): string | undefined;
+	dismissSuggestion(): boolean;
+}
+
 const COMPOSER_HOOKS_KEY = Symbol.for("conarti.pi-ui.composer-hooks.v1");
+const COMPOSER_SUGGESTION_BRIDGE_KEY = Symbol.for("conarti.pi-ui.composer-prompt-suggestion.v1");
 const ACTIVE_COMPOSER_KEY = Symbol.for("conarti.pi-ui.active-composer.v1");
 const COMPOSER_FACTORY_ORIGIN = Symbol.for("conarti.pi-ui.composer-factory-origin.v1");
 const UPSTREAM_EDITOR_FACTORIES = new WeakMap<object, ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>();
+const composerGraphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 export function getActiveComposerEditor(): PiUiComposerEditor | undefined {
 	return (globalThis as Record<symbol, PiUiComposerEditor | undefined>)[ACTIVE_COMPOSER_KEY];
@@ -81,6 +93,20 @@ export function registerComposerHooks(hooks: ComposerHooks | undefined): void {
 
 export function getComposerHooks(): ComposerHooks | undefined {
 	return (globalThis as Record<symbol, ComposerHooks | undefined>)[COMPOSER_HOOKS_KEY];
+}
+
+export function registerComposerPromptSuggestionBridge(
+	bridge: ComposerPromptSuggestionBridge | undefined,
+): void {
+	(globalThis as Record<symbol, ComposerPromptSuggestionBridge | undefined>)[
+		COMPOSER_SUGGESTION_BRIDGE_KEY
+	] = bridge;
+}
+
+export function getComposerPromptSuggestionBridge(): ComposerPromptSuggestionBridge | undefined {
+	return (globalThis as Record<symbol, ComposerPromptSuggestionBridge | undefined>)[
+		COMPOSER_SUGGESTION_BRIDGE_KEY
+	];
 }
 
 export interface PiUiComposerDeps {
@@ -131,6 +157,7 @@ export class PiUiComposerEditor extends CustomEditor {
 	private undoSnapshots: unknown[] = [];
 	private pendingUndoCapture: { hasValue: boolean; value: unknown } | undefined;
 	private restoringUndo = false;
+	private acceptedSuggestionUndoArmed = false;
 
 	constructor(
 		tui: TUI,
@@ -177,6 +204,12 @@ export class PiUiComposerEditor extends CustomEditor {
 
 	getTui(): TUI {
 		return this.tui;
+	}
+
+	isDraftCompletelyEmpty(): boolean {
+		if (!this.internals().isEditorEmpty()) return false;
+		if (getComposerPromptSuggestionBridge()?.hasActivePromptChips?.()) return false;
+		return true;
 	}
 
 	getRenderedBoxHeight(): number {
@@ -465,6 +498,9 @@ export class PiUiComposerEditor extends CustomEditor {
 					hostOnChange?.(afterSyncText);
 				}
 			}
+			if (this.internals().isEditorEmpty()) {
+				this.acceptedSuggestionUndoArmed = false;
+			}
 		};
 
 		const undoStack = this.internals().undoStack;
@@ -472,6 +508,7 @@ export class PiUiComposerEditor extends CustomEditor {
 			const origClear = undoStack.clear.bind(undoStack);
 			undoStack.clear = () => {
 				this.undoSnapshots.length = 0;
+				this.acceptedSuggestionUndoArmed = false;
 				origClear();
 			};
 		}
@@ -484,7 +521,11 @@ export class PiUiComposerEditor extends CustomEditor {
 				if (!this.restoringUndo) {
 					getComposerHooks()?.onDraftChanged?.(text, this);
 				}
-				hostOnChange?.(this.getText());
+				const currentText = this.getText();
+				if (currentText === "") {
+					this.acceptedSuggestionUndoArmed = false;
+				}
+				hostOnChange?.(currentText);
 			},
 			set: (fn: ((text: string) => void) | undefined) => {
 				hostOnChange = fn;
@@ -539,6 +580,56 @@ export class PiUiComposerEditor extends CustomEditor {
 		}
 		if (!data.startsWith("\x1b[200~") && this.onExtensionShortcut?.(data)) {
 			return;
+		}
+		if (
+			!data.startsWith("\x1b[200~") &&
+			!isKeyRelease(data) &&
+			!this.isShowingAutocomplete() &&
+			!hasBlockingModalOverlay(this.tui)
+		) {
+			const isUserCtrlZUndo =
+				matchesLayoutChord(data, "ctrl+z") &&
+				this.matchesKeybinding(data, "tui.editor.undo");
+			if (
+				(this.acceptedSuggestionUndoArmed && matchesLayoutChord(data, "ctrl+z")) ||
+				isUserCtrlZUndo
+			) {
+				(this as unknown as { undo(): void }).undo();
+				if (internal.isEditorEmpty()) {
+					this.acceptedSuggestionUndoArmed = false;
+				}
+				hooks?.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
+				this.tui.requestRender();
+				return;
+			}
+
+			const suggestionBridge = getComposerPromptSuggestionBridge();
+			const activeSuggestion = this.isDraftCompletelyEmpty()
+				? suggestionBridge?.getSuggestion()
+				: undefined;
+			if (activeSuggestion) {
+				if (matchesKey(data, "tab") || matchesKey(data, "right")) {
+					const accepted = suggestionBridge?.acceptSuggestion();
+					if (accepted) {
+						const preSnap = hooks?.captureUndoState?.(this);
+						this.setTextWithUndoSnapshot(accepted, preSnap);
+						this.acceptedSuggestionUndoArmed = true;
+						hooks?.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
+						this.tui.requestRender();
+						return;
+					}
+				}
+				if (
+					(data === "\x1b" || matchesKey(data, "escape")) &&
+					this.deps.ctx.isIdle()
+				) {
+					if (suggestionBridge?.dismissSuggestion()) {
+						hooks?.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
+						this.tui.requestRender();
+						return;
+					}
+				}
+			}
 		}
 		if (hooks?.interceptInput?.(data, this)) {
 			return;
@@ -674,17 +765,19 @@ export class PiUiComposerEditor extends CustomEditor {
 		return fitExactWidth(closed, width);
 	}
 
-	private renderEmptyPlaceholderCell(innerWidth: number): string {
+	private renderEmptyPlaceholderCell(innerWidth: number, placeholderText = COMPOSER_PLACEHOLDER): string {
 		const theme = this.deps.getTheme();
 		const marker = this.focused ? CURSOR_MARKER : "";
-		const clipped = truncateToWidth(COMPOSER_PLACEHOLDER, innerWidth, "…");
+		const clipped = truncateToWidth(placeholderText, innerWidth, "…");
 		if (!clipped) {
 			return fitExactWidth(`${marker}${renderFakeCursor(" ")}`, innerWidth);
 		}
-		const chars = [...clipped];
-		const firstChar = chars[0]!;
-		const rest = chars.slice(1).join("");
-		const styled = `${marker}${renderFakeCursor(theme.fg("dim", firstChar))}${rest ? theme.fg("dim", rest) : ""}`;
+		const firstSegment = composerGraphemeSegmenter.segment(clipped)[Symbol.iterator]().next().value as
+			| Intl.SegmentData
+			| undefined;
+		const firstGrapheme = firstSegment?.segment ?? clipped[0]!;
+		const rest = clipped.slice(firstGrapheme.length);
+		const styled = `${marker}${renderFakeCursor(theme.fg("dim", firstGrapheme))}${rest ? theme.fg("dim", rest) : ""}`;
 		return fitExactWidth(styled, innerWidth);
 	}
 
@@ -724,6 +817,9 @@ export class PiUiComposerEditor extends CustomEditor {
 		const chevron = light ? fgRgb(37, 99, 235, "›") : fgRgb(125, 207, 255, "›");
 		const hooks = getComposerHooks();
 		const isEmpty = internal.isEditorEmpty();
+		const activeSuggestion = this.isDraftCompletelyEmpty()
+			? getComposerPromptSuggestionBridge()?.getSuggestion()
+			: undefined;
 
 		const out: string[] = [this.renderRoundedTopBorder(width)];
 
@@ -734,7 +830,7 @@ export class PiUiComposerEditor extends CustomEditor {
 
 			let cell: string;
 			if (isEmpty && i === 0) {
-				cell = this.renderEmptyPlaceholderCell(innerWidth);
+				cell = this.renderEmptyPlaceholderCell(innerWidth, activeSuggestion ?? COMPOSER_PLACEHOLDER);
 			} else {
 				const rawInner = baseLines[1 + i] ?? "";
 				const decorated = hooks?.decorateRenderedLine

@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
 	contentText,
+	createAssistantMessageEventStream,
 	fauxAssistantMessage,
 	fauxProvider,
 	fauxText,
@@ -23,6 +24,7 @@ import {
 	getCurrentTools,
 	InMemoryCredentialStore,
 	type AssistantMessage,
+	type AssistantMessageEventStream,
 	type FauxContentBlock,
 	type FauxModelDefinition,
 	type FauxProviderHandle,
@@ -44,6 +46,7 @@ import {
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
 	createAgentSessionServices,
+	DefaultResourceLoader,
 	InteractiveMode,
 	ModelRegistry,
 	ModelRuntime,
@@ -56,10 +59,17 @@ import {
 	type FileEntry,
 	type InteractiveModeOptions,
 	type SessionEntry,
+	type Theme,
 	type ToolDefinition,
 	type TuiMode,
 } from "@earendil-works/pi-coding-agent";
-import type { ProgramStatus, Terminal, TUI } from "@earendil-works/pi-tui";
+import {
+	resetCapabilitiesCache,
+	setCapabilityOverrides,
+	type ProgramStatus,
+	type Terminal,
+	type TUI,
+} from "@earendil-works/pi-tui";
 import {
 	setHostClipboardProvider,
 	type ClipboardImagePayload,
@@ -70,6 +80,7 @@ import { captureTerminalScreen, type TerminalScreenSnapshot } from "./terminal-s
 export {
 	contentText,
 	createAgentSession,
+	createAssistantMessageEventStream,
 	fauxAssistantMessage,
 	fauxProvider,
 	fauxText,
@@ -80,14 +91,15 @@ export {
 	registerFauxProvider,
 	SessionManager,
 	type AssistantMessage,
-	type FileEntry,
-	type SessionEntry,
+	type AssistantMessageEventStream,
 	type FauxContentBlock,
 	type FauxModelDefinition,
 	type FauxProviderHandle,
 	type FauxProviderState,
 	type FauxResponseFactory,
 	type FauxResponseStep,
+	type FileEntry,
+	type SessionEntry,
 	type SimpleStreamOptions,
 	type TranscriptContext,
 };
@@ -96,6 +108,55 @@ const HARNESS_DIR = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(HARNESS_DIR, "../..");
 export const DEFAULT_EXTENSION_ENTRY = resolve(REPO_ROOT, "src/index.ts");
 export const DEFAULT_THEMES_DIR = resolve(REPO_ROOT, "themes");
+
+let cachedTruecolorThemes: Promise<{ dark: Theme; light: Theme }> | undefined;
+
+/**
+ * Загружает реальные пакетные темы (`midnight-cobalt` и `one-blue-light`) через `DefaultResourceLoader` хоста Pi
+ * для чистых юнит-тестов (Seam 2 ADR-0006) без ручных фейков `Theme`.
+ */
+export async function loadPackageThemes(options?: {
+	trueColor?: boolean;
+}): Promise<{ dark: Theme; light: Theme }> {
+	const useTrueColor = options?.trueColor ?? true;
+	if (useTrueColor && cachedTruecolorThemes) {
+		return cachedTruecolorThemes;
+	}
+	const load = async () => {
+		if (!useTrueColor) {
+			setCapabilityOverrides({ trueColor: false });
+		}
+		try {
+			const loader = new DefaultResourceLoader({
+				cwd: REPO_ROOT,
+				agentDir: REPO_ROOT,
+				noExtensions: true,
+				noSkills: true,
+				noPromptTemplates: true,
+				noContextFiles: true,
+				noThemes: true,
+				additionalThemePaths: [DEFAULT_THEMES_DIR],
+			});
+			await loader.reload();
+			const { themes } = loader.getThemes();
+			const dark = themes.find((t) => t.name === "midnight-cobalt");
+			const light = themes.find((t) => t.name === "one-blue-light");
+			if (!dark || !light) {
+				throw new Error("Package themes midnight-cobalt / one-blue-light not found");
+			}
+			return { dark, light };
+		} finally {
+			if (!useTrueColor) {
+				setCapabilityOverrides({});
+			}
+		}
+	};
+	if (useTrueColor) {
+		cachedTruecolorThemes = load();
+		return cachedTruecolorThemes;
+	}
+	return await load();
+}
 
 export interface MouseModifiers {
 	readonly shift?: boolean;
@@ -279,6 +340,12 @@ export interface MutableClipboardState {
 	filePaths?: readonly string[] | null;
 }
 
+export type CustomStreamSimpleHandler = (
+	model: Model<string>,
+	context: TranscriptContext,
+	options?: SimpleStreamOptions,
+) => AssistantMessageEventStream | undefined;
+
 export interface InteractiveHarnessOptions {
 	width?: number;
 	height?: number;
@@ -302,7 +369,6 @@ export interface InteractiveHarnessOptions {
 	additionalExtensionPaths?: string[];
 	extensionFactories?: ExtensionFactory[];
 	additionalThemePaths?: string[];
-	customTools?: ToolDefinition[];
 	models?: FauxModelDefinition[];
 	responses?: FauxResponseStep[];
 	tokensPerSecond?: number;
@@ -310,6 +376,15 @@ export interface InteractiveHarnessOptions {
 	thinkingLevel?: ThinkingLevel;
 	clipboard?: HostClipboardProvider | MutableClipboardState;
 	interactiveOptions?: Omit<InteractiveModeOptions, "terminal" | "tuiMode" | "initialThemeSetting">;
+	trueColor?: boolean;
+	sessionManager?: SessionManager;
+	setupSession?: (sessionManager: SessionManager) => void | Promise<void>;
+	tools?: string[];
+	excludeTools?: string[];
+	noTools?: "all" | "builtin";
+	customTools?: ToolDefinition<any, any, any>[];
+	streamSimple?: CustomStreamSimpleHandler;
+	suggestionResponses?: FauxResponseStep[];
 }
 
 interface InteractiveModeInternals {
@@ -329,6 +404,7 @@ interface InteractiveModeInternals {
 	};
 	themeController?: {
 		dispose?: () => void;
+		setThemeName?: (themeName: string, showError?: boolean) => { success: boolean; error?: string };
 		setThemeSetting?: (setting: string) => void;
 	};
 	handleReloadCommand(): Promise<void>;
@@ -468,6 +544,11 @@ export interface InteractiveHarness {
 	renderFrame(width?: number, height?: number): string[];
 	screen(width?: number, height?: number): TerminalScreenSnapshot;
 	dispose(): Promise<void>;
+	readonly suggestionCalls: readonly RecordedFauxCall[];
+	setStreamSimple(handler: CustomStreamSimpleHandler | undefined): void;
+	setSuggestionResponses(steps: FauxResponseStep[]): void;
+	appendSuggestionResponses(steps: FauxResponseStep[]): void;
+	flush(): Promise<void>;
 }
 
 /**
@@ -487,8 +568,14 @@ export async function createInteractiveHarness(
 
 	const prevAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 	const prevOfflineEnv = process.env.PI_OFFLINE;
+	const prevTrueColorEnv = process.env.PI_TRUE_COLOR;
 	process.env.PI_CODING_AGENT_DIR = agentDir;
 	process.env.PI_OFFLINE = "1";
+	if (options?.trueColor !== undefined) {
+		process.env.PI_TRUE_COLOR = options.trueColor ? "1" : "0";
+		setCapabilityOverrides({ trueColor: options.trueColor });
+		resetCapabilitiesCache();
+	}
 
 	const resolvedThemeName =
 		options?.theme === "light"
@@ -526,53 +613,78 @@ export async function createInteractiveHarness(
 		: SettingsManager.inMemory(baseSettings as never, { projectTrusted });
 
 	const recordedCalls: RecordedFauxCall[] = [];
+	const recordedSuggestionCalls: RecordedFauxCall[] = [];
+	let hasExplicitSuggestionResponses = options?.suggestionResponses !== undefined;
 	const harnessId = ++fauxHarnessSeq;
 	const compatSourceId = `pi-ui-interactive-harness-${harnessId}`;
+	const modelDefs: FauxModelDefinition[] = options?.models ?? [
+		{
+			id: "faux-1",
+			name: "Faux Reasoning",
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 128000,
+			maxTokens: 16384,
+		},
+	];
 
 	const rawFaux = fauxProvider({
 		provider: "faux",
 		api: `faux-api-${harnessId}`,
-		models: options?.models ?? [
-			{
-				id: "faux-1",
-				name: "Faux Reasoning",
-				reasoning: true,
-				input: ["text", "image"],
-				contextWindow: 128000,
-				maxTokens: 16384,
-			},
-		],
+		models: modelDefs,
 		tokensPerSecond: options?.tokensPerSecond,
 		tokenSize: options?.tokenSize,
 	});
 
-	const wrapStep = (step: FauxResponseStep): FauxResponseFactory => {
-		return async (context, streamOptions, state, model) => {
-			const record: RecordedFauxCall = {
-				index: recordedCalls.length,
-				context,
-				messages: [...context.messages],
-				systemPrompt: getCurrentSystemPrompt(context.messages),
-				tools: getCurrentTools(context.messages),
-				options: streamOptions,
-				signal: streamOptions?.signal,
-				model,
-				aborted: Boolean(streamOptions?.signal?.aborted),
+	/* Отдельный поток fauxProvider для фоновых Prompt Suggestion, чтобы не расходовать очередь основных ответов responses */
+	const suggestionFaux = fauxProvider({
+		provider: "faux",
+		api: `faux-api-${harnessId}`,
+		models: modelDefs,
+	});
+
+	const makeStepWrapper = (targetList: RecordedFauxCall[]) => {
+		return (step: FauxResponseStep): FauxResponseFactory => {
+			return async (context, streamOptions, state, model) => {
+				const record: RecordedFauxCall = {
+					index: targetList.length,
+					context,
+					messages: [...context.messages],
+					systemPrompt: getCurrentSystemPrompt(context.messages),
+					tools: getCurrentTools(context.messages),
+					options: streamOptions,
+					signal: streamOptions?.signal,
+					model,
+					aborted: Boolean(streamOptions?.signal?.aborted),
+				};
+				if (streamOptions?.signal && !streamOptions.signal.aborted) {
+					streamOptions.signal.addEventListener(
+						"abort",
+						() => {
+							record.aborted = true;
+						},
+						{ once: true },
+					);
+				}
+				targetList.push(record);
+				return typeof step === "function"
+					? await step(context, streamOptions, state, model)
+					: step;
 			};
-			if (streamOptions?.signal && !streamOptions.signal.aborted) {
-				streamOptions.signal.addEventListener(
-					"abort",
-					() => {
-						record.aborted = true;
-					},
-					{ once: true },
-				);
-			}
-			recordedCalls.push(record);
-			return typeof step === "function"
-				? await step(context, streamOptions, state, model)
-				: step;
 		};
+	};
+
+	const wrapStep = makeStepWrapper(recordedCalls);
+	const wrapSuggestionStep = makeStepWrapper(recordedSuggestionCalls);
+
+	const isPromptSuggestionRequest = (context: { messages?: readonly unknown[] }): boolean => {
+		const trailing = context.messages?.at(-1);
+		if (!trailing || typeof trailing !== "object") return false;
+		const serialized = JSON.stringify(trailing);
+		return (
+			serialized.includes("[Prompt suggestion]") ||
+			serialized.includes("[Suggestion mode]")
+		);
 	};
 
 	const faux: FauxProviderHandle = {
@@ -585,16 +697,103 @@ export async function createInteractiveHarness(
 		},
 	};
 
+	const setSuggestionResponses = (steps: FauxResponseStep[]) => {
+		hasExplicitSuggestionResponses = true;
+		suggestionFaux.setResponses(steps.map(wrapSuggestionStep));
+	};
+
+	const appendSuggestionResponses = (steps: FauxResponseStep[]) => {
+		hasExplicitSuggestionResponses = true;
+		suggestionFaux.appendResponses(steps.map(wrapSuggestionStep));
+	};
+
 	if (options?.responses) {
 		faux.setResponses(options.responses);
 	}
+	if (options?.suggestionResponses) {
+		setSuggestionResponses(options.suggestionResponses);
+	}
+
+	const routedNativeProvider = {
+		...rawFaux.provider,
+		stream: (
+			model: Parameters<typeof rawFaux.provider.stream>[0],
+			context: Parameters<typeof rawFaux.provider.stream>[1],
+			streamOptions?: Parameters<typeof rawFaux.provider.stream>[2],
+		) => {
+			if (isPromptSuggestionRequest(context)) {
+				if (!hasExplicitSuggestionResponses) {
+					suggestionFaux.appendResponses([wrapSuggestionStep(fauxAssistantMessage(""))]);
+				}
+				return suggestionFaux.provider.stream(model, context, streamOptions as never);
+			}
+			return rawFaux.provider.stream(model, context, streamOptions as never);
+		},
+		streamSimple: (
+			model: Parameters<typeof rawFaux.provider.streamSimple>[0],
+			context: Parameters<typeof rawFaux.provider.streamSimple>[1],
+			streamOptions?: Parameters<typeof rawFaux.provider.streamSimple>[2],
+		) => {
+			if (isPromptSuggestionRequest(context)) {
+				if (!hasExplicitSuggestionResponses) {
+					suggestionFaux.appendResponses([wrapSuggestionStep(fauxAssistantMessage(""))]);
+				}
+				return suggestionFaux.provider.streamSimple(model, context, streamOptions);
+			}
+			return rawFaux.provider.streamSimple(model, context, streamOptions);
+		},
+	};
+
+	let customStreamSimple: CustomStreamSimpleHandler | undefined = options?.streamSimple;
+
+	const dispatchStreamSimple = (
+		model: Model<string>,
+		context: TranscriptContext,
+		streamOptions?: SimpleStreamOptions,
+	): AssistantMessageEventStream => {
+		if (isPromptSuggestionRequest(context)) {
+			return routedNativeProvider.streamSimple(model, context, streamOptions);
+		}
+		if (customStreamSimple) {
+			const custom = customStreamSimple(model, context, streamOptions);
+			if (custom) {
+				const record: RecordedFauxCall = {
+					index: recordedCalls.length,
+					context,
+					messages: [...context.messages],
+					systemPrompt: getCurrentSystemPrompt(context.messages),
+					tools: getCurrentTools(context.messages),
+					options: streamOptions,
+					signal: streamOptions?.signal,
+					model,
+					aborted: Boolean(streamOptions?.signal?.aborted),
+				};
+				if (streamOptions?.signal && !streamOptions.signal.aborted) {
+					streamOptions.signal.addEventListener(
+						"abort",
+						() => {
+							record.aborted = true;
+						},
+						{ once: true },
+					);
+				}
+				recordedCalls.push(record);
+				return custom;
+			}
+		}
+		return routedNativeProvider.streamSimple(model, context, streamOptions);
+	};
 
 	const credentials = new InMemoryCredentialStore();
 	const modelRuntime = await ModelRuntime.create({
 		credentials,
 		modelsPath: join(agentDir, "models.json"),
 	});
-	modelRuntime.registerNativeProvider(rawFaux.provider);
+	modelRuntime.registerNativeProvider({
+		...routedNativeProvider,
+		streamSimple: (model, context, streamOptions) =>
+			dispatchStreamSimple(model, context as TranscriptContext, streamOptions),
+	});
 	await modelRuntime.refresh({ allowNetwork: false });
 	const modelRegistry = new ModelRegistry(modelRuntime);
 
@@ -602,9 +801,9 @@ export async function createInteractiveHarness(
 		{
 			api: rawFaux.api,
 			stream: (model, context, streamOptions) =>
-				rawFaux.provider.stream(model, context, streamOptions as never),
+				routedNativeProvider.stream(model, context, streamOptions as never),
 			streamSimple: (model, context, streamOptions) =>
-				rawFaux.provider.streamSimple(model, context, streamOptions),
+				dispatchStreamSimple(model, context as TranscriptContext, streamOptions),
 		},
 		compatSourceId,
 	);
@@ -677,6 +876,9 @@ export async function createInteractiveHarness(
 			sessionStartEvent,
 			model: faux.getModel(),
 			thinkingLevel: options?.thinkingLevel ?? "off",
+			tools: options?.tools,
+			excludeTools: options?.excludeTools,
+			noTools: options?.noTools,
 			customTools: options?.customTools,
 		});
 		return {
@@ -701,23 +903,25 @@ export async function createInteractiveHarness(
 				]
 		: undefined;
 
-	const initialSessionManager = (() => {
-		if (options?.persistSession) {
-			const sessionsDir = join(agentDir, "sessions");
-			mkdirSync(sessionsDir, { recursive: true });
-			if (normalizedSeedEntries) {
-				const seededFile = join(sessionsDir, "seeded-session.jsonl");
-				writeFileSync(
-					seededFile,
-					`${normalizedSeedEntries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
-					"utf8",
-				);
-				return SessionManager.open(seededFile, sessionsDir, cwd);
+	const initialSessionManager =
+		options?.sessionManager ??
+		(() => {
+			if (options?.persistSession) {
+				const sessionsDir = join(agentDir, "sessions");
+				mkdirSync(sessionsDir, { recursive: true });
+				if (normalizedSeedEntries) {
+					const seededFile = join(sessionsDir, "seeded-session.jsonl");
+					writeFileSync(
+						seededFile,
+						`${normalizedSeedEntries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+						"utf8",
+					);
+					return SessionManager.open(seededFile, sessionsDir, cwd);
+				}
+				return SessionManager.create(cwd, sessionsDir);
 			}
-			return SessionManager.create(cwd, sessionsDir);
-		}
-		return SessionManager.inMemory(cwd, undefined, normalizedSeedEntries);
-	})();
+			return SessionManager.inMemory(cwd, undefined, normalizedSeedEntries);
+		})();
 
 	if (options?.initialLeafId !== undefined) {
 		if (options.initialLeafId === null) {
@@ -725,6 +929,9 @@ export async function createInteractiveHarness(
 		} else {
 			initialSessionManager.branch(options.initialLeafId);
 		}
+	}
+	if (options?.setupSession) {
+		await options.setupSession(initialSessionManager);
 	}
 
 	const runtimeHost = await createAgentSessionRuntime(createRuntime, {
@@ -885,6 +1092,7 @@ export async function createInteractiveHarness(
 		},
 		faux,
 		calls: recordedCalls,
+		suggestionCalls: recordedSuggestionCalls,
 		cwd,
 		agentDir,
 		get width() {
@@ -899,20 +1107,15 @@ export async function createInteractiveHarness(
 		appendResponses(steps: FauxResponseStep[]) {
 			faux.appendResponses(steps);
 		},
+		setStreamSimple(handler: CustomStreamSimpleHandler | undefined) {
+			customStreamSimple = handler;
+		},
+		setSuggestionResponses,
+		appendSuggestionResponses,
 		setClipboard(next: MutableClipboardState) {
 			if ("text" in next) clipboardState.text = next.text;
 			if ("image" in next) clipboardState.image = next.image;
 			if ("filePaths" in next) clipboardState.filePaths = next.filePaths;
-		},
-		setTheme(nextTheme: "dark" | "light" | string) {
-			const nextName =
-				nextTheme === "light"
-					? "one-blue-light"
-					: nextTheme === "dark"
-						? "midnight-cobalt"
-						: nextTheme;
-			internals.themeController?.setThemeSetting?.(nextName);
-			flushFrame(true);
 		},
 		async sendInput(data: string): Promise<void> {
 			terminal.sendInput(data);
@@ -963,6 +1166,25 @@ export async function createInteractiveHarness(
 			await flushMicrotasksAndTicks(2);
 			flushFrame();
 			return switched;
+		},
+		setTheme(nextTheme: "dark" | "light" | string): void {
+			const nextName =
+				nextTheme === "light"
+					? "one-blue-light"
+					: nextTheme === "dark"
+						? "midnight-cobalt"
+						: nextTheme;
+			settingsManager.setTheme(nextName);
+			if (typeof internals.themeController?.setThemeName === "function") {
+				internals.themeController.setThemeName(nextName, false);
+			} else {
+				internals.themeController?.setThemeSetting?.(nextName);
+			}
+			flushFrame(true);
+		},
+		async flush(): Promise<void> {
+			await flushMicrotasksAndTicks(4);
+			flushFrame();
 		},
 		async mouseMove(col: number, row: number, modifiers?: MouseModifiers): Promise<void> {
 			const modBits =
@@ -1081,6 +1303,15 @@ export async function createInteractiveHarness(
 
 			unregisterApiProviders(compatSourceId);
 			setHostClipboardProvider(undefined);
+			if (options?.trueColor !== undefined) {
+				if (prevTrueColorEnv === undefined) {
+					delete process.env.PI_TRUE_COLOR;
+				} else {
+					process.env.PI_TRUE_COLOR = prevTrueColorEnv;
+				}
+				setCapabilityOverrides({});
+				resetCapabilitiesCache();
+			}
 
 			if (prevAgentDirEnv === undefined) {
 				delete process.env.PI_CODING_AGENT_DIR;

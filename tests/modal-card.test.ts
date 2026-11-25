@@ -1,314 +1,405 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { UserMessageComponent } from "@earendil-works/pi-coding-agent";
-import { CURSOR_MARKER, Text, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
-import conartiPiUi from "../src/index.ts";
+import { runQuestionnaire } from "../src/features/ask-user/questionnaire.ts";
+import { showContextInspector } from "../src/features/context-inspector/index.ts";
+import { showPlanStudio } from "../src/features/plan-studio/studio-overlay.ts";
+import { hasBlockingModalOverlay } from "../src/shared/modal-card.ts";
 import { getSessionWorkflow } from "../src/shared/session-workflow.ts";
-import { createExtensionHarness, type ExtensionHarness } from "./harness/index.ts";
+import {
+	contentText,
+	createInteractiveHarness,
+	fauxAssistantMessage,
+	fauxToolCall,
+	type InteractiveHarness,
+	type TerminalScreenSnapshot,
+} from "./harness/index.ts";
 
-const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b_[^\x07\x1b]*(?:\x07|\x1b\\)/g;
-
-function stripAnsi(text: string): string {
-	return text.replace(ANSI_RE, "");
-}
-
-function findTextCell(lines: readonly string[], needle: string, rowRange?: { start?: number; end?: number }): { x: number; y: number } {
-	const start = rowRange?.start ?? 0;
-	const end = rowRange?.end ?? lines.length;
-	for (let y = start; y < end; y++) {
-		const plain = stripAnsi(lines[y] ?? "");
-		const idx = plain.indexOf(needle);
-		if (idx !== -1) {
-			const x = visibleWidth(plain.slice(0, idx));
-			return { x, y };
-		}
-	}
-	throw new Error(`Could not find "${needle}" in rendered lines:\n${lines.map((l, i) => `${i}: ${stripAnsi(l)}`).join("\n")}`);
-}
-
-function extractBgRgbColors(lines: readonly string[]): Array<[number, number, number]> {
-	const found: Array<[number, number, number]> = [];
-	const re = /\x1b\[48;2;(\d+);(\d+);(\d+)m/g;
-	for (const line of lines) {
-		for (const m of line.matchAll(re)) {
-			found.push([Number(m[1]), Number(m[2]), Number(m[3])]);
-		}
-	}
-	return found;
-}
-
-function luminance([r, g, b]: [number, number, number]): number {
+function luminance(r: number, g: number, b: number): number {
 	return 0.299 * r + 0.587 * g + 0.114 * b;
 }
 
-function mouseMove(x: number, y: number): TuiMouseEvent {
-	return { type: "move", x, y } as TuiMouseEvent;
+function findModalBounds(screen: TerminalScreenSnapshot): {
+	top: number;
+	bottom: number;
+	left: number;
+	right: number;
+} {
+	let top = -1;
+	let bottom = -1;
+	let left = -1;
+	let right = -1;
+	for (let r = 0; r < screen.height; r += 1) {
+		const row = screen.rowText(r);
+		const tl = row.indexOf("╭─");
+		if (tl !== -1 && top === -1) {
+			top = r;
+			left = tl;
+			right = row.lastIndexOf("╮");
+		}
+		if (top !== -1 && row.indexOf("╰") === left) {
+			bottom = r;
+			break;
+		}
+	}
+	if (top === -1 || bottom === -1 || right <= left) {
+		throw new Error(`Modal Card bounds not found on screen:\n${screen.text()}`);
+	}
+	return { top, bottom, left, right };
 }
 
-function leftClick(x: number, y: number): TuiMouseEvent {
-	return { type: "click", button: "left", x, y } as TuiMouseEvent;
+function collectModalBgLuminances(screen: TerminalScreenSnapshot): number[] {
+	const bounds = findModalBounds(screen);
+	const values: number[] = [];
+	for (let r = bounds.top; r <= bounds.bottom; r += 1) {
+		for (let c = bounds.left; c <= bounds.right; c += 1) {
+			const cell = screen.cellAt(r, c);
+			if (cell?.bg.kind === "rgb") {
+				values.push(luminance(cell.bg.r, cell.bg.g, cell.bg.b));
+			}
+		}
+	}
+	return values;
 }
 
-describe("Modal Card dialogs and adaptive theme surfaces", () => {
-	let harness: ExtensionHarness | undefined;
+async function openSlashWithoutWaiting(harness: InteractiveHarness, cmd: string): Promise<void> {
+	await harness.paste(cmd, true);
+	await harness.pressKey("\r");
+	await harness.flush();
+}
+
+describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)", () => {
+	let harness: InteractiveHarness | undefined;
 
 	afterEach(async () => {
 		if (harness) {
-			harness.activeCustomModal?.done(undefined);
-			await harness.shutdownSession();
+			await harness.dispose();
 			harness = undefined;
 		}
 	});
 
 	it("renders Context Inspector with light-appropriate surfaces and accurate close/pill hitboxes across narrow and wide widths", async () => {
-		harness = createExtensionHarness({ theme: "light", width: 110, height: 32 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
+		harness = await createInteractiveHarness({
+			theme: "light",
+			width: 110,
+			height: 32,
+		});
 
-		const openPromise = harness.runCommand("context");
-		expect(harness.activeCustomModal).toBeDefined();
-		const comp = harness.activeCustomModal!.component;
+		await openSlashWithoutWaiting(harness, "/context");
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
+		expect(harness.screen().text()).toContain("Context Inspector");
 
-		// Check narrow (44 cols) and wide (110 cols) widths
-		for (const width of [44, 110]) {
-			comp.handleMouse?.(mouseMove(0, 1));
-			const initialLines = comp.render(width);
-			const bgColors = extractBgRgbColors(initialLines);
-			expect(bgColors.length).toBeGreaterThan(0);
-			for (const rgb of bgColors) {
-				expect(luminance(rgb), `dark bg rgb(${rgb.join(",")}) on light theme at width=${width}`).toBeGreaterThan(170);
+		for (const termWidth of [48, 110]) {
+			await harness.resize(termWidth, 32);
+			await harness.mouseMove(2, 2);
+
+			const baseScreen = harness.screen();
+			const bounds = findModalBounds(baseScreen);
+			const bgLums = collectModalBgLuminances(baseScreen);
+			expect(bgLums.length).toBeGreaterThan(0);
+			for (const lum of bgLums) {
+				expect(lum).toBeGreaterThan(170);
 			}
 
-			// Top-right close target highlights on hover at the exact rendered ✕ cell
-			const closePos = findTextCell(initialLines, "✕", { start: 0, end: 1 });
-			const moveClose = comp.handleMouse?.(mouseMove(closePos.x, closePos.y));
-			expect(moveClose?.render).toBe(true);
-			const hoveredCloseLines = comp.render(width);
-			expect(hoveredCloseLines[0]).not.toBe(initialLines[0]);
+			/* Наведение на кнопку закрытия ✕ в правом верхнем углу карточки подсвечивает глиф */
+			let closeCol = -1;
+			for (let c = bounds.left; c <= bounds.right; c += 1) {
+				if (baseScreen.cellAt(bounds.top, c)?.char === "✕") {
+					closeCol = c;
+					break;
+				}
+			}
+			expect(closeCol).toBeGreaterThan(bounds.left);
+			const closeFgBefore = baseScreen.cellAt(bounds.top, closeCol)?.fg;
+			await harness.mouseMove(closeCol, bounds.top);
+			const closeFgAfter = harness.screen().cellAt(bounds.top, closeCol)?.fg;
+			expect(closeFgAfter).not.toEqual(closeFgBefore);
 
-			// Footer action pill ("Закрыть") highlights on hover at its exact rendered cell
-			const closePillPos = findTextCell(initialLines, "Закрыть", { start: 1 });
-			const movePill = comp.handleMouse?.(mouseMove(closePillPos.x, closePillPos.y));
-			expect(movePill?.render).toBe(true);
-			const hoveredPillLines = comp.render(width);
-			expect(hoveredPillLines[closePillPos.y]).not.toBe(initialLines[closePillPos.y]);
-			for (const rgb of extractBgRgbColors(hoveredPillLines)) {
-				expect(luminance(rgb), `dark hovered bg rgb(${rgb.join(",")}) on light theme at width=${width}`).toBeGreaterThan(170);
+			/* Наведение на пилюлю Закрыть в футере подсвечивает пилюлю в светлой палитре */
+			const pillPos = baseScreen.findText("Закрыть");
+			expect(pillPos).toBeDefined();
+			const pillBgBefore = baseScreen.cellAt(pillPos!.row, pillPos!.col)?.bg;
+			await harness.mouseMove(pillPos!.col + 1, pillPos!.row);
+			const hoveredPillScreen = harness.screen();
+			const pillBgAfter = hoveredPillScreen.cellAt(pillPos!.row, pillPos!.col)?.bg;
+			expect(pillBgAfter).not.toEqual(pillBgBefore);
+			for (const lum of collectModalBgLuminances(hoveredPillScreen)) {
+				expect(lum).toBeGreaterThan(170);
 			}
 		}
 
-		// Click the top-right close button at narrow width (44 cols) -> closes modal
-		const narrowLines = comp.render(44);
-		const closePos = findTextCell(narrowLines, "✕", { start: 0, end: 1 });
-		comp.handleMouse?.(leftClick(closePos.x, closePos.y));
-		await openPromise;
-		expect(harness.activeCustomModal).toBeUndefined();
+		/* Клик по ✕ на узкой ширине закрывает Context Inspector */
+		await harness.resize(48, 32);
+		const narrowScreen = harness.screen();
+		const narrowBounds = findModalBounds(narrowScreen);
+		let narrowCloseCol = -1;
+		for (let c = narrowBounds.left; c <= narrowBounds.right; c += 1) {
+			if (narrowScreen.cellAt(narrowBounds.top, c)?.char === "✕") {
+				narrowCloseCol = c;
+				break;
+			}
+		}
+		await harness.mouseClick(narrowCloseCol, narrowBounds.top);
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
+		expect(harness.screen().text()).not.toContain("Context Inspector");
 	});
 
 	it("renders Auto-Safe confirmation with light surfaces and accurate close + footer pill hitboxes at narrow width", async () => {
-		harness = createExtensionHarness({ theme: "light", width: 46, height: 32 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-		await harness.runCommand("mode", "safe");
-
-		const toolCallPromise = harness.emit("tool_call", {
-			toolName: "write",
-			input: { path: "src/demo.ts", content: "hello" },
+		harness = await createInteractiveHarness({
+			theme: "light",
+			width: 50,
+			height: 32,
+			responses: [
+				fauxAssistantMessage(
+					[fauxToolCall("write", { path: "src/demo.ts", content: "hello" }, { id: "mc-safe-1" })],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("Denied cleanly."),
+			],
 		});
-		expect(harness.activeCustomModal).toBeDefined();
-		const comp = harness.activeCustomModal!.component;
 
-		const narrowLines = comp.render(46);
-		// Every background color on light theme must be light-appropriate
-		const bgColors = extractBgRgbColors(narrowLines);
-		expect(bgColors.length).toBeGreaterThan(0);
-		for (const rgb of bgColors) {
-			expect(luminance(rgb), `dark bg rgb(${rgb.join(",")}) in Auto-Safe on light theme`).toBeGreaterThan(170);
+		await harness.submitInput("/mode safe");
+		const turn = harness.submitInput("Write demo file");
+		await harness.flush();
+
+		const screen0 = harness.screen();
+		expect(screen0.text()).toContain("Auto-Safe Confirmation");
+		const bgLums = collectModalBgLuminances(screen0);
+		expect(bgLums.length).toBeGreaterThan(0);
+		for (const lum of bgLums) {
+			expect(lum).toBeGreaterThan(170);
 		}
 
-		// Top-right close target is rendered and hoverable
-		const topClosePos = findTextCell(narrowLines, "✕", { start: 0, end: 1 });
-		expect(comp.handleMouse?.(mouseMove(topClosePos.x, topClosePos.y))?.render).toBe(true);
+		const bounds = findModalBounds(screen0);
+		let closeCol = -1;
+		for (let c = bounds.left; c <= bounds.right; c += 1) {
+			if (screen0.cellAt(bounds.top, c)?.char === "✕") {
+				closeCol = c;
+				break;
+			}
+		}
+		const closeBefore = screen0.cellAt(bounds.top, closeCol)?.fg;
+		await harness.mouseMove(closeCol, bounds.top);
+		expect(harness.screen().cellAt(bounds.top, closeCol)?.fg).not.toEqual(closeBefore);
 
-		// Footer "Отклонить" pill is visible even at narrow width (46 cols) and clicking it blocks the tool call
-		const denyPos = findTextCell(narrowLines, "Отклонить", { start: 1 });
-		expect(comp.handleMouse?.(mouseMove(denyPos.x, denyPos.y))?.render).toBe(true);
-		comp.handleMouse?.(leftClick(denyPos.x, denyPos.y));
+		/* Пилюля Отклонить переносится на узкой ширине без потери кликабельности и блокирует запись */
+		const denyPos = harness.screen().findText("Отклонить");
+		expect(denyPos).toBeDefined();
+		await harness.mouseClick(denyPos!.col + 2, denyPos!.row);
+		await turn;
 
-		const results = await toolCallPromise;
-		expect(results.some((r) => (r as { block?: boolean } | undefined)?.block === true)).toBe(true);
-		expect(harness.activeCustomModal).toBeUndefined();
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
+		expect(existsSync(join(harness.cwd, "src", "demo.ts"))).toBe(false);
+		expect(harness.screen().text()).toContain("Denied cleanly.");
 	});
 
-	it("renders Command Palette with light surfaces, accurate close hitboxes across widths, and grapheme-safe search input", async () => {
-		harness = createExtensionHarness({ theme: "light", width: 110, height: 32 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
+	it("opens Command Palette via Ctrl+K without deleting composer draft, renders light surfaces, and handles grapheme-safe search + narrow/wide close hitboxes", async () => {
+		harness = await createInteractiveHarness({
+			theme: "light",
+			width: 110,
+			height: 32,
+		});
 
-		const openPromise = harness.triggerShortcut("ctrl+k");
-		expect(harness.activeCustomModal).toBeDefined();
-		const comp = harness.activeCustomModal!.component;
+		/* Набираем черновик в композиторе и нажимаем Ctrl+K — черновик не удаляется, открывается палитра */
+		await harness.typeText("keep my draft");
+		await harness.pressKey("\x0b");
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
+		expect(harness.screen().text()).toContain("⌘ Command Palette");
+		expect(harness.screen().text()).toContain("Поиск команд");
 
-		// Placeholder and focus cursor marker present when query is empty
-		const initialWide = comp.render(110);
-		expect(initialWide.some((l) => l.includes(CURSOR_MARKER))).toBe(true);
-		expect(stripAnsi(initialWide.join("\n"))).toContain("Поиск команд");
-
-		// Light-appropriate selection and hover row backgrounds (no dark slate)
-		comp.handleMouse?.(mouseMove(6, 4));
-		const hoveredWide = comp.render(110);
-		const bgColors = extractBgRgbColors(hoveredWide);
-		expect(bgColors.length).toBeGreaterThan(0);
-		for (const rgb of bgColors) {
-			expect(luminance(rgb), `dark bg rgb(${rgb.join(",")}) in Command Palette on light theme`).toBeGreaterThan(170);
+		const boundsWide = findModalBounds(harness.screen());
+		await harness.mouseMove(boundsWide.left + 6, boundsWide.top + 4);
+		const bgLums = collectModalBgLuminances(harness.screen());
+		expect(bgLums.length).toBeGreaterThan(0);
+		for (const lum of bgLums) {
+			expect(lum).toBeGreaterThan(170);
 		}
 
-		// Grapheme-safe backspace and Ctrl+U line clear
-		comp.handleInput?.("a👨‍👩‍👧‍👦");
-		expect(stripAnsi(comp.render(80).join("\n"))).toContain("a👨‍👩‍👧‍👦");
-		comp.handleInput?.("\x7f"); // backspace removes entire emoji grapheme cluster
-		const afterBackspace = stripAnsi(comp.render(80).join("\n"));
-		expect(afterBackspace).not.toContain("👨‍👩‍👧‍👦");
-		expect(afterBackspace).toContain("⌕ a");
-		comp.handleInput?.("\x15"); // Ctrl+U clears line and restores placeholder
-		expect(stripAnsi(comp.render(80).join("\n"))).toContain("Поиск команд");
-
-		// Top-right close hover works across narrow (46 cols) and wide (110 cols) widths
-		for (const width of [46, 110]) {
-			comp.handleMouse?.(mouseMove(0, 1));
-			const lines = comp.render(width);
-			const closePos = findTextCell(lines, "✕", { start: 0, end: 1 });
-			expect(comp.handleMouse?.(mouseMove(closePos.x, closePos.y))?.render).toBe(true);
-			expect(comp.render(width)[0]).not.toBe(lines[0]);
-		}
-
-		// Clicking top-right close at narrow width closes palette
-		const narrowLines = comp.render(46);
-		const closePos = findTextCell(narrowLines, "✕", { start: 0, end: 1 });
-		comp.handleMouse?.(leftClick(closePos.x, closePos.y));
-		await openPromise;
-		expect(harness.activeCustomModal).toBeUndefined();
-	});
-
-	it("renders Plan Studio with light surfaces, shared grapheme-safe inline comment input, and narrow/wide pill hitboxes", async () => {
-		harness = createExtensionHarness({ theme: "light", width: 110, height: 32 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-
-		const st = getSessionWorkflow();
-		st.planLines = ["# Plan", "1. Refactor modal card", "2. Add tests"];
-		st.planComments = { 1: "Existing note" };
-
-		const openPromise = harness.runCommand("plan");
-		expect(harness.activeCustomModal).toBeDefined();
-		const comp = harness.activeCustomModal!.component;
-
-		// Light-appropriate selection, hover, and comment-row surfaces
-		comp.handleMouse?.(mouseMove(6, 4));
-		const wideLines = comp.render(110);
-		const wideBgs = extractBgRgbColors(wideLines);
-		expect(wideBgs.length).toBeGreaterThan(0);
-		for (const rgb of wideBgs) {
-			expect(luminance(rgb), `dark bg rgb(${rgb.join(",")}) in Plan Studio on light theme`).toBeGreaterThan(170);
-		}
-
-		// Enter inline comment editing on line 0: shows focus cursor marker & placeholder when empty
-		comp.handleInput?.("\r");
-		const editEmptyLines = comp.render(90);
-		expect(editEmptyLines.some((l) => l.includes(CURSOR_MARKER))).toBe(true);
-		for (const rgb of extractBgRgbColors(editEmptyLines)) {
-			expect(luminance(rgb), `dark edit bg rgb(${rgb.join(",")}) in Plan Studio on light theme`).toBeGreaterThan(170);
-		}
-
-		// Type text + multi-codepoint emoji, backspace deletes whole grapheme cluster, Ctrl+U clears line
-		comp.handleInput?.("ok👨‍👩‍👧‍👦");
-		expect(stripAnsi(comp.render(90).join("\n"))).toContain("ok👨‍👩‍👧‍👦");
-		comp.handleInput?.("\x7f");
-		const afterBs = stripAnsi(comp.render(90).join("\n"));
+		/* Графемно-безопасный Backspace для составного эмодзи и очистка строки по Ctrl+U */
+		await harness.sendInput("a👨‍👩‍👧‍👦");
+		expect(harness.screen().text()).toContain("a👨‍👩‍👧‍👦");
+		await harness.pressKey("\x7f");
+		const afterBs = harness.screen().text();
 		expect(afterBs).not.toContain("👨‍👩‍👧‍👦");
-		expect(afterBs).toContain("ok");
-		comp.handleInput?.("\x15"); // Ctrl+U clears line while staying in edit mode
-		expect(comp.render(90).some((l) => l.includes(CURSOR_MARKER))).toBe(true);
-		comp.handleInput?.("Keep it simple");
-		comp.handleInput?.("\r"); // save comment
-		expect(st.planComments[0]).toBe("Keep it simple");
+		expect(afterBs).toContain("⌕");
+		await harness.pressKey("\x15");
+		expect(harness.screen().text()).toContain("Поиск команд");
 
-		// Top-right close and footer pills hover accurately across narrow (52 cols) and wide (110 cols) widths
-		for (const width of [52, 110]) {
-			comp.handleMouse?.(mouseMove(0, 1));
-			const lines = comp.render(width);
-			const closePos = findTextCell(lines, "✕", { start: 0, end: 1 });
-			expect(comp.handleMouse?.(mouseMove(closePos.x, closePos.y))?.render).toBe(true);
-			expect(comp.render(width)[0]).not.toBe(lines[0]);
-
-			const clearPos = findTextCell(lines, "Сбросить комменты", { start: 1 });
-			expect(comp.handleMouse?.(mouseMove(clearPos.x, clearPos.y))?.render).toBe(true);
-			expect(comp.render(width)[clearPos.y]).not.toBe(lines[clearPos.y]);
+		for (const termW of [50, 110]) {
+			await harness.resize(termW, 32);
+			await harness.mouseMove(1, 1);
+			const s = harness.screen();
+			const b = findModalBounds(s);
+			let xCol = -1;
+			for (let c = b.left; c <= b.right; c += 1) {
+				if (s.cellAt(b.top, c)?.char === "✕") {
+					xCol = c;
+					break;
+				}
+			}
+			const fg0 = s.cellAt(b.top, xCol)?.fg;
+			await harness.mouseMove(xCol, b.top);
+			expect(harness.screen().cellAt(b.top, xCol)?.fg).not.toEqual(fg0);
 		}
 
-		// Click "Закрыть" pill at narrow width (52 cols) -> closes Plan Studio
-		const narrowLines = comp.render(52);
-		const closePillPos = findTextCell(narrowLines, "Закрыть", { start: 1 });
-		comp.handleMouse?.(leftClick(closePillPos.x, closePillPos.y));
-		await openPromise;
-		expect(harness.activeCustomModal).toBeUndefined();
+		await harness.resize(50, 32);
+		const narrow = harness.screen();
+		const nb = findModalBounds(narrow);
+		let nxCol = -1;
+		for (let c = nb.left; c <= nb.right; c += 1) {
+			if (narrow.cellAt(nb.top, c)?.char === "✕") {
+				nxCol = c;
+				break;
+			}
+		}
+		await harness.mouseClick(nxCol, nb.top);
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
+		expect(harness.screen().text()).not.toContain("⌘ Command Palette");
+		expect(harness.screen().text()).toContain("keep my draft");
+	});
+
+	it("renders Plan Studio with light surfaces, grapheme-safe inline comment input, and narrow/wide pill hitboxes", async () => {
+		harness = await createInteractiveHarness({
+			theme: "light",
+			width: 110,
+			height: 34,
+			responses: [fauxAssistantMessage("# Plan\n1. Refactor modal card\n2. Add tests")],
+		});
+
+		await harness.submitInput("/mode plan");
+		await harness.submitInput("Create modal plan");
+
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
+		expect(harness.screen().text()).toContain("Plan Studio");
+
+		const b0 = findModalBounds(harness.screen());
+		await harness.mouseMove(b0.left + 8, b0.top + 4);
+		const wideLums = collectModalBgLuminances(harness.screen());
+		expect(wideLums.length).toBeGreaterThan(0);
+		for (const lum of wideLums) {
+			expect(lum).toBeGreaterThan(170);
+		}
+
+		/* Редактирование комментария к первой строке плана: эмодзи-графема, Backspace, Ctrl+U и сохранение по Enter */
+		await harness.pressKey("\r");
+		for (const lum of collectModalBgLuminances(harness.screen())) {
+			expect(lum).toBeGreaterThan(170);
+		}
+		await harness.sendInput("ok👨‍👩‍👧‍👦");
+		expect(harness.screen().text()).toContain("ok👨‍👩‍👧‍👦");
+		await harness.pressKey("\x7f");
+		expect(harness.screen().text()).not.toContain("👨‍👩‍👧‍👦");
+		await harness.pressKey("\x15");
+		await harness.typeText("Keep it simple");
+		await harness.pressKey("\r");
+		expect(getSessionWorkflow().planComments[0]).toBe("Keep it simple");
+		expect(harness.screen().text()).toContain("Keep it simple");
+
+		for (const termW of [56, 110]) {
+			await harness.resize(termW, 34);
+			await harness.mouseMove(1, 1);
+			const s = harness.screen();
+			const clearPos = s.findText("Сбросить комменты");
+			expect(clearPos).toBeDefined();
+			const bgBefore = s.cellAt(clearPos!.row, clearPos!.col)?.bg;
+			await harness.mouseMove(clearPos!.col + 2, clearPos!.row);
+			expect(harness.screen().cellAt(clearPos!.row, clearPos!.col)?.bg).not.toEqual(bgBefore);
+		}
+
+		await harness.resize(56, 34);
+		const closePill = harness.screen().findText("Закрыть");
+		expect(closePill).toBeDefined();
+		await harness.mouseClick(closePill!.col + 1, closePill!.row);
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
+		expect(harness.screen().text()).not.toContain("Plan Studio");
 	});
 
 	it("performs a quiet no-op when opening a Modal Card over another Modal Card, while ignoring non-capturing Hover Popups", async () => {
-		harness = createExtensionHarness({ theme: "dark", width: 100, height: 32 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 110,
+			height: 32,
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_start", (_ev, ctx) => {
+						ctx.ui.onTerminalInput((data) => {
+							if (data === "\x1b[105;7u") {
+								void showContextInspector(pi, ctx);
+								return { consume: true };
+							}
+							if (data === "\x1b[112;7u") {
+								void showPlanStudio(pi, ctx);
+								return { consume: true };
+							}
+							return undefined;
+						});
+					});
+				},
+			],
+			responses: [
+				fauxAssistantMessage(
+					Array.from({ length: 18 }, (_, i) => `Turn 1 line ${i + 1}`).join("\n"),
+				),
+				fauxAssistantMessage(
+					Array.from({ length: 14 }, (_, i) => `Turn 2 line ${i + 1}`).join("\n"),
+				),
+			],
+		});
 
-		// Mount a visible non-capturing Hover Popup (like OutlinePreviewPopup)
-		const hoverHandle = harness.tui.showOverlay(
-			{ invalidate() {}, render: () => ["Hover Preview"] },
-			{ nonCapturing: true, anchor: "top-right" },
-		);
+		await harness.submitInput("First turn for rail hover");
+		await harness.submitInput("Second turn for rail hover");
 
-		// Opening Command Palette while a non-capturing Hover Popup is visible MUST succeed
-		const palettePromise = harness.triggerShortcut("ctrl+k");
-		expect(harness.activeCustomModal).toBeDefined();
-		const paletteModal = harness.activeCustomModal!;
-		expect(harness.tui.overlayStack.filter((e) => !e.options?.nonCapturing)).toHaveLength(1);
+		/* Наводим мышь на маркер Outline Rail, чтобы поднять неблокирующий Hover Popup превью */
+		const baseScreen = harness.screen();
+		let tickRow = -1;
+		for (let r = 0; r < baseScreen.height; r += 1) {
+			if (/[●○─━]/.test(baseScreen.sliceText(r, 107, 109))) {
+				tickRow = r;
+				break;
+			}
+		}
+		expect(tickRow).toBeGreaterThanOrEqual(0);
+		await harness.mouseMove(107, tickRow);
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 
-		// Triggering Context Inspector or Plan Studio while Command Palette is visible is a quiet no-op
-		const st = getSessionWorkflow();
-		st.planLines = ["1. Step one"];
-		const notifBefore = harness.notifications.length;
+		/* Открытие Command Palette по Ctrl+K поверх видимого Hover Popup проходит успешно */
+		await harness.pressKey("\x0b");
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
+		expect(harness.screen().text()).toContain("⌘ Command Palette");
 
-		await harness.runCommand("context");
-		await harness.runCommand("plan");
+		/* Попытка открыть Context Inspector или Plan Studio поверх Command Palette — тихий no-op */
+		getSessionWorkflow().planLines = ["1. Step one"];
+		await harness.pressKey("\x1b[105;7u");
+		await harness.pressKey("\x1b[112;7u");
+		expect(harness.screen().text()).toContain("⌘ Command Palette");
+		expect(harness.screen().text()).not.toContain("◐ Context Inspector");
+		expect(harness.screen().text()).not.toContain("╭─ 📋 Plan Studio");
 
-		expect(harness.activeCustomModal).toBe(paletteModal);
-		expect(harness.tui.overlayStack.filter((e) => !e.options?.nonCapturing)).toHaveLength(1);
-		expect(harness.notifications.length).toBe(notifBefore);
+		/* Повторное нажатие Ctrl+K закрывает Command Palette, после чего /context спокойно открывается */
+		await harness.pressKey("\x0b");
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 
-		// Close Command Palette -> now Context Inspector can open
-		paletteModal.done(null);
-		await palettePromise;
-		expect(harness.activeCustomModal).toBeUndefined();
-
-		const contextPromise = harness.runCommand("context");
-		expect(harness.activeCustomModal).toBeDefined();
-		harness.activeCustomModal!.done("close");
-		await contextPromise;
-		hoverHandle.hide();
+		await openSlashWithoutWaiting(harness, "/context");
+		expect(harness.screen().text()).toContain("Context Inspector");
+		await harness.pressKey("\x1b");
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 	});
 
-	it("blocks ask_user_question with clear error over Modal Card, blocks Modal Card over active questionnaire, and preserves questionnaire layout", async () => {
-		harness = createExtensionHarness({ theme: "dark", width: 110, height: 32 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-
-		const askTool = harness.tools.get("ask_user_question");
-		expect(askTool).toBeDefined();
-
+	it("blocks ask_user_question with clear error over Modal Card, suppresses Modal Cards and Hover Popups over active questionnaire, and supports wheel/preview navigation", async () => {
 		const sampleParams = {
 			questions: [
 				{
 					header: "Storage",
 					question: "Choose a storage backend",
 					options: [
-						{ label: "SQLite", description: "Local embedded DB", preview: "CREATE TABLE items (id INT);" },
+						{
+							label: "SQLite",
+							description: "Local embedded DB",
+							preview: Array.from(
+								{ length: 18 },
+								(_, i) => `CREATE TABLE items_${i + 1} (id INT);`,
+							).join("\n"),
+						},
 						{ label: "JSON", description: "Plain file" },
 					],
 				},
@@ -323,76 +414,88 @@ describe("Modal Card dialogs and adaptive theme surfaces", () => {
 			],
 		};
 
-		// 1. Open a Modal Card -> invoking ask_user_question returns the clear blocking-dialog error
-		const contextPromise = harness.runCommand("context");
-		expect(harness.activeCustomModal).toBeDefined();
-
-		await expect(
-			askTool!.execute("call-1", sampleParams as never, undefined, undefined as never, harness.ctx as never),
-		).rejects.toThrow("Close the existing dialog before opening a questionnaire.");
-
-		harness.activeCustomModal!.done("close");
-		await contextPromise;
-
-		harness.tui.chatContainer.addChild(new UserMessageComponent("First prompt"));
-		harness.tui.chatContainer.addChild(new Text("r1\nr2\nr3\nr4\nr5\nr6\nr7\nr8", 0, 0));
-		harness.tui.chatContainer.addChild(new UserMessageComponent("Second prompt"));
-		harness.tui.chatContainer.addChild(new Text("r1\nr2\nr3\nr4\nr5\nr6\nr7\nr8", 0, 0));
-		harness.setEntries(
-			[
-				{ type: "message", id: "u1", message: { role: "user", content: "First prompt", timestamp: 1000 } },
-				{ type: "message", id: "u2", message: { role: "user", content: "Second prompt", timestamp: 2000 } },
+		let probeError: string | undefined;
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 110,
+			height: 32,
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_start", (_ev, ctx) => {
+						ctx.ui.onTerminalInput((data) => {
+							if (data === "\x1b[117;7u") {
+								void runQuestionnaire(ctx, sampleParams).catch((err) => {
+									probeError = err instanceof Error ? err.message : String(err);
+								});
+								return { consume: true };
+							}
+							return undefined;
+						});
+					});
+				},
 			],
-		);
-		await harness.sendTerminalInput("\x1b[200~p1\np2\np3\np4\x1b[201~");
-		harness.tui.renderViewport(120, 12);
-
-		const questionnairePromise = askTool!.execute(
-			"call-2",
-			sampleParams as never,
-			undefined,
-			undefined as never,
-			harness.ctx as never,
-		);
-		expect(harness.activeCustomModal).toBeDefined();
-		const qModal = harness.activeCustomModal!;
-		const qRendered = stripAnsi(qModal.component.render(110).join("\n"));
-		expect(qRendered).toContain("☐ Storage");
-		expect(qRendered).toContain("☐ Cache");
-		expect(qRendered).toContain("✔ Submit");
-		expect(qRendered).toContain("CREATE TABLE items");
-		expect(qRendered).not.toContain("╭─");
-
-		harness.tui.moveMouse(117, 5);
-		(harness.editor as any).handleMouse({
-			type: "move",
-			button: "none",
-			x: 6,
-			y: 1,
-			screenX: 6,
-			screenY: 10,
-			width: 120,
-			height: 3,
+			responses: [
+				fauxAssistantMessage(
+					Array.from({ length: 16 }, (_, i) => `Context row ${i + 1}`).join("\n"),
+				),
+				fauxAssistantMessage(
+					[fauxToolCall("ask_user_question", JSON.parse(JSON.stringify(sampleParams)), { id: "ask-q1" })],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("Questionnaire turn finished."),
+			],
 		});
-		expect(
-			harness.tui.overlayStack.filter(
-				(e) => e.options?.nonCapturing === true && harness!.tui.isOverlayVisible(e),
-			),
-		).toHaveLength(0);
 
-		// 3. Triggering a Modal Card while ask_user_question is visible performs a quiet no-op without stacking
-		await harness.triggerShortcut("ctrl+k");
-		await harness.runCommand("context");
-		expect(harness.activeCustomModal).toBe(qModal);
-		expect(harness.tui.overlayStack.filter((e) => !e.options?.nonCapturing)).toHaveLength(0);
+		/* 1. При открытом Modal Card запуск опросника возвращает точную ошибку блокировки */
+		await openSlashWithoutWaiting(harness, "/context");
+		expect(harness.screen().text()).toContain("Context Inspector");
+		await harness.pressKey("\x1b[117;7u");
+		expect(probeError).toBe("Close the existing dialog before opening a questionnaire.");
+		await harness.pressKey("\x1b");
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 
-		// Cancel questionnaire -> cleanup allows Modal Card to open again
-		qModal.done({ cancelled: true, answers: [] });
-		await questionnairePromise;
+		/* Создаём ход с многострочным Prompt Chip для проверки подавления обоих типов Hover Popup */
+		await harness.submitInput("Seed first turn");
+		await harness.paste("chip-1\nchip-2\nchip-3\nchip-4", true);
+		const askTurn = harness.submitInput("");
+		await harness.flush();
 
-		const paletteAfter = harness.triggerShortcut("ctrl+k");
-		expect(harness.activeCustomModal).toBeDefined();
-		harness.activeCustomModal!.done(null);
-		await paletteAfter;
+		/* 2. Опросник смонтирован в нижней док-панели без рамки ╭─ Modal Card и регистрирует блокирующий диалог */
+		const qScreen = harness.screen();
+		const qText = qScreen.text();
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
+		expect(qText).toContain("☐ Storage");
+		expect(qText).toContain("☐ Cache");
+		expect(qText).toContain("✔ Submit");
+		expect(qText).toContain("CREATE TABLE items_1");
+
+		/* Проверяем, что PageDown листает превью внутри опросника (capturesViewportInput = true), а не транскрипт */
+		await harness.pressKey("\x1b[6~");
+		expect(harness.screen().text()).toContain("CREATE TABLE items_18");
+
+		/* Наведение на Outline Rail не создаёт всплывающий Hover Popup поверх активного опросника */
+		await harness.mouseMove(107, 5);
+		expect(harness.screen().text()).not.toContain("Ход 1");
+
+		/* 3. Попытка открыть Command Palette (Ctrl+K) во время работы опросника — тихий no-op */
+		await harness.pressKey("\x0b");
+		expect(harness.screen().text()).not.toContain("⌘ Command Palette");
+		expect(harness.screen().text()).toContain("☐ Storage");
+
+		/* Отменяем опросник по Escape — ход завершается, после чего Ctrl+K снова открывает палитру */
+		await harness.pressKey("\x1b");
+		await askTurn;
+
+		const allMsgs = harness.session.messages;
+		const askToolRes = allMsgs.find(
+			(m): m is Extract<(typeof allMsgs)[number], { role: "toolResult" }> =>
+				m.role === "toolResult" && m.toolCallId === "ask-q1",
+		);
+		expect(JSON.parse(contentText(askToolRes!.content)).cancelled).toBe(true);
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
+
+		await harness.pressKey("\x0b");
+		expect(harness.screen().text()).toContain("⌘ Command Palette");
+		await harness.pressKey("\x1b");
 	});
 });

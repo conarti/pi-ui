@@ -121,6 +121,7 @@ export function extractCommandOutput(
 
 	if (name === "codemode") {
 		text = text.replace(CODEMODE_SCRIPT_HEADER, "");
+		text = text.replace(/^<console_output>\n([\s\S]*?)\n<\/console_output>\s*$/u, "$1");
 	} else if (name === "bash" || name === "powershell") {
 		if (isError) {
 			const outcome = shellOutcome(text);

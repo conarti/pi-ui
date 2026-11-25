@@ -453,6 +453,10 @@ export class PromptChipRegistry {
 		return this.sessionVault.get(id);
 	}
 
+	hasActiveDraftChips(): boolean {
+		return this.activeBindings.size > 0;
+	}
+
 	isKnownChipSpan(span: Pick<PromptChipSpan, "kind" | "number" | "token">): boolean {
 		const key = makeChipBindingKey(span.kind, span.number);
 		const chipId =

@@ -20,6 +20,7 @@ const keyLabel = (keys: string[]) => keys[0]?.split("+").map(part => keyNames[pa
 const fit = (text: string, width: number) => visibleWidth(text) <= width ? text : truncateToWidth(text, width, "…").replaceAll("\x1b[0m", "");
 
 export class Questionnaire implements Component, Focusable {
+  readonly capturesViewportInput = true;
   readonly state: QuestionnaireState;
   private readonly tui: TUI;
   private readonly theme: Theme;
@@ -175,6 +176,11 @@ export class Questionnaire implements Component, Focusable {
 
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.editing || this.confirming) return undefined;
+    if (event.type === "wheel" && event.wheelDelta) {
+      this.scroll = Math.max(0, this.scroll + event.wheelDelta);
+      this.followFocus = false;
+      return { handled: true, render: true };
+    }
     const eventType: string = event.type;
     if (eventType === "mouse_wheel_up" || eventType === "mouse_wheel_down") {
       const delta = eventType === "mouse_wheel_up" ? -1 : 1;
