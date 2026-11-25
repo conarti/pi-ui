@@ -400,13 +400,6 @@ function isEmptyCustomEntry(child: unknown): boolean {
 		entry?: { customType?: string; data?: { stopReason?: string } };
 	};
 	if (typeof rec.hasContent === "function" && !rec.hasContent()) return true;
-	if (
-		isPrototypeActive() &&
-		rec.entry?.customType === "response-metrics" &&
-		rec.entry?.data?.stopReason === "toolUse"
-	) {
-		return true;
-	}
 	return false;
 }
 

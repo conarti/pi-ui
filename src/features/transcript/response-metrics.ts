@@ -330,8 +330,7 @@ export class ResponseMetricsRowComponent implements Component {
 				}),
 			);
 		}
-		if (this.data.stopReason === "toolUse") return [];
-
+		const isIntermediateStep = this.data.stopReason === "toolUse";
 		const computed = computeMetrics(this.data);
 		if (!computed) return [];
 
@@ -385,8 +384,18 @@ export class ResponseMetricsRowComponent implements Component {
 			parts.push(dimFg(fullDateLabel));
 			const row = truncateToWidth(`  ${parts.join(sep)}`, usableWidth, "…");
 			lines.push(padFullWidth(row));
+		} else if (isIntermediateStep) {
+			/* Intermediate tool-call step: calm right-aligned step metrics without final ✓ Worked-for banner */
+			const stepParts: string[] = [];
+			if (ttftLabel) stepParts.push(dimFg(ttftLabel));
+			if (speedLabel) stepParts.push(valFg(speedLabel));
+			stepParts.push(dimFg(`total ${formatMetricsDuration(computed.totalMs)}`));
+			stepParts.push(dimFg(fullDateLabel));
+			const rightBlock = truncateToWidth(stepParts.join(sep), Math.max(8, usableWidth - 2), "…");
+			const pad = " ".repeat(Math.max(2, usableWidth - visibleWidth(rightBlock)));
+			lines.push(padFullWidth(`${pad}${rightBlock}`));
 		} else if (variant === "B") {
-			/* Hybrid A + B: left `✓ Worked for Xs`, center `┄` hairline, right `ttft · tok/s · YYYY-MM-DD HH:MM`,
+			/* Final turn hybrid A + B: left `✓ Worked for Xs`, center `┄` hairline, right `ttft · tok/s · YYYY-MM-DD · HH:MM:SS`,
 			   with zero character replacement or width shift on hover. */
 			const leftBlock = `  ${dimFg("✓")} ${valFg(`Worked for ${totalLabel}`)}`;
 			const rightParts: string[] = [];
@@ -975,9 +984,6 @@ export function registerResponseMetricsFeature(pi: ExtensionAPI): void {
 				return undefined;
 			}
 			if (!isResponseMetricsEnabled()) return undefined;
-			if (isPrototypeActive() && data.stopReason === "toolUse") {
-				return undefined;
-			}
 			return new ResponseMetricsRowComponent(
 				data as ResponseMetricsData,
 				options.expanded,

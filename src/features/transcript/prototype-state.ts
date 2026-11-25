@@ -115,7 +115,6 @@ export const PLAYFUL_WORKING_VERBS: readonly string[] = [
 	"Forging…",
 ];
 
-const VERB_ROTATION_MS = 30_000;
 const MIN_CONTEXTUAL_HOLD_MS = 4500;
 const TOOL_END_LINGER_MS = 1800;
 
@@ -470,17 +469,16 @@ function formatCompactElapsed(ms: number): string {
 	return `${Math.floor(sec / 60)}m ${sec % 60}s`;
 }
 
-function pickPlayfulVerb(seed: number, elapsedMs: number): string {
-	const steps = Math.floor(Math.max(0, elapsedMs) / VERB_ROTATION_MS);
-	const idx = (seed + steps * 3) % PLAYFUL_WORKING_VERBS.length;
+function pickPlayfulVerb(seed: number): string {
+	const idx = Math.abs(seed) % PLAYFUL_WORKING_VERBS.length;
 	return PLAYFUL_WORKING_VERBS[idx] ?? "Tinkering…";
 }
 
-function resolveDefaultPhaseLabel(phase: WorkingPhase, seed: number, elapsedMs: number): string {
+function resolveDefaultPhaseLabel(phase: WorkingPhase, seed: number): string {
 	if (phase === "text") {
 		return "Drafting…";
 	}
-	return pickPlayfulVerb(seed, elapsedMs);
+	return pickPlayfulVerb(seed);
 }
 
 /**
@@ -505,7 +503,7 @@ export function buildLiveWorkingPresentation(options?: {
 	const phase: WorkingPhase = state.phase === "idle" ? "ttft" : state.phase;
 	const elapsedTurnMs = state.turnStartedAt !== undefined ? Math.max(0, now - state.turnStartedAt) : animMs;
 	const activeContextual = resolveActiveContextualSummary(state, now);
-	const summary = activeContextual || resolveDefaultPhaseLabel(phase, state.turnVerbSeed, elapsedTurnMs);
+	const summary = activeContextual || resolveDefaultPhaseLabel(phase, state.turnVerbSeed);
 	const timerText = formatCompactElapsed(elapsedTurnMs);
 	const indicatorFrame = renderPrototypeBrandMark({
 		theme,
@@ -556,7 +554,7 @@ export function renderPrototypeBorderWorkingStatus(
 	const phase: WorkingPhase = state.phase === "idle" ? "ttft" : state.phase;
 	const elapsedTurnMs = state.turnStartedAt !== undefined ? Math.max(0, now - state.turnStartedAt) : animMs;
 	const activeContextual = resolveActiveContextualSummary(state, now);
-	const rawSummary = activeContextual || resolveDefaultPhaseLabel(phase, state.turnVerbSeed, elapsedTurnMs);
+	const rawSummary = activeContextual || resolveDefaultPhaseLabel(phase, state.turnVerbSeed);
 	const timerPlain = ` · ${formatCompactElapsed(elapsedTurnMs)}`;
 	const timerW = visibleWidth(timerPlain);
 	const dimTimer = light ? fgRgb(124, 138, 160, timerPlain) : fgRgb(104, 118, 142, timerPlain);

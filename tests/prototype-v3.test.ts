@@ -38,7 +38,7 @@ describe("prototype v3: glimmer sweep, 30s verb stability, step summaries, and h
 			theme: { name: "one-blue-light" },
 		});
 		const frame2 = renderPrototypeBorderWorkingStatus(54, {
-			now: 1_022_000,
+			now: 1_180_000,
 			animElapsedMs: 420,
 			theme: { name: "one-blue-light" },
 		});
@@ -158,6 +158,27 @@ describe("prototype v3: glimmer sweep, 30s verb stability, step summaries, and h
 		expect(hoverPlain).toBe(restPlain);
 		expect(restPlain).toContain("✓ Worked for 4.2s");
 		expect(restPlain).toMatch(/\d{4}-\d{2}-\d{2} · \d{2}:\d{2}/u);
+
+		/* Intermediate toolUse steps also render their metrics stamp instead of returning empty */
+		const stepRow = new ResponseMetricsRowComponent(
+			{
+				version: 1,
+				timestamp: 1764075000000,
+				completedAt: 1764075001900,
+				firstContentAt: 1764075000500,
+				outputTokens: 120,
+				stopReason: "toolUse",
+			},
+			false,
+			mockTheme,
+			() => {},
+		);
+		const stepLines = stepRow.render(100);
+		expect(stepLines.length).toBe(1);
+		const stepPlain = stripTerminalSequences(stepLines[0]!);
+		expect(stepPlain).toContain("ttft 0.5s");
+		expect(stepPlain).toContain("total 1.9s");
+		expect(stepPlain).toMatch(/\d{4}-\d{2}-\d{2} · \d{2}:\d{2}/u);
 	});
 
 	it("supports mouse-wheel scrolling inside Variant B streaming Thinking window via SGR wheel input", async () => {
