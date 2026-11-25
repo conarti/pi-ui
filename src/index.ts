@@ -22,6 +22,7 @@ import {
 } from "./features/sticky-prompt/index.ts";
 import { registerToolCallsFeature } from "./features/tool-calls/index.ts";
 import { registerPromptChipsFeature } from "./features/prompt-chips/index.ts";
+import { registerPromptSuggestionFeature } from "./features/prompt-suggestion/index.ts";
 import { registerQuotesFeature } from "./features/quotes/index.ts";
 import { registerTranscriptFeature } from "./features/transcript/index.ts";
 import { acquireHostRuntime, disposeActiveHostRuntime } from "./shared/host-runtime.ts";
@@ -42,6 +43,7 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 	registerTranscriptFeature(pi);
 	registerComposerWorkingAnimation(pi);
 	registerPromptChipsFeature(pi);
+	registerPromptSuggestionFeature(pi);
 	registerQuotesFeature(pi);
 
 	// 2. Compact / Claude / Codex tool call renderers, codemode summaries & silent mode
