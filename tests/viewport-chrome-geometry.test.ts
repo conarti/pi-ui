@@ -8,6 +8,7 @@ import {
 	computeStickyPushOffset,
 	computeTranscriptContentWidth,
 	cropKittyLineBelowSticky,
+	extractActiveBgSgrAtColumn,
 	stripInlineImageSequences,
 } from "../src/shared/fullscreen-layout.ts";
 import { selectStickyTurn, type IndexedTurn } from "../src/shared/turn-index.ts";
@@ -96,12 +97,26 @@ describe("Viewport chrome pure geometry and push-offset math", () => {
 		});
 	});
 
-	it("reserves a stable 3-column right margin (rail + scrollbar) whenever Outline Rail is visible regardless of auto scrollbar visibility", () => {
-		expect(computeTranscriptContentWidth(120, true, (w) => w)).toBe(117);
-		expect(computeTranscriptContentWidth(120, true, (w) => w - 1)).toBe(117);
-
+	it("preserves full native ScrollView content width whether Outline Rail is visible or hidden, and extracts active background SGR at target columns", () => {
+		expect(computeTranscriptContentWidth(120, true, (w) => w)).toBe(120);
+		expect(computeTranscriptContentWidth(120, true, (w) => w - 1)).toBe(119);
 		expect(computeTranscriptContentWidth(120, false, (w) => w)).toBe(120);
 		expect(computeTranscriptContentWidth(120, false, (w) => w - 1)).toBe(119);
+
+		const cardRow = "\x1b[48;2;27;35;50m  \x1b[38;2;220;229;242mPrompt row       \x1b[39m  \x1b[49m";
+		expect(extractActiveBgSgrAtColumn(cardRow, 18)).toBe("\x1b[48;2;27;35;50m");
+		expect(extractActiveBgSgrAtColumn(cardRow, 25)).toBe("");
+
+		const paletteRow = "\x1b[48;5;236mcode card row\x1b[0m trailing";
+		expect(extractActiveBgSgrAtColumn(paletteRow, 6)).toBe("\x1b[48;5;236m");
+		expect(extractActiveBgSgrAtColumn(paletteRow, 16)).toBe("");
+
+		const vp = computeRailViewport(0, 40, 14, [0, 10, 20], 3);
+		const normalGeo = computeOutlineGeometry(14, 3, vp, 4);
+		expect(normalGeo?.upY).toBe(4);
+		const pushedGeo = computeOutlineGeometry(14, 3, vp, 7);
+		expect(pushedGeo?.upY).toBeGreaterThanOrEqual(7);
+		expect(computeOutlineGeometry(10, 3, vp, 8)).toBeUndefined();
 	});
 
 	it("strips Kitty and iTerm2 inline image sequences while preserving surrounding text", () => {

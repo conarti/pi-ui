@@ -389,10 +389,11 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 
 			scroll.scrollTo(10, { disableFollow: true });
 			const collapsedScreen = harness.screen();
-			const stickyTopFive = Array.from({ length: 5 }, (_, r) => collapsedScreen.sliceText(r, 0, 97));
+			const stickyTopFive = Array.from({ length: 5 }, (_, r) => collapsedScreen.sliceText(r, 0, 99));
 			expect(stickyTopFive[0]?.trim()).toBe("");
 			expect(stickyTopFive[1]).toContain("› Line one of multi-line user prompt");
 			expect(stickyTopFive[1]?.trimEnd().endsWith("10:15")).toBe(true);
+			expect(stickyTopFive[1]?.indexOf("10:15")).toBe(93);
 			expect(stickyTopFive[2]).toContain("Line two of multi-line user prompt");
 			expect(stickyTopFive[3]).toContain("Line three of multi-line user prompt");
 			expect(stickyTopFive[3]).toContain("…");
@@ -405,14 +406,14 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			const expandedScreen = harness.screen();
 			expect(scroll.viewportHeight).toBe(initialViewportHeight);
 			const expandedTopSeven = Array.from({ length: 7 }, (_, r) =>
-				expandedScreen.sliceText(r, 0, 97),
+				expandedScreen.sliceText(r, 0, 99),
 			).join("\n");
 			expect(expandedTopSeven).toContain("Line four hidden while collapsed");
 			expect(expandedTopSeven).toContain("Line five hidden while collapsed");
 
 			await harness.pressKey("\x0f");
 			const recollapsedTopSix = Array.from({ length: 6 }, (_, r) =>
-				harness!.screen().sliceText(r, 0, 97),
+				harness!.screen().sliceText(r, 0, 99),
 			).join("\n");
 			expect(recollapsedTopSix).not.toContain("Line four hidden while collapsed");
 
@@ -420,18 +421,18 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			const turn2Start = rail.offsetOf(1);
 			scroll.scrollTo(turn2Start - 3, { disableFollow: true });
 			const pushedScreen = harness.screen();
-			expect(pushedScreen.sliceText(0, 0, 97)).toContain("Line two of multi-line user prompt");
-			expect(pushedScreen.sliceText(1, 0, 97)).toContain("Line three of multi-line user prompt");
-			expect(pushedScreen.sliceText(2, 0, 97).trim()).toBe("");
-			expect(pushedScreen.sliceText(4, 0, 97)).toContain("› Next turn prompt");
+			expect(pushedScreen.sliceText(0, 0, 99)).toContain("Line two of multi-line user prompt");
+			expect(pushedScreen.sliceText(1, 0, 99)).toContain("Line three of multi-line user prompt");
+			expect(pushedScreen.sliceText(2, 0, 99).trim()).toBe("");
+			expect(pushedScreen.sliceText(4, 0, 99)).toContain("› Next turn prompt");
 
 			scroll.scrollTo(turn2Start + 4, { disableFollow: true });
 			const turn2Pinned = harness.screen();
-			expect(turn2Pinned.sliceText(0, 0, 97).trim()).toBe("");
-			expect(turn2Pinned.sliceText(1, 0, 97)).toContain("› Next turn prompt");
-			expect(turn2Pinned.sliceText(1, 0, 97).trimEnd().endsWith("10:30")).toBe(true);
+			expect(turn2Pinned.sliceText(0, 0, 99).trim()).toBe("");
+			expect(turn2Pinned.sliceText(1, 0, 99)).toContain("› Next turn prompt");
+			expect(turn2Pinned.sliceText(1, 0, 99).trimEnd().endsWith("10:30")).toBe(true);
 			expect(
-				Array.from({ length: 4 }, (_, r) => turn2Pinned.sliceText(r, 0, 97)).join("\n"),
+				Array.from({ length: 4 }, (_, r) => turn2Pinned.sliceText(r, 0, 99)).join("\n"),
 			).not.toContain("Line one of multi-line user prompt");
 		},
 	);
@@ -575,13 +576,14 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 				expect(selectedScreen.cellAt(r, c)?.inverse).toBe(false);
 			}
 		}
-		for (let r = 0; r < vpHeight; r += 1) {
+		const geo = getRailGeometry();
+		for (let r = geo.upY; r <= geo.downY; r += 1) {
 			expect(selectedScreen.cellAt(r, 97)?.inverse).toBe(false);
 			expect(selectedScreen.cellAt(r, 98)?.inverse).toBe(false);
+		}
+		for (let r = 0; r < vpHeight; r += 1) {
 			expect(selectedScreen.cellAt(r, 99)?.inverse).toBe(false);
 		}
-
-		const geo = getRailGeometry();
 		await harness.mouseMove(97, geo.ticksY);
 		const popupScreen = harness.screen();
 		const topBoxHit = popupScreen.findText("╭─");
@@ -719,8 +721,17 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 
 		scroll.scrollTo(turn2Start - 3, { disableFollow: true });
 		const midPushScreen = harness.screen();
-		expect(midPushScreen.sliceText(0, 0, 77)).toContain("Кириллица строка 2");
-		expect(midPushScreen.sliceText(4, 0, 77)).toContain("23:59");
+		expect(midPushScreen.sliceText(0, 0, 79)).toContain("Кириллица строка 2");
+		expect(midPushScreen.sliceText(4, 0, 79)).toContain("23:59");
+		expect(midPushScreen.rowText(4).indexOf("23:59")).toBe(73);
+
+		const railGeoOnCard = rail.geometry!;
+		scroll.scrollTo(Math.max(0, turn2Start - railGeoOnCard.ticksY), { disableFollow: true });
+		const railOverCard = harness.screen();
+		const cardBgLeft = railOverCard.cellAt(railGeoOnCard.ticksY, 10)?.bg;
+		const railBgOverCard = railOverCard.cellAt(railGeoOnCard.ticksY, 78)?.bg;
+		expect(cardBgLeft?.kind).toBe("rgb");
+		expect(railBgOverCard).toEqual(cardBgLeft);
 
 		await harness.mouseClick(10, 1);
 		scroll.scrollTo(turn1Start + 6, { disableFollow: true });
@@ -792,7 +803,8 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 
 		await harness.mouseWheel("up", 20, 10, 5);
 		const scrolled = harness.screen();
-		expect(scrolled.sliceText(1, 0, 43)).toContain("First split-pane prompt");
+		expect(scrolled.sliceText(1, 0, 45)).toContain("First split-pane prompt");
+		expect(scrolled.rowText(1).indexOf("10:15")).toBe(39);
 
 		const railSlices = Array.from({ length: scrolled.height }, (_, r) =>
 			scrolled.sliceText(r, 43, 45),

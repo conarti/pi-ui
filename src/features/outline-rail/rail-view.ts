@@ -85,9 +85,12 @@ export function computeOutlineGeometry(
 	height: number,
 	turnCount: number,
 	vp: RailViewport,
+	minTop = 0,
 ): RailGeometry | undefined {
 	if (turnCount < MIN_TURNS_FOR_RAIL) return undefined;
-	const maxTicks = height - 2;
+	const safeMinTop = Math.max(0, Math.floor(minTop));
+	const availHeight = height - safeMinTop;
+	const maxTicks = availHeight - 2;
 	if (maxTicks <= 0) return undefined;
 
 	let start: number;
@@ -104,7 +107,8 @@ export function computeOutlineGeometry(
 
 	const windowEnd = Math.min(turnCount, start + (turnCount <= maxTicks ? turnCount : maxTicks));
 	const totalRows = windowEnd - start + 2;
-	const top = Math.floor((height - totalRows) / 2);
+	const centeredTop = Math.floor((height - totalRows) / 2);
+	const top = Math.max(safeMinTop, Math.min(height - totalRows, centeredTop));
 	const ticksY = top + 1;
 
 	return {
@@ -311,7 +315,7 @@ export class OutlineRailComponent implements Component {
 		return undefined;
 	}
 
-	render(width: number, explicitHeight?: number): string[] {
+	render(width: number, explicitHeight?: number, minTop = 0): string[] {
 		const w = Math.max(1, Math.min(width, RAIL_WIDTH));
 		const turns = this.turnIndex.getTurns();
 		const height = Math.max(0, explicitHeight ?? this.scroll.viewportHeight ?? 0);
@@ -348,7 +352,7 @@ export class OutlineRailComponent implements Component {
 			turns.length,
 			promptHeights,
 		);
-		const geo = computeOutlineGeometry(height, turns.length, vp);
+		const geo = computeOutlineGeometry(height, turns.length, vp, minTop);
 		this.geometry = geo;
 		if (!geo) {
 			this.clearHover(true);

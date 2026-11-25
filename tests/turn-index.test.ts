@@ -101,7 +101,7 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 
 		await harness.mouseWheel("up", 40, 8, 8);
 		const midScreen = harness.screen();
-		const stickyBand = [0, 1, 2].map((r) => midScreen.sliceText(r, 0, 117)).join("\n");
+		const stickyBand = [0, 1, 2].map((r) => midScreen.sliceText(r, 0, 119)).join("\n");
 
 		expect(stickyBand).not.toContain("#4/5");
 		expect(stickyBand).toContain("09:15");
@@ -153,7 +153,7 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 		const runtime = getActiveHostRuntime()!;
 		const scroll = runtime.scroll!;
 		await harness.mouseWheel("up", 40, 6, 9);
-		expect(harness.screen().sliceText(1, 0, 117)).toContain("10:05");
+		expect(harness.screen().sliceText(1, 0, 119)).toContain("10:05");
 
 		const geoAtTurn2 = getRailGeometry();
 		const tick0Row = geoAtTurn2.ticksY;

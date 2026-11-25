@@ -4,6 +4,7 @@ import {
 	getPngDimensions,
 	sliceByColumn,
 	stripTerminalSequences,
+	visibleWidth,
 	type Component,
 	type ScrollView,
 	type TUI,
@@ -35,8 +36,9 @@ export interface MountedViewportSlots {
 	};
 	rightRail?: Component & {
 		basisWidth: number;
+		geometry?: { readonly upY: number; readonly downY: number };
 		isVisible: (viewport: { width: number; height: number }) => boolean;
-		render(width: number, explicitHeight?: number): string[];
+		render(width: number, explicitHeight?: number, minTop?: number): string[];
 		handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined;
 		clearHover?(): void;
 		dispose?(): void;
@@ -72,7 +74,9 @@ interface CompositedFrameGeometry {
 		readonly pushOffset: number;
 		readonly fullHeight: number;
 	};
-	readonly railRect?: LayoutRect;
+	readonly railRect?: LayoutRect & {
+		readonly originY: number;
+	};
 }
 
 interface RawSgrMouse {
@@ -123,16 +127,93 @@ export function computeStickyPushOffset(
 	};
 }
 
+const GRAPH_SEG = new Intl.Segmenter("en", { granularity: "grapheme" });
+
 export function computeTranscriptContentWidth(
 	viewportWidth: number,
-	railVisible: boolean,
+	_railVisible: boolean,
 	fallbackGetContentWidth: (width: number) => number = (w) => w,
 ): number {
 	const safeWidth = Math.max(1, Math.floor(viewportWidth));
-	if (railVisible) {
-		return Math.max(1, safeWidth - RAIL_PLUS_SCROLLBAR_MARGIN);
-	}
 	return Math.max(1, fallbackGetContentWidth(safeWidth));
+}
+
+export function extractActiveBgSgrAtColumn(line: string, targetCol: number): string {
+	if (!line.includes("\x1b[")) return "";
+	let activeBg = "";
+	let col = 0;
+	let i = 0;
+
+	while (i < line.length) {
+		if (line.charCodeAt(i) === 0x1b) {
+			const next = line[i + 1];
+			if (next === "[") {
+				const csi = /^\x1b\[([0-9;]*)([A-Za-z])/.exec(line.slice(i));
+				if (csi) {
+					if (csi[2] === "m") {
+						const raw = csi[1] ?? "";
+						const codes = raw.length === 0 ? [0] : raw.split(";").map((s) => (s === "" ? 0 : Number(s)));
+						let k = 0;
+						while (k < codes.length) {
+							const c = codes[k] ?? 0;
+							if (c === 0 || c === 49) {
+								activeBg = "";
+								k += 1;
+							} else if ((c >= 40 && c <= 47) || (c >= 100 && c <= 107)) {
+								activeBg = `\x1b[${c}m`;
+								k += 1;
+							} else if (c === 48 && codes[k + 1] === 5 && codes[k + 2] !== undefined) {
+								activeBg = `\x1b[48;5;${codes[k + 2]}m`;
+								k += 3;
+							} else if (
+								c === 48 &&
+								codes[k + 1] === 2 &&
+								codes[k + 2] !== undefined &&
+								codes[k + 3] !== undefined &&
+								codes[k + 4] !== undefined
+							) {
+								activeBg = `\x1b[48;2;${codes[k + 2]};${codes[k + 3]};${codes[k + 4]}m`;
+								k += 5;
+							} else {
+								k += 1;
+							}
+						}
+					}
+					i += csi[0].length;
+					continue;
+				}
+			} else if (next === "]") {
+				const osc = /^\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/.exec(line.slice(i));
+				if (osc) {
+					i += osc[0].length;
+					continue;
+				}
+			} else if (next === "_") {
+				const apc = /^\x1b_[^\x1b]*\x1b\\/.exec(line.slice(i));
+				if (apc) {
+					i += apc[0].length;
+					continue;
+				}
+			}
+			i += Math.min(2, line.length - i);
+			continue;
+		}
+
+		if (col >= targetCol) break;
+
+		const nextEsc = line.indexOf("\x1b", i);
+		const plainSlice = nextEsc === -1 ? line.slice(i) : line.slice(i, nextEsc);
+		for (const seg of GRAPH_SEG.segment(plainSlice)) {
+			if (col >= targetCol) {
+				i += seg.index;
+				return activeBg;
+			}
+			col += visibleWidth(seg.segment);
+		}
+		i = nextEsc === -1 ? line.length : nextEsc;
+	}
+
+	return activeBg;
 }
 
 export function stripInlineImageSequences(line: string): string {
@@ -301,16 +382,7 @@ export class ViewportChromeCompositor {
 		private readonly scroll: ScrollView,
 		readonly slots: MountedViewportSlots,
 	) {
-		const boundOrig = scroll.getContentWidth.bind(scroll);
-		this.origGetContentWidth = boundOrig;
-
-		(scroll as any).getContentWidth = (width: number): number => {
-			const safeW = Math.max(1, Math.floor(width));
-			const safeH = Math.max(1, scroll.viewportHeight || tui.terminal?.rows || 24);
-			const railVisible = Boolean(this.slots.rightRail?.isVisible({ width: safeW, height: safeH }));
-			return computeTranscriptContentWidth(safeW, railVisible, this.origGetContentWidth);
-		};
-		scroll.invalidate();
+		this.origGetContentWidth = scroll.getContentWidth.bind(scroll);
 	}
 
 	compositeFrame(screen: string[], layout: { root?: LayoutBoxNode } | undefined, totalWidth: number): string[] {
@@ -337,9 +409,8 @@ export class ViewportChromeCompositor {
 			railVisible,
 			this.origGetContentWidth,
 		);
-		const stickyWidth = railVisible
-			? stickyLayoutWidth
-			: this.scroll.isScrollbarVisible || this.scroll.scrollbar === "always"
+		const stickyWidth =
+			this.scroll.isScrollbarVisible || this.scroll.scrollbar === "always"
 				? Math.max(1, boxRect.width - 1)
 				: stickyLayoutWidth;
 
@@ -411,30 +482,57 @@ export class ViewportChromeCompositor {
 			}
 		}
 
-		let railRect: LayoutRect | undefined;
+		let railRect: CompositedFrameGeometry["railRect"];
 		if (railVisible && this.slots.rightRail) {
 			const railStartCol = boxRect.x + boxRect.width - RAIL_PLUS_SCROLLBAR_MARGIN;
-			const railLines = this.slots.rightRail.render(RAIL_COLUMNS, boxRect.height);
-			if (railLines.length > 0) {
-				if (!result) result = [...screen];
-				const count = Math.min(railLines.length, boxRect.height);
-				for (let i = 0; i < count; i++) {
-					const row = boxRect.y + i;
-					if (row < 0 || row >= result.length) continue;
-					result[row] = compositeTuiLine(
-						result[row] ?? "",
-						railLines[i]!,
-						railStartCol,
-						RAIL_COLUMNS,
-						totalWidth,
-					);
+			const stickyCoveredRows = stickyRect?.height ?? 0;
+			const railLines = this.slots.rightRail.render(
+				RAIL_COLUMNS,
+				boxRect.height,
+				stickyCoveredRows,
+			);
+			const railGeo = this.slots.rightRail.geometry;
+			if (railLines.length > 0 && (!this.slots.rightRail.geometry || railGeo)) {
+				const maxRowIdx = Math.min(railLines.length, boxRect.height) - 1;
+				const startIdx = railGeo ? Math.max(0, railGeo.upY) : 0;
+				const endIdx = railGeo ? Math.min(maxRowIdx, railGeo.downY) : maxRowIdx;
+				if (endIdx >= startIdx) {
+					if (!result) result = [...screen];
+					for (let i = startIdx; i <= endIdx; i++) {
+						const row = boxRect.y + i;
+						if (row < 0 || row >= result.length) continue;
+						const baseRow = result[row] ?? "";
+						const rawRailLine = railLines[i]!;
+						const plainRail = stripTerminalSequences(rawRailLine);
+						const leadingBlank = plainRail.startsWith(" ") && plainRail.length >= 2;
+						const targetCol = leadingBlank ? railStartCol + 1 : railStartCol;
+						const targetWidth = leadingBlank ? RAIL_COLUMNS - 1 : RAIL_COLUMNS;
+						const trimmedRail = leadingBlank
+							? sliceByColumn(rawRailLine, 1, targetWidth, true)
+							: rawRailLine;
+						const bgSgr =
+							!baseRow.includes("\x1b_G") && !baseRow.includes("\x1b]1337;File=")
+								? extractActiveBgSgrAtColumn(baseRow, targetCol)
+								: "";
+						const railOverlay = bgSgr
+							? `${bgSgr}${trimmedRail.replace(/\x1b\[0m/g, `\x1b[0m${bgSgr}`)}`
+							: trimmedRail;
+						result[row] = compositeTuiLine(
+							baseRow,
+							railOverlay,
+							targetCol,
+							targetWidth,
+							totalWidth,
+						);
+					}
+					railRect = {
+						x: railStartCol,
+						y: boxRect.y + startIdx,
+						width: RAIL_COLUMNS,
+						height: endIdx - startIdx + 1,
+						originY: boxRect.y,
+					};
 				}
-				railRect = {
-					x: railStartCol,
-					y: boxRect.y,
-					width: RAIL_COLUMNS,
-					height: count,
-				};
 			}
 		} else {
 			this.slots.rightRail?.clearHover?.();
@@ -461,14 +559,17 @@ export class ViewportChromeCompositor {
 		if (stickyRect && row >= stickyRect.y && row < stickyRect.y + stickyRect.height) {
 			return { start: 0, end: 0 };
 		}
-		const maxCol = railRect
+		const onRailRow =
+			railRect !== undefined && row >= railRect.y && row < railRect.y + railRect.height;
+		const maxCol = onRailRow
 			? railRect.x
 			: this.scroll.isScrollbarVisible || this.scroll.scrollbar === "always"
 				? scrollbarCol
 				: undefined;
 		if (maxCol !== undefined && columns.end > maxCol) {
-			const clampedEnd = Math.max(columns.start, maxCol);
-			return { start: Math.min(columns.start, maxCol), end: clampedEnd };
+			const clampedStart = Math.min(columns.start, maxCol);
+			const clampedEnd = Math.min(columns.end, maxCol);
+			return { start: clampedStart, end: Math.max(clampedStart, clampedEnd) };
 		}
 		return columns;
 	}
@@ -572,7 +673,7 @@ export class ViewportChromeCompositor {
 
 			if (inSticky && stickyRect) {
 				if (!out) out = [...postSelection];
-				if (railRect || stickyRect.width >= boxRect.width) {
+				if (stickyRect.width >= boxRect.width) {
 					out[row] = preLine;
 				} else {
 					let line = compositeTuiLine(
@@ -655,11 +756,11 @@ export class ViewportChromeCompositor {
 								"click",
 								"left",
 								raw.x - railRect.x,
-								raw.y - railRect.y,
+								raw.y - railRect.originY,
 								raw.x,
 								raw.y,
 								railRect.width,
-								railRect.height,
+								this.lastGeometry.boxRect.height,
 								raw.button,
 							),
 						);
@@ -723,11 +824,11 @@ export class ViewportChromeCompositor {
 						"move",
 						"none",
 						raw.x - railRect.x,
-						raw.y - railRect.y,
+						raw.y - railRect.originY,
 						raw.x,
 						raw.y,
 						railRect.width,
-						railRect.height,
+						this.lastGeometry.boxRect.height,
 						raw.button,
 					),
 				);
@@ -742,11 +843,11 @@ export class ViewportChromeCompositor {
 						"press",
 						"left",
 						raw.x - railRect.x,
-						raw.y - railRect.y,
+						raw.y - railRect.originY,
 						raw.x,
 						raw.y,
 						railRect.width,
-						railRect.height,
+						this.lastGeometry.boxRect.height,
 						raw.button,
 					),
 				);

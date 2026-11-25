@@ -97,11 +97,18 @@ describe("conartiPiUi end-to-end InteractiveMode smoke", () => {
 		const targetPos = readyScreen.findText("Selectable target sentence");
 		expect(targetPos).toBeDefined();
 
-		await harness.mouseDrag(targetPos!.col, targetPos!.row, 118, targetPos!.row, { steps: 3 });
+		const railGeo = getActiveHostRuntime()!.viewportSlots!.rightRail!.geometry!;
+		await harness.mouseDrag(
+			targetPos!.col,
+			targetPos!.row,
+			118,
+			Math.min(targetPos!.row, railGeo.downY),
+			{ steps: 3 },
+		);
 		const selectedScreen = harness.screen();
 		expect(selectedScreen.cellAt(targetPos!.row, targetPos!.col)?.inverse).toBe(true);
-		expect(selectedScreen.cellAt(targetPos!.row, 117)?.inverse).toBe(false);
-		expect(selectedScreen.cellAt(targetPos!.row, 118)?.inverse).toBe(false);
+		expect(selectedScreen.cellAt(railGeo.downY, 117)?.inverse).toBe(false);
+		expect(selectedScreen.cellAt(railGeo.downY, 118)?.inverse).toBe(false);
 
 		const quotePopupPos = selectedScreen.findText("Цитировать");
 		expect(quotePopupPos).toBeDefined();

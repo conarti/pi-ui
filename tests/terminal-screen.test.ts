@@ -82,7 +82,15 @@ describe("headless terminal screen buffer snapshot", () => {
 		expect(targetPos).toBeDefined();
 		expect(targetPos!.row).toBeGreaterThanOrEqual(3);
 
-		await harness.mouseDrag(targetPos!.col, targetPos!.row, 94, targetPos!.row + 1, { steps: 3 });
+		const railGeo = getActiveHostRuntime()?.viewportSlots?.rightRail?.geometry!;
+		expect(railGeo).toBeDefined();
+		await harness.mouseDrag(
+			targetPos!.col,
+			Math.min(targetPos!.row, railGeo.upY),
+			94,
+			Math.max(targetPos!.row + 1, railGeo.downY),
+			{ steps: 3 },
+		);
 
 		const screen = captureTerminalScreen(harness);
 		const viewportRows = getActiveHostRuntime()?.scroll?.viewportHeight ?? 16;
@@ -111,9 +119,12 @@ describe("headless terminal screen buffer snapshot", () => {
 				expect(screen.cellAt(r, c)?.inverse).toBe(false);
 			}
 		}
-		for (let r = 0; r < viewportRows; r += 1) {
+		for (let r = railGeo.upY; r <= railGeo.downY; r += 1) {
 			expect(screen.cellAt(r, 93)?.inverse).toBe(false);
 			expect(screen.cellAt(r, 94)?.inverse).toBe(false);
+		}
+		for (let r = 0; r < viewportRows; r += 1) {
+			expect(screen.cellAt(r, 95)?.inverse).toBe(false);
 		}
 	});
 });

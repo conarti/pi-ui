@@ -13,7 +13,7 @@ Verified runtime behaviors in `@earendil-works/pi-tui` and `@earendil-works/pi-c
 2. **Live `fullscreen` <-> `regular` mode transitions (`InteractiveMode.switchTuiMode`)**:
    - Switching TUI mode replaces `this.renderer` in-place (`TuiAltScreen` <-> `TuiMainScreen`) without emitting `session_shutdown` or `session_start`, and switching back to `fullscreen` constructs a brand-new `TuiAltScreen` instance while reusing `this.ui` and `this.fullscreenLayoutRoot`.
    - `InteractiveMode.switchTuiMode` checks `previousUi.hasOverlayEntries` (`overlayStack.length > 0`) before swapping renderers. Dismiss registered transient `nonCapturing: true` `Hover Popup` overlays (when no blocking `Modal Card` is open) before `switchTuiMode` evaluates `hasOverlayEntries` so hover popups never block TUI mode toggles while blocking `Modal Card` dialogs still guard the switch.
-   - `HostRuntimeHandle` evaluates `isFullscreen`, `scroll`, `chatContainer`, and `viewportSlots` dynamically against `unwrapHostTui(tui)`: detaching `ViewportChromeCompositor` (restoring `scroll.getContentWidth` and disposing `Sticky Prompt` / `Outline Rail`) on `fullscreen` -> `regular`, and rebinding a fresh `ViewportChromeCompositor` + `1003h` pointer-motion sequence onto the new `TuiAltScreen` on `regular` -> `fullscreen`.
+   - `HostRuntimeHandle` evaluates `isFullscreen`, `scroll`, `chatContainer`, and `viewportSlots` dynamically against `unwrapHostTui(tui)`: detaching `ViewportChromeCompositor` (disposing `Sticky Prompt` / `Outline Rail`) on `fullscreen` -> `regular`, and rebinding a fresh `ViewportChromeCompositor` + `1003h` pointer-motion sequence onto the new `TuiAltScreen` on `regular` -> `fullscreen`.
 
 3. **Hot `/reload` lifecycle**:
    - `/reload` emits `session_shutdown({ reason: "reload" })`, reloads extensions, and emits `session_start({ reason: "reload" })` while keeping `this.renderer`, `this.ui`, `this.transcriptScrollView`, and `this.fullscreenLayoutRoot` intact.
@@ -24,7 +24,7 @@ Verified runtime behaviors in `@earendil-works/pi-tui` and `@earendil-works/pi-c
 1. **`TuiAltScreen.doRender()` order**:
    - `renderLayoutFrame()` builds the layout tree (`{ root, width, height, lines, primaryScrollView, renderCache }`), where each box node holds `{ component, rect, clip, children, scrollView?, scrollContentLines?, layer }`. Walk `root.children` recursively to locate `node.scrollView === scroll`.
    - `compositeScrollToEndIndicator` and `compositeOverlays` execute **before** `applySelection(screen, nextLayout)`.
-   - Mask selection cells across composited `Sticky Prompt` rows, `Outline Rail` columns (`width - 3 .. width - 2`), and visible `renderedOverlayLayouts` rects so underlying transcript selections never invert-highlight chrome or `Hover Popup` surfaces.
+   - Mask selection cells across composited `Sticky Prompt` rows, the active `Outline Rail` block (`[upY .. downY]` at `width - 3 .. width - 2`), and visible `renderedOverlayLayouts` rects so underlying transcript selections never invert-highlight chrome or `Hover Popup` surfaces.
 
 2. **Selection mouse lifecycle (`TuiAltScreen.handleMouseEvent`)**:
    - Left-button `press` calls `clearTextSelection()` before component `click` handlers fire on release.
