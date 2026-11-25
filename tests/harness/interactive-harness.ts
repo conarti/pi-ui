@@ -53,7 +53,9 @@ import {
 	type AgentSessionRuntime,
 	type CreateAgentSessionRuntimeFactory,
 	type ExtensionFactory,
+	type FileEntry,
 	type InteractiveModeOptions,
+	type SessionEntry,
 	type ToolDefinition,
 	type TuiMode,
 } from "@earendil-works/pi-coding-agent";
@@ -76,7 +78,10 @@ export {
 	getCurrentSystemPrompt,
 	getCurrentTools,
 	registerFauxProvider,
+	SessionManager,
 	type AssistantMessage,
+	type FileEntry,
+	type SessionEntry,
 	type FauxContentBlock,
 	type FauxModelDefinition,
 	type FauxProviderHandle,
@@ -288,6 +293,8 @@ export interface InteractiveHarnessOptions {
 	agentDir?: string;
 	persistSession?: boolean;
 	persistSettings?: boolean;
+	initialEntries?: FileEntry[];
+	initialLeafId?: string | null;
 	projectTrusted?: boolean;
 	settings?: Record<string, unknown>;
 	flags?: Record<string, boolean | string>;
@@ -412,11 +419,14 @@ export interface InteractiveHarness {
 	setResponses(steps: FauxResponseStep[]): void;
 	appendResponses(steps: FauxResponseStep[]): void;
 	setClipboard(next: MutableClipboardState): void;
+	setTheme(theme: "dark" | "light" | string): void;
 	sendInput(data: string): Promise<void>;
 	pressKey(sequence: string): Promise<void>;
 	typeText(text: string): Promise<void>;
 	paste(text: string, bracketed?: boolean): Promise<void>;
+	submitDraft(): Promise<void>;
 	submitInput(text: string): Promise<void>;
+	waitForIdle(): Promise<void>;
 	prompt(text: string): Promise<void>;
 	reload(): Promise<void>;
 	setTuiMode(mode: TuiMode): Promise<boolean>;
@@ -498,6 +508,8 @@ export async function createInteractiveHarness(
 		compaction: { enabled: false },
 		showHardwareCursor: false,
 		fullscreenCopyOnSelect: false,
+		/* Фиксируем шаг прокрутки колеса вместо wall-clock WheelScrollAccelerator("auto") для полной детерминированности под нагрузкой */
+		fullscreenWheelScrollLines: 3,
 		enableInstallTelemetry: false,
 		...options?.settings,
 	};
@@ -674,9 +686,46 @@ export async function createInteractiveHarness(
 		};
 	};
 
-	const initialSessionManager = options?.persistSession
-		? SessionManager.create(cwd, join(agentDir, "sessions"))
-		: SessionManager.inMemory(cwd);
+	const normalizedSeedEntries: FileEntry[] | undefined = options?.initialEntries
+		? options.initialEntries[0]?.type === "session"
+			? [...options.initialEntries]
+			: [
+					{
+						type: "session",
+						version: 3,
+						id: "seeded-test-session",
+						timestamp: "2026-01-01T00:00:00.000Z",
+						cwd,
+					},
+					...options.initialEntries,
+				]
+		: undefined;
+
+	const initialSessionManager = (() => {
+		if (options?.persistSession) {
+			const sessionsDir = join(agentDir, "sessions");
+			mkdirSync(sessionsDir, { recursive: true });
+			if (normalizedSeedEntries) {
+				const seededFile = join(sessionsDir, "seeded-session.jsonl");
+				writeFileSync(
+					seededFile,
+					`${normalizedSeedEntries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+					"utf8",
+				);
+				return SessionManager.open(seededFile, sessionsDir, cwd);
+			}
+			return SessionManager.create(cwd, sessionsDir);
+		}
+		return SessionManager.inMemory(cwd, undefined, normalizedSeedEntries);
+	})();
+
+	if (options?.initialLeafId !== undefined) {
+		if (options.initialLeafId === null) {
+			initialSessionManager.resetLeaf();
+		} else {
+			initialSessionManager.branch(options.initialLeafId);
+		}
+	}
 
 	const runtimeHost = await createAgentSessionRuntime(createRuntime, {
 		cwd,
@@ -701,6 +750,21 @@ export async function createInteractiveHarness(
 
 	await mode.init();
 	await flushMicrotasksAndTicks(4);
+
+	/* Перенаправляем copyOnSelect в виртуальный терминал и изолированный буфер обмена вместо системного pbcopy */
+	const bindVirtualCopySelection = () => {
+		const rawRenderer = internals.renderer as {
+			copySelection?: (text: string) => Promise<boolean | string>;
+		};
+		if ("copySelection" in rawRenderer) {
+			rawRenderer.copySelection = async (text: string) => {
+				clipboardState.text = text;
+				terminal.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
+				return true;
+			};
+		}
+	};
+	bindVirtualCopySelection();
 
 	/* Подключаем перехват onSubmit и фоновый цикл обработки пользовательского ввода (без бесконечного mode.run()) */
 	let stopped = false;
@@ -840,6 +904,16 @@ export async function createInteractiveHarness(
 			if ("image" in next) clipboardState.image = next.image;
 			if ("filePaths" in next) clipboardState.filePaths = next.filePaths;
 		},
+		setTheme(nextTheme: "dark" | "light" | string) {
+			const nextName =
+				nextTheme === "light"
+					? "one-blue-light"
+					: nextTheme === "dark"
+						? "midnight-cobalt"
+						: nextTheme;
+			internals.themeController?.setThemeSetting?.(nextName);
+			flushFrame(true);
+		},
 		async sendInput(data: string): Promise<void> {
 			terminal.sendInput(data);
 			await flushMicrotasksAndTicks(2);
@@ -859,9 +933,16 @@ export async function createInteractiveHarness(
 			const payload = bracketed ? `\x1b[200~${text}\x1b[201~` : text;
 			await harness.sendInput(payload);
 		},
+		async submitDraft(): Promise<void> {
+			terminal.sendInput("\r");
+			await waitForIdlePump();
+			flushFrame();
+		},
 		async submitInput(text: string): Promise<void> {
 			await harness.paste(text, true);
-			terminal.sendInput("\r");
+			await harness.submitDraft();
+		},
+		async waitForIdle(): Promise<void> {
 			await waitForIdlePump();
 			flushFrame();
 		},
@@ -877,6 +958,7 @@ export async function createInteractiveHarness(
 			const switched = internals.switchTuiMode(nextMode);
 			if (switched) {
 				settingsManager.setTuiMode(nextMode);
+				bindVirtualCopySelection();
 			}
 			await flushMicrotasksAndTicks(2);
 			flushFrame();

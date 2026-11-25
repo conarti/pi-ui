@@ -1,5 +1,6 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { ExtensionRunner, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isKittyProtocolActive, matchesKey, type KeyId } from "@earendil-works/pi-tui";
+import { hookMethod } from "./runtime-hooks.ts";
 
 const MOD_SHIFT = 1;
 const MOD_ALT = 2;
@@ -560,6 +561,7 @@ export function matchesLayoutChord(data: string, keyId: KeyId | string): boolean
 }
 
 const EXTRA_OPTION_CHORDS_KEY = Symbol.for("conarti.pi-ui.extra-option-chords.v1");
+const RUNNER_OPTION_CHORDS_KEY = Symbol.for("conarti.pi-ui.runner-option-chords.v1");
 const WRAPPED_APIS = new WeakSet<object>();
 
 function getExtraOptionChords(): Set<string> {
@@ -568,6 +570,35 @@ function getExtraOptionChords(): Set<string> {
 		g[EXTRA_OPTION_CHORDS_KEY] = new Set<string>();
 	}
 	return g[EXTRA_OPTION_CHORDS_KEY]!;
+}
+
+function getRunnerOptionChords(): Set<string> {
+	const g = globalThis as Record<symbol, Set<string> | undefined>;
+	if (!g[RUNNER_OPTION_CHORDS_KEY]) {
+		g[RUNNER_OPTION_CHORDS_KEY] = new Set<string>();
+	}
+	return g[RUNNER_OPTION_CHORDS_KEY]!;
+}
+
+/* Отслеживаем шорткаты всех загруженных расширений в ExtensionRunner, так как каждое расширение получает отдельный экземпляр ExtensionAPI */
+function installRunnerShortcutObserver(): void {
+	const proto = (ExtensionRunner as unknown as { prototype?: object } | undefined)?.prototype;
+	if (!proto) return;
+
+	hookMethod(proto, "getShortcuts", "keyboardLayout.observeRunnerShortcuts", (self, args, original) => {
+		const map = original.apply(self, args) as Map<string, unknown> | undefined;
+		const runnerChords = getRunnerOptionChords();
+		runnerChords.clear();
+		if (map instanceof Map) {
+			for (const key of map.keys()) {
+				const canonical = canonicalizeShortcutChord(String(key));
+				if (canonical) {
+					runnerChords.add(canonical);
+				}
+			}
+		}
+		return map;
+	});
 }
 
 export function registerOptionShortcutChord(keyId: string): () => void {
@@ -584,6 +615,7 @@ export function registerOptionShortcutChord(keyId: string): () => void {
 }
 
 export function installKeyboardLayoutSupport(pi: ExtensionAPI): void {
+	installRunnerShortcutObserver();
 	if (WRAPPED_APIS.has(pi as unknown as object)) return;
 	WRAPPED_APIS.add(pi as unknown as object);
 
@@ -599,8 +631,9 @@ export function installKeyboardLayoutSupport(pi: ExtensionAPI): void {
 
 	const getEnabledChords = (): ReadonlySet<string> => {
 		const extra = getExtraOptionChords();
-		if (extra.size === 0) return registeredShortcuts;
-		return new Set([...registeredShortcuts, ...extra]);
+		const runner = getRunnerOptionChords();
+		if (extra.size === 0 && runner.size === 0) return registeredShortcuts;
+		return new Set([...registeredShortcuts, ...extra, ...runner]);
 	};
 
 	const normalizer = createKeyboardLayoutNormalizer({
@@ -626,6 +659,7 @@ export function installKeyboardLayoutSupport(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", () => {
 		unsubscribeInput?.();
 		unsubscribeInput = undefined;
+		getRunnerOptionChords().clear();
 		normalizer.reset();
 	});
 }

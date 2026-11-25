@@ -251,7 +251,9 @@ interface StagedDraftSnapshot {
 
 const LEGACY_IMAGE_MARKER_RE = /\[Image #(\d+):\s*([^\]]+)\]/g;
 const IMAGE_PLACEHOLDER_TOKEN_RE = /\[изображение\]/gu;
-const TRAILING_IMAGE_PLACEHOLDER_RE = /(?:\s*\[изображение\])+\s*$/u;
+/* AgentSession._normalizePromptImages дописывает в конец текста метки вида [Image: original WxH, displayed at ...] или [Image skipped: ...] */
+const TRAILING_IMAGE_PLACEHOLDER_RE =
+	/(?:\s*(?:\[изображение\]|\[Image(?: skipped)?:\s*(?!#\d+:)[^\]]*\]))+\s*$/u;
 const TRAILING_SYNTHETIC_IMAGE_PILLS_RE = /((?:\s*\[🖼 Image #\d+\])+)\s*$/u;
 const SYNTHETIC_IMAGE_PILL_RE = /\[🖼 Image #(\d+)\]/gu;
 const CONTROL_CHARS_RE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;

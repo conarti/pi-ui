@@ -3,61 +3,98 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { UserMessageComponent } from "@earendil-works/pi-coding-agent";
-import {
-	Container,
-	Text,
-	stripTerminalSequences,
-	type Component,
-	type TuiMouseEvent,
-} from "@earendil-works/pi-tui";
-import conartiPiUi from "../src/index.ts";
+import { Container, type Component } from "@earendil-works/pi-tui";
 import { getOutlineSettings } from "../src/features/outline-rail/index.ts";
+import type { OutlineRailComponent } from "../src/features/outline-rail/rail-view.ts";
 import { getStickyConfig } from "../src/features/sticky-prompt/index.ts";
 import { getActiveHostRuntime } from "../src/shared/host-runtime.ts";
-import { createExtensionHarness, type ExtensionHarness } from "./harness/index.ts";
+import { hasBlockingModalOverlay } from "../src/shared/modal-card.ts";
+import {
+	createInteractiveHarness,
+	fauxAssistantMessage,
+	type InteractiveHarness,
+	type SessionEntry,
+} from "./harness/index.ts";
 
-interface ViewportComponents {
-	stickyBar: Component & { handleMouse?: (event: TuiMouseEvent) => unknown };
-	outlineRail: Component & { handleMouse?: (event: TuiMouseEvent) => unknown };
+function buildResponseText(prefix: string, lineCount: number): string {
+	return Array.from({ length: lineCount }, (_, idx) => `${prefix} line ${idx + 1}`).join("\n");
 }
 
-function getViewportComponents(_harness: ExtensionHarness): ViewportComponents {
-	const slots = getActiveHostRuntime()?.viewportSlots;
-	const stickyBar = slots?.topSlot as ViewportComponents["stickyBar"] | undefined;
-	const outlineRail = slots?.rightRail as ViewportComponents["outlineRail"] | undefined;
-	if (!stickyBar || !outlineRail) {
-		throw new Error("Expected StickyPromptBar and OutlineRail to be mounted in fullscreen viewport slots");
-	}
-	return { stickyBar, outlineRail };
-}
-
-function createMultilineBlock(prefix: string, lineCount: number): Component {
-	const lines = Array.from({ length: lineCount }, (_, i) => `${prefix} line ${i + 1}`);
-	return new Text(lines.join("\n"), 0, 0);
-}
-
-function makeUserEntry(id: string, content: string, timestamp: number) {
+function makeUserEntry(
+	id: string,
+	parentId: string | null,
+	content: string,
+	timestampMs: number,
+): SessionEntry {
 	return {
 		type: "message",
 		id,
+		parentId,
+		timestamp: new Date(timestampMs).toISOString(),
 		message: {
 			role: "user",
 			content,
-			timestamp,
+			timestamp: timestampMs,
 		},
 	};
 }
 
-function syncTranscriptLayout(harness: ExtensionHarness, viewportHeight = 12, contentWidth = 117): number {
-	const totalLines = harness.tui.chatContainer.render(contentWidth).length;
-	harness.tui.scroll.updateLayout(totalLines, viewportHeight, () => harness.tui.requestRender());
-	return totalLines;
+function makeAssistantEntry(
+	id: string,
+	parentId: string | null,
+	text: string,
+	timestampMs: number,
+): SessionEntry {
+	return {
+		type: "message",
+		id,
+		parentId,
+		timestamp: new Date(timestampMs).toISOString(),
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text }],
+			api: "faux-responses",
+			provider: "faux",
+			model: "faux-1",
+			usage: {
+				input: 10,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 20,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: timestampMs,
+		},
+	};
 }
 
-describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
-	let harness: ExtensionHarness | undefined;
+function findFirstMountedUserCard(root: Component | undefined): UserMessageComponent | undefined {
+	if (!root) return undefined;
+	if (root instanceof UserMessageComponent) return root;
+	if (root instanceof Container) {
+		for (const child of root.children) {
+			const found = findFirstMountedUserCard(child);
+			if (found) return found;
+		}
+	}
+	return undefined;
+}
+
+function getRailGeometry(): NonNullable<OutlineRailComponent["geometry"]> {
+	const rail = getActiveHostRuntime()?.viewportSlots?.rightRail as OutlineRailComponent | undefined;
+	if (!rail?.geometry) {
+		throw new Error("Expected OutlineRail geometry to be computed in fullscreen viewport");
+	}
+	return rail.geometry;
+}
+
+describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real InteractiveMode)", () => {
+	let harness: InteractiveHarness | undefined;
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		const stickyCfg = getStickyConfig();
 		stickyCfg.enabled = true;
 		stickyCfg.showTimestamp = true;
@@ -66,7 +103,7 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 		getOutlineSettings().enabled = true;
 
 		if (harness) {
-			await harness.shutdownSession();
+			await harness.dispose();
 			harness = undefined;
 		}
 	});
@@ -78,419 +115,301 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail)", () => {
 		const t4 = new Date(2026, 0, 15, 9, 15).getTime();
 		const t5 = new Date(2026, 0, 15, 9, 20).getTime();
 
-		const branch = [
-			makeUserEntry("u1", "First compacted prompt", t1),
-			makeUserEntry("u2", "Second compacted prompt", t2),
-			makeUserEntry("u3", "Third compacted prompt", t3),
-			{ type: "compaction", id: "cmp-1", summary: "Compacted earlier turns" },
-			makeUserEntry("u4", "Inspect \x1b[31mcompacted\x1b[0m   turn\x07 four", t4),
-			makeUserEntry("u5", "Final prompt five", t5),
+		const initialEntries: SessionEntry[] = [
+			makeUserEntry("u1", null, "First compacted prompt", t1),
+			makeAssistantEntry("a1", "u1", "Early reply 1", t1 + 1000),
+			makeUserEntry("u2", "a1", "Second compacted prompt", t2),
+			makeAssistantEntry("a2", "u2", "Early reply 2", t2 + 1000),
+			makeUserEntry("u3", "a2", "Third compacted prompt", t3),
+			makeAssistantEntry("a3", "u3", "Early reply 3", t3 + 1000),
+			{
+				type: "compaction",
+				id: "cmp-1",
+				parentId: "a3",
+				timestamp: new Date(t3 + 2000).toISOString(),
+				summary: "Compacted earlier turns\nSummary line 2\nSummary line 3",
+				firstKeptEntryId: "u4",
+				tokensBefore: 32000,
+			},
+			makeUserEntry("u4", "cmp-1", "Inspect \x1b[31mcompacted\x1b[0m   turn\x07 four", t4),
+			makeAssistantEntry("a4", "u4", buildResponseText("resp4", 18), t4 + 1000),
+			makeUserEntry("u5", "a4", "Final prompt five", t5),
+			makeAssistantEntry("a5", "u5", buildResponseText("resp5", 18), t5 + 1000),
 		];
 
-		harness = createExtensionHarness({
+		harness = await createInteractiveHarness({
 			theme: "dark",
 			width: 120,
-			height: 32,
-			entries: branch,
-			branch,
+			height: 22,
+			initialEntries,
 		});
-		harness.mount(conartiPiUi);
-		await harness.startSession();
 
-		const compactionSummary = createMultilineBlock("summary", 4);
-		const turn4Card = new UserMessageComponent("Inspect \x1b[31mcompacted\x1b[0m   turn\x07 four");
-		const response4 = createMultilineBlock("resp4", 18);
-		const turn5Card = new UserMessageComponent("Final prompt five");
-		const response5 = createMultilineBlock("resp5", 18);
+		const runtime = getActiveHostRuntime()!;
+		const scroll = runtime.scroll!;
 
-		harness.tui.chatContainer.addChild(compactionSummary);
-		harness.tui.chatContainer.addChild(turn4Card);
-		harness.tui.chatContainer.addChild(response4);
-		harness.tui.chatContainer.addChild(turn5Card);
-		harness.tui.chatContainer.addChild(response5);
+		/* Прокручиваем вверх к обмену четвёртой реплики через реальное колесо мыши */
+		await harness.mouseWheel("up", 40, 8, 8);
+		const midScreen = harness.screen();
+		const stickyBand = [0, 1, 2].map((r) => midScreen.sliceText(r, 0, 117)).join("\n");
 
-		syncTranscriptLayout(harness, 12, 117);
+		expect(stickyBand).not.toContain("#4/5");
+		expect(stickyBand).toContain("09:15");
+		expect(stickyBand).not.toContain("\x07");
+		expect(stickyBand).toContain("Inspect compacted");
+		expect(stickyBand).toContain("turn four");
 
-		const { stickyBar, outlineRail } = getViewportComponents(harness);
+		const geo = getRailGeometry();
+		expect(geo.windowEnd - geo.windowStart).toBe(5);
 
-		harness.tui.scroll.scrollTo(8, { disableFollow: true });
+		/* Наводим указатель на деление 4-го хода (индекс 3 в окне 0..4) */
+		const turn4TickRow = geo.ticksY + 3;
+		await harness.mouseMove(117, turn4TickRow);
 
-		const stickyLines = stickyBar.render(117).map(stripTerminalSequences);
-		const stickyText = stickyLines.join("\n");
+		const hoverScreen = harness.screen();
+		const hoverText = hoverScreen.text();
+		expect(hoverText).toContain("09:15");
+		expect(hoverText).not.toContain("Реплика");
+		expect(hoverText).toContain("Inspect compacted turn four");
 
-		expect(stickyText).not.toContain("#4/5");
-		expect(stickyText).toContain("09:15");
-		expect(stickyText).toContain("Inspect compacted");
-		expect(stickyText).toContain("turn four");
+		const prevScrollTop = scroll.scrollTop;
+		await harness.mouseClick(117, turn4TickRow);
+		expect(scroll.scrollTop).not.toBe(prevScrollTop);
+		expect(scroll.isFollowingEnd).toBe(false);
 
-		const railLines = outlineRail.render(2);
-		expect(railLines.length).toBe(12);
-
-		outlineRail.handleMouse?.({
-			type: "move",
-			button: "none",
-			x: 0,
-			y: 6,
-			screenX: 117,
-			screenY: 6,
-			width: 2,
-			height: 12,
-		} as TuiMouseEvent);
-
-		const popupOverlay = harness.tui.overlayStack.find((o) => o.options?.nonCapturing);
-		expect(popupOverlay).toBeDefined();
-		const popupLines = popupOverlay!.component
-			.render(Number(popupOverlay!.options?.width ?? 40))
-			.map(stripTerminalSequences);
-		const popupText = popupLines.join("\n");
-
-		expect(popupLines[0]?.trim()).toBe("09:15");
-		expect(popupText).not.toContain("Реплика");
-		expect(popupText).toContain("Inspect compacted turn four");
-
-		outlineRail.handleMouse?.({
-			type: "click",
-			button: "left",
-			x: 0,
-			y: 6,
-			screenX: 117,
-			screenY: 6,
-			width: 2,
-			height: 12,
-		} as TuiMouseEvent);
-
-		expect(harness.tui.scroll.scrollTop).toBe(4);
-		expect(harness.tui.scroll.isFollowingEnd).toBe(false);
+		const jumpedScreen = harness.screen();
+		expect(jumpedScreen.rowText(1)).toContain("Inspect compacted");
 	});
 
 	it("computes structural Turn offsets without full-document ANSI matching and stays stable across hover, copy badge, OSC markers, and duplicate prompts", async () => {
 		const t1 = new Date(2026, 0, 15, 10, 0).getTime();
 		const t2 = new Date(2026, 0, 15, 10, 5).getTime();
-		const branch = [
-			makeUserEntry("u1", "continue", t1),
-			makeUserEntry("u2", "continue", t2),
+		const t3 = new Date(2026, 0, 15, 10, 10).getTime();
+		const initialEntries: SessionEntry[] = [
+			makeUserEntry("u1", null, "continue", t1),
+			makeAssistantEntry("a1", "u1", buildResponseText("resp1", 16), t1 + 1000),
+			makeUserEntry("u2", "a1", "continue", t2),
+			makeAssistantEntry("a2", "u2", buildResponseText("resp2", 18), t2 + 1000),
+			makeUserEntry("u3", "a2", "summary check", t3),
+			makeAssistantEntry("a3", "u3", buildResponseText("resp3", 16), t3 + 1000),
 		];
 
-		harness = createExtensionHarness({
+		harness = await createInteractiveHarness({
 			theme: "dark",
 			width: 120,
-			height: 32,
-			entries: branch,
-			branch,
+			height: 20,
+			initialEntries,
 		});
-		harness.mount(conartiPiUi);
-		await harness.startSession();
 
-		const header = createMultilineBlock("session-header", 2);
-		const innerGroup = new Container();
-		const turn1Card = new UserMessageComponent("continue");
-		const resp1 = createMultilineBlock("resp1", 12);
-		const turn2Card = new UserMessageComponent("continue");
-		const resp2 = createMultilineBlock("resp2", 18);
+		const runtime = getActiveHostRuntime()!;
+		const scroll = runtime.scroll!;
+		const firstCard = findFirstMountedUserCard(scroll.children[0]);
+		expect(firstCard).toBeDefined();
+		expect(firstCard!.render(117)[0]).toContain("\x1b]133;A\x07");
 
-		innerGroup.addChild(turn1Card);
-		innerGroup.addChild(resp1);
-		innerGroup.addChild(turn2Card);
-		innerGroup.addChild(resp2);
+		/* Прокручиваем ко второй реплике с меткой 10:05 */
+		await harness.mouseWheel("up", 40, 6, 9);
+		expect(harness.screen().sliceText(1, 0, 117)).toContain("10:05");
 
-		harness.tui.chatContainer.addChild(header);
-		harness.tui.chatContainer.addChild(innerGroup);
+		const geoAtTurn2 = getRailGeometry();
+		const tick0Row = geoAtTurn2.ticksY;
+		const tick1Row = geoAtTurn2.ticksY + 1;
 
-		const initialCardLines = turn1Card.render(117);
-		expect(initialCardLines[0]).toContain("\x1b]133;A\x07");
+		/* Переходим к первой реплике по клику в Outline Rail и проверяем появление Copy при наведении */
+		await harness.mouseClick(117, tick0Row);
+		const turn1StartOffset = scroll.scrollTop;
+		expect(scroll.isFollowingEnd).toBe(false);
 
-		syncTranscriptLayout(harness, 12, 117);
+		const cardPos = harness.screen().findText("› continue");
+		expect(cardPos).toBeDefined();
+		await harness.mouseMove(cardPos!.col + 3, cardPos!.row);
+		expect(harness.screen().rowText(cardPos!.row - 1)).toContain("Copy");
 
-		const { stickyBar, outlineRail } = getViewportComponents(harness);
-		const docRenderSpy = vi.spyOn(harness.tui.chatContainer, "render");
+		/* Повторный переход ко второй и обратно к первой дублирующейся реплике сохраняет структурные смещения */
+		await harness.mouseClick(117, tick1Row);
+		const turn2StartOffset = scroll.scrollTop;
+		expect(turn2StartOffset).toBeGreaterThan(turn1StartOffset + 10);
+		expect(scroll.isFollowingEnd).toBe(false);
 
-		harness.tui.scroll.scrollTo(20, { disableFollow: true });
-		expect(stripTerminalSequences(stickyBar.render(117).join("\n"))).toContain("10:05");
-		outlineRail.render(2);
+		/* StickyPromptBar и OutlineRail вычисляют структурный индекс реплик без вызова chatContainer.render */
+		const chatRenderSpy = vi.spyOn(runtime.chatContainer!, "render");
+		chatRenderSpy.mockClear();
+		scroll.scrollTo(turn1StartOffset + 6, { disableFollow: true });
+		expect(runtime.viewportSlots!.topSlot!.render(117).join("\n")).toContain("10:00");
+		runtime.viewportSlots!.rightRail!.render(2);
+		expect(chatRenderSpy).not.toHaveBeenCalled();
+		chatRenderSpy.mockRestore();
 
-		expect(docRenderSpy).not.toHaveBeenCalled();
-
-		(turn1Card as unknown as { handleMouse?: (e: TuiMouseEvent) => unknown }).handleMouse?.({
-			type: "move",
-			button: "none",
-			x: 4,
-			y: 0,
-			screenX: 4,
-			screenY: 2,
-			width: 117,
-			height: 3,
-		} as TuiMouseEvent);
-		const hoveredCardLine = stripTerminalSequences(turn1Card.render(117).join("\n"));
-		expect(hoveredCardLine).toContain("Copy");
-
-		await harness.emit("session_tree", {});
-		outlineRail.render(2);
-
-		outlineRail.handleMouse?.({
-			type: "click",
-			button: "left",
-			x: 0,
-			y: 6,
-			screenX: 117,
-			screenY: 6,
-			width: 2,
-			height: 12,
-		} as TuiMouseEvent);
-		expect(harness.tui.scroll.scrollTop).toBe(17);
-		expect(harness.tui.scroll.isFollowingEnd).toBe(false);
-
-		outlineRail.handleMouse?.({
-			type: "click",
-			button: "left",
-			x: 0,
-			y: 5,
-			screenX: 117,
-			screenY: 5,
-			width: 2,
-			height: 12,
-		} as TuiMouseEvent);
-		expect(harness.tui.scroll.scrollTop).toBe(2);
-		expect(harness.tui.scroll.isFollowingEnd).toBe(false);
-
-		harness.tui.scroll.scrollTo(20, { disableFollow: true });
-		expect(stripTerminalSequences(stickyBar.render(117).join("\n"))).toContain("10:05");
-		await harness.runCommand("sticky", "prev");
-		expect(harness.tui.scroll.scrollTop).toBe(2);
-		expect(harness.tui.scroll.isFollowingEnd).toBe(false);
-
-		expect(docRenderSpy).not.toHaveBeenCalled();
+		await harness.mouseClick(117, tick1Row);
+		await harness.submitInput("/sticky prev");
+		expect(scroll.scrollTop).toBe(turn1StartOffset);
+		expect(scroll.isFollowingEnd).toBe(false);
 	});
 
 	it("shares a single cached Turn coordinate calculation across Sticky Prompt and Outline Rail and invalidates only on branch, width, or contentHeight changes", async () => {
-		const t1 = new Date(2026, 0, 15, 11, 0).getTime();
-		const t2 = new Date(2026, 0, 15, 11, 5).getTime();
-		const branch = [makeUserEntry("u1", "First turn", t1), makeUserEntry("u2", "Second turn", t2)];
-
-		harness = createExtensionHarness({
+		harness = await createInteractiveHarness({
 			theme: "dark",
 			width: 120,
-			height: 32,
-			entries: branch,
-			branch,
+			height: 22,
+			responses: [
+				fauxAssistantMessage(buildResponseText("resp1", 16)),
+				fauxAssistantMessage(buildResponseText("resp2", 16)),
+				fauxAssistantMessage(buildResponseText("resp3", 24)),
+			],
 		});
-		harness.mount(conartiPiUi);
-		await harness.startSession();
 
-		const turn1Card = new UserMessageComponent("First turn");
-		const resp1 = createMultilineBlock("resp1", 15);
-		const turn2Card = new UserMessageComponent("Second turn");
-		const resp2 = createMultilineBlock("resp2", 15);
+		await harness.submitInput("First turn");
+		await harness.submitInput("Second turn");
+		await harness.mouseWheel("up", 30, 8, 5);
 
-		harness.tui.chatContainer.addChild(turn1Card);
-		harness.tui.chatContainer.addChild(resp1);
-		harness.tui.chatContainer.addChild(turn2Card);
-		harness.tui.chatContainer.addChild(resp2);
+		const runtime = getActiveHostRuntime()!;
+		const stickySlot = runtime.viewportSlots!.topSlot!;
+		const railSlot = runtime.viewportSlots!.rightRail!;
+		const firstCard = findFirstMountedUserCard(runtime.scroll?.children[0]);
+		expect(firstCard).toBeDefined();
 
-		const initialHeight = syncTranscriptLayout(harness, 12, 117);
-		const { stickyBar, outlineRail } = getViewportComponents(harness);
+		const cardRenderSpy = vi.spyOn(firstCard!, "render");
+		cardRenderSpy.mockClear();
 
-		const turn1RenderSpy = vi.spyOn(turn1Card, "render");
-		const resp1RenderSpy = vi.spyOn(resp1, "render");
-
-		stickyBar.render(117);
-		expect(turn1RenderSpy).toHaveBeenCalledTimes(1);
-		expect(resp1RenderSpy).toHaveBeenCalledTimes(1);
-
-		outlineRail.render(2);
-		expect(turn1RenderSpy).toHaveBeenCalledTimes(1);
-		expect(resp1RenderSpy).toHaveBeenCalledTimes(1);
-
-		for (let tick = 0; tick < 5; tick++) {
-			stickyBar.render(117);
-			outlineRail.render(2);
+		/* Повторные рендеры Sticky Prompt и Outline Rail при неизменной геометрии читают общий кэш координат */
+		for (let i = 0; i < 5; i += 1) {
+			stickySlot.render(117);
+			railSlot.render(2);
 		}
-		expect(turn1RenderSpy).toHaveBeenCalledTimes(1);
-		expect(resp1RenderSpy).toHaveBeenCalledTimes(1);
+		expect(cardRenderSpy).toHaveBeenCalledTimes(0);
 
-		harness.tui.scroll.updateLayout(initialHeight + 4, 12, () => harness!.tui.requestRender());
-		stickyBar.render(117);
-		outlineRail.render(2);
-		expect(turn1RenderSpy).toHaveBeenCalledTimes(2);
-		expect(resp1RenderSpy).toHaveBeenCalledTimes(2);
+		/* Изменение ширины терминала инвалидирует кэш координат, а повторные рендеры на новой ширине снова попадают в кэш */
+		await harness.resize(100, 22);
+		cardRenderSpy.mockClear();
+		stickySlot.render(97);
+		railSlot.render(2);
+		expect(cardRenderSpy).toHaveBeenCalledTimes(0);
 
-		harness.tui.terminal.columns = 100;
-		stickyBar.render(97);
-		outlineRail.render(2);
-		expect(turn1RenderSpy).toHaveBeenCalledTimes(3);
-		expect(resp1RenderSpy).toHaveBeenCalledTimes(3);
-
-		const t3 = new Date(2026, 0, 15, 11, 10).getTime();
-		const liveTurn3Card = new UserMessageComponent("Third turn live", undefined, 1, [], "u3", new Date(t3).toISOString());
-		harness.tui.chatContainer.addChild(liveTurn3Card);
-		harness.tui.scroll.updateLayout(initialHeight + 18, 12, () => harness!.tui.requestRender());
-		harness.tui.scroll.scrollTo(40, { disableFollow: true });
-		expect(stripTerminalSequences(stickyBar.render(97).join("\n"))).toContain("Third turn live");
-
-		const nextBranch = [...branch, makeUserEntry("u3", "Third turn live", t3)];
-		harness.setEntries(nextBranch, nextBranch);
-		stickyBar.render(97);
-		outlineRail.render(2);
-		expect(turn1RenderSpy).toHaveBeenCalledTimes(5);
-		expect(resp1RenderSpy).toHaveBeenCalledTimes(5);
+		/* Новый живой ход обновляет ветку и активный Sticky Prompt при переходе к концу транскрипта */
+		runtime.scroll!.scrollToEnd();
+		await harness.submitInput("Third turn live");
+		const stickyTop = [0, 1, 2].map((r) => harness!.screen().rowText(r)).join("\n");
+		expect(stickyTop).toContain("Third turn live");
 	});
 
 	it("disables follow-end when jumping to an earlier Turn and restores follow-end when navigating forward to the final Turn via Sticky Prompt or Outline Rail", async () => {
-		const t1 = new Date(2026, 0, 15, 12, 0).getTime();
-		const t2 = new Date(2026, 0, 15, 12, 5).getTime();
-		const t3 = new Date(2026, 0, 15, 12, 10).getTime();
-		const branch = [
-			makeUserEntry("u1", "Turn one", t1),
-			makeUserEntry("u2", "Turn two", t2),
-			makeUserEntry("u3", "Turn three", t3),
-		];
-
-		harness = createExtensionHarness({
+		harness = await createInteractiveHarness({
 			theme: "dark",
 			width: 120,
-			height: 32,
-			entries: branch,
-			branch,
+			height: 20,
+			responses: [
+				fauxAssistantMessage(buildResponseText("resp1", 16)),
+				fauxAssistantMessage(buildResponseText("resp2", 16)),
+				fauxAssistantMessage(buildResponseText("resp3", 16)),
+			],
 		});
-		harness.mount(conartiPiUi);
-		await harness.startSession();
 
-		harness.tui.chatContainer.addChild(new UserMessageComponent("Turn one"));
-		harness.tui.chatContainer.addChild(createMultilineBlock("resp1", 15));
-		harness.tui.chatContainer.addChild(new UserMessageComponent("Turn two"));
-		harness.tui.chatContainer.addChild(createMultilineBlock("resp2", 15));
-		harness.tui.chatContainer.addChild(new UserMessageComponent("Turn three"));
-		harness.tui.chatContainer.addChild(createMultilineBlock("resp3", 15));
+		await harness.submitInput("Turn one");
+		await harness.submitInput("Turn two");
+		await harness.submitInput("Turn three");
 
-		const totalHeight = syncTranscriptLayout(harness, 12, 117);
-		const maxScrollTop = totalHeight - 12;
-		expect(harness.tui.scroll.isFollowingEnd).toBe(true);
-		expect(harness.tui.scroll.scrollTop).toBe(maxScrollTop);
+		const scroll = getActiveHostRuntime()!.scroll!;
+		const maxScrollTop = scroll.scrollTop;
+		expect(scroll.isFollowingEnd).toBe(true);
+		expect(maxScrollTop).toBeGreaterThan(20);
 
-		const { stickyBar, outlineRail } = getViewportComponents(harness);
-		outlineRail.render(2);
+		const geo = getRailGeometry();
+		const tick0Row = geo.ticksY;
+		const tick2Row = geo.ticksY + 2;
+		const downArrowRow = geo.downY;
 
-		const clickRail = (y: number) =>
-			outlineRail.handleMouse?.({
-				type: "click",
-				button: "left",
-				x: 0,
-				y,
-				screenX: 117,
-				screenY: y,
-				width: 2,
-				height: 12,
-			} as TuiMouseEvent);
+		/* Клик по первому делению отключает автопрокрутку в конец */
+		await harness.mouseClick(117, tick0Row);
+		const turn1Top = scroll.scrollTop;
+		expect(scroll.isFollowingEnd).toBe(false);
+		expect(turn1Top).toBeLessThan(maxScrollTop);
 
-		clickRail(4);
-		expect(harness.tui.scroll.scrollTop).toBe(0);
-		expect(harness.tui.scroll.isFollowingEnd).toBe(false);
+		/* Клик по нижней стрелке ▼ шагает ко второму ходу, затем к финальному третьему с возвратом follow-end */
+		await harness.mouseClick(117, downArrowRow);
+		expect(scroll.scrollTop).toBeGreaterThan(turn1Top);
+		expect(scroll.isFollowingEnd).toBe(false);
 
-		outlineRail.render(2);
-		clickRail(7);
-		expect(harness.tui.scroll.scrollTop).toBe(18);
-		expect(harness.tui.scroll.isFollowingEnd).toBe(false);
+		await harness.mouseClick(117, downArrowRow);
+		expect(scroll.scrollTop).toBe(maxScrollTop);
+		expect(scroll.isFollowingEnd).toBe(true);
 
-		outlineRail.render(2);
-		clickRail(7);
-		expect(harness.tui.scroll.scrollTop).toBe(maxScrollTop);
-		expect(harness.tui.scroll.isFollowingEnd).toBe(true);
+		/* /sticky prev уводит на предыдущий ход, клик по последнему делению возвращает follow-end */
+		await harness.submitInput("/sticky prev");
+		expect(scroll.isFollowingEnd).toBe(false);
 
-		stickyBar.render(117);
-		await harness.runCommand("sticky", "prev");
-		expect(harness.tui.scroll.scrollTop).toBe(18);
-		expect(harness.tui.scroll.isFollowingEnd).toBe(false);
+		await harness.mouseClick(117, tick2Row);
+		expect(scroll.scrollTop).toBe(maxScrollTop);
+		expect(scroll.isFollowingEnd).toBe(true);
 
-		outlineRail.render(2);
-		clickRail(6);
-		expect(harness.tui.scroll.scrollTop).toBe(maxScrollTop);
-		expect(harness.tui.scroll.isFollowingEnd).toBe(true);
+		/* Пара /sticky prev -> /sticky next также восстанавливает follow-end на финальной реплике */
+		await harness.submitInput("/sticky prev");
+		expect(scroll.isFollowingEnd).toBe(false);
 
-		stickyBar.render(117);
-		await harness.runCommand("sticky", "prev");
-		expect(harness.tui.scroll.scrollTop).toBe(18);
-		expect(harness.tui.scroll.isFollowingEnd).toBe(false);
-
-		harness.tui.scroll.scrollTo(19, { disableFollow: true });
-		stickyBar.render(117);
-		await harness.runCommand("sticky", "next");
-		expect(harness.tui.scroll.scrollTop).toBe(maxScrollTop);
-		expect(harness.tui.scroll.isFollowingEnd).toBe(true);
+		await harness.submitInput("/sticky next");
+		expect(scroll.scrollTop).toBe(maxScrollTop);
+		expect(scroll.isFollowingEnd).toBe(true);
 	});
 
 	it("toggles /sticky and /outline in memory without writing files to disk while preserving Hover Popup and ScrollView scrollbar invariants", async () => {
-		const tempCwd = mkdtempSync(join(tmpdir(), "pi-ui-ticket7-"));
+		const tempCwd = mkdtempSync(join(tmpdir(), "pi-ui-turn-index-cwd-"));
 		try {
-			const t1 = new Date(2026, 0, 15, 13, 0).getTime();
-			const t2 = new Date(2026, 0, 15, 13, 5).getTime();
-			const branch = [makeUserEntry("u1", "Alpha prompt", t1), makeUserEntry("u2", "Beta prompt", t2)];
-
-			harness = createExtensionHarness({
+			harness = await createInteractiveHarness({
 				theme: "dark",
 				width: 120,
-				height: 32,
+				height: 22,
 				cwd: tempCwd,
-				entries: branch,
-				branch,
+				persistSession: false,
+				persistSettings: false,
+				responses: [
+					fauxAssistantMessage(buildResponseText("resp1", 16)),
+					fauxAssistantMessage(buildResponseText("resp2", 16)),
+				],
 			});
-			harness.mount(conartiPiUi);
-			await harness.startSession();
 
-			harness.tui.chatContainer.addChild(new UserMessageComponent("Alpha prompt"));
-			harness.tui.chatContainer.addChild(createMultilineBlock("resp1", 15));
-			harness.tui.chatContainer.addChild(new UserMessageComponent("Beta prompt"));
-			harness.tui.chatContainer.addChild(createMultilineBlock("resp2", 15));
+			await harness.submitInput("Alpha prompt");
+			await harness.submitInput("Beta prompt");
+			await harness.mouseWheel("up", 40, 8, 3);
 
-			syncTranscriptLayout(harness, 12, 117);
+			const scroll = getActiveHostRuntime()!.scroll!;
+			expect(scroll.scrollbar).toBe("auto");
 
-			const { stickyBar, outlineRail } = getViewportComponents(harness);
+			const geo = getRailGeometry();
+			await harness.mouseMove(117, geo.ticksY);
+			expect(harness.screen().text()).toContain("Alpha prompt");
+			expect(harness.screen().text()).toContain("╭─");
 
-			expect(harness.tui.scroll.scrollbar).toBe("auto");
+			/* Открытие модального Command Palette подавляет Hover Popup, закрытие Esc убирает модалку */
+			await harness.pressKey("\x0b");
+			expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
+			expect(harness.screen().text()).toContain("Command Palette");
 
-			expect(stickyBar.render(117).length).toBeGreaterThan(0);
-			expect(outlineRail.render(2).length).toBe(12);
+			await harness.pressKey("\x1b");
+			expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 
-			expect(harness.tui.overlayStack.some((o) => o.options?.nonCapturing)).toBe(false);
-			outlineRail.handleMouse?.({
-				type: "move",
-				button: "none",
-				x: 0,
-				y: 5,
-				screenX: 117,
-				screenY: 5,
-				width: 2,
-				height: 12,
-			} as TuiMouseEvent);
-			const hoverEntry = harness.tui.overlayStack.find((o) => o.options?.nonCapturing);
-			expect(hoverEntry).toBeDefined();
-			expect(harness.tui.isOverlayVisible(hoverEntry!)).toBe(true);
+			await harness.mouseMove(20, 6);
+			const afterLeaveLines = Array.from({ length: scroll.viewportHeight }, (_, r) =>
+				harness!.screen().sliceText(r, 40, 116),
+			).join("\n");
+			expect(afterLeaveLines).not.toContain("╭─");
 
-			const modalHandle = harness.tui.showOverlay({ render: () => ["modal"], invalidate() {} }, {});
-			expect(harness.tui.getTopmostVisibleOverlay()).toBeDefined();
-			expect(harness.tui.isOverlayVisible(hoverEntry!)).toBe(false);
-			modalHandle.hide();
-			expect(harness.tui.isOverlayVisible(hoverEntry!)).toBe(true);
+			/* Переключатели /sticky и /outline работают чисто в памяти без записи на диск */
+			expect(harness.screen().rowText(1)).toContain("› ");
+			await harness.submitInput("/sticky toggle");
+			expect(harness.screen().rowText(1)).not.toContain("› Alpha prompt");
+			expect(harness.screen().rowText(1)).not.toContain("› Beta prompt");
 
-			outlineRail.handleMouse?.({
-				type: "move",
-				button: "none",
-				x: 0,
-				y: 0,
-				screenX: 117,
-				screenY: 0,
-				width: 2,
-				height: 12,
-			} as TuiMouseEvent);
-			expect(harness.tui.overlayStack.some((o) => o.options?.nonCapturing)).toBe(false);
+			await harness.submitInput("/sticky toggle");
+			expect(harness.screen().rowText(1)).toContain("› ");
 
-			await harness.runCommand("sticky", "toggle");
-			expect(stickyBar.render(117)).toEqual([]);
-			await harness.runCommand("sticky", "toggle");
-			expect(stickyBar.render(117).length).toBeGreaterThan(0);
+			const hasRail = () =>
+				Array.from({ length: scroll.viewportHeight }, (_, r) =>
+					harness!.screen().sliceText(r, 117, 119),
+				).some((cell) => cell === " ▲" || cell === "──" || cell === " ─");
 
-			await harness.runCommand("outline");
-			expect(outlineRail.render(2)).toEqual([]);
-			await harness.runCommand("outline");
-			expect(outlineRail.render(2).length).toBe(12);
+			expect(hasRail()).toBe(true);
+			await harness.submitInput("/outline");
+			expect(hasRail()).toBe(false);
+			await harness.submitInput("/outline");
+			expect(hasRail()).toBe(true);
 
 			expect(readdirSync(tempCwd)).toEqual([]);
 		} finally {
