@@ -1,19 +1,23 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { UserMessageComponent } from "@earendil-works/pi-coding-agent";
-import conartiPiUi from "../src/index.ts";
+import { getActiveHostRuntime } from "../src/shared/host-runtime.ts";
 import {
 	captureTerminalScreen,
-	createExtensionHarness,
+	createInteractiveHarness,
+	fauxAssistantMessage,
 	parseTerminalFrame,
-	type ExtensionHarness,
+	type InteractiveHarness,
 } from "./harness/index.ts";
 
+function buildLines(prefix: string, count: number): string {
+	return Array.from({ length: count }, (_, idx) => `${prefix} ${idx + 1}`).join("\n");
+}
+
 describe("headless terminal screen buffer snapshot", () => {
-	let harness: ExtensionHarness | undefined;
+	let harness: InteractiveHarness | undefined;
 
 	afterEach(async () => {
 		if (harness) {
-			await harness.shutdownSession();
+			await harness.dispose();
 			harness = undefined;
 		}
 	});
@@ -57,65 +61,51 @@ describe("headless terminal screen buffer snapshot", () => {
 		expect(screen.cellAt(0, 11)?.inverse).toBe(false);
 	});
 
-	it("verifies composited Sticky Prompt, Outline Rail, rightmost scrollbar, and selection masking on cell grid", async () => {
-		const t1 = new Date(2026, 3, 19, 10, 15).getTime();
-		const t2 = new Date(2026, 3, 19, 10, 30).getTime();
-		const branch = [
-			{ type: "message", id: "u1", message: { role: "user", content: "First pinned prompt", timestamp: t1 } },
-			{ type: "message", id: "u2", message: { role: "user", content: "Second prompt", timestamp: t2 } },
-		];
-
-		harness = createExtensionHarness({
+	it("verifies composited Sticky Prompt, Outline Rail, rightmost scrollbar, and selection masking on cell grid in real InteractiveMode", async () => {
+		harness = await createInteractiveHarness({
 			theme: "dark",
 			width: 96,
-			height: 16,
-			entries: branch,
-			branch,
-		});
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-
-		harness.tui.chatContainer.addChild(
-			new UserMessageComponent("First pinned prompt", undefined, 1, [], "u1", new Date(t1).toISOString()),
-		);
-		harness.tui.chatContainer.addChild({
-			render: () => Array.from({ length: 14 }, (_, idx) => `selectable transcript line ${idx + 1}`),
-			invalidate() {},
-		});
-		harness.tui.chatContainer.addChild(
-			new UserMessageComponent("Second prompt", undefined, 1, [], "u2", new Date(t2).toISOString()),
-		);
-		harness.tui.chatContainer.addChild({
-			render: () => Array.from({ length: 12 }, (_, idx) => `tail line ${idx + 1}`),
-			invalidate() {},
+			height: 22,
+			responses: [
+				fauxAssistantMessage(buildLines("selectable transcript line", 16)),
+				fauxAssistantMessage(buildLines("tail line", 14)),
+			],
 		});
 
-		harness.tui.renderViewport(96, 16);
-		harness.tui.scroll.scrollTo(6, { disableFollow: true });
-		harness.tui.renderViewport(96, 16);
+		await harness.submitInput("First pinned prompt");
+		await harness.submitInput("Second prompt");
 
-		/* Выделяем строки транскрипта и проверяем, что выделение не инвертирует Sticky Prompt и Outline Rail */
-		harness.tui.pressMouse(4, 5, "left");
-		harness.tui.dragMouse(28, 7, "left");
-		harness.tui.releaseMouse(28, 7, "left");
+		/* Прокручиваем вверх к середине первого обмена через реальное колесо мыши SGR */
+		await harness.mouseWheel("up", 20, 8, 5);
 
-		const screen = captureTerminalScreen(harness.tui, 96, 16);
+		const preSelect = harness.screen();
+		const targetPos = preSelect.findText("selectable transcript line");
+		expect(targetPos).toBeDefined();
+		expect(targetPos!.row).toBeGreaterThanOrEqual(3);
+
+		/* Выделяем строки транскрипта вплоть до колонки Outline Rail и проверяем маскировку хрома */
+		await harness.mouseDrag(targetPos!.col, targetPos!.row, 94, targetPos!.row + 1, { steps: 3 });
+
+		const screen = captureTerminalScreen(harness);
+		const viewportRows = getActiveHostRuntime()?.scroll?.viewportHeight ?? 16;
 
 		expect(screen.sliceText(1, 0, 40)).toContain("› First pinned prompt");
 		expect(screen.cellAt(1, 2)?.bg.kind).toBe("rgb");
 
-		const hasRightmostScrollbar = Array.from({ length: 16 }, (_, r) => screen.cellAt(r, 95)?.char).some(
-			(ch) => ch === "┃" || ch === "│" || ch === "█",
-		);
+		const hasRightmostScrollbar = Array.from(
+			{ length: viewportRows },
+			(_, r) => screen.cellAt(r, 95)?.char,
+		).some((ch) => ch === "┃" || ch === "│" || ch === "█");
 		expect(hasRightmostScrollbar).toBe(true);
 
-		const railSlices = Array.from({ length: 16 }, (_, r) => screen.sliceText(r, 93, 95));
+		const railSlices = Array.from({ length: viewportRows }, (_, r) => screen.sliceText(r, 93, 95));
 		expect(railSlices.some((s) => s === " ▲")).toBe(true);
 		expect(railSlices.some((s) => s === "──")).toBe(true);
 
-		const transcriptSelected = Array.from({ length: 30 }, (_, c) => screen.cellAt(6, c)?.inverse === true).some(
-			Boolean,
-		);
+		const transcriptSelected = Array.from(
+			{ length: 40 },
+			(_, c) => screen.cellAt(targetPos!.row, c)?.inverse === true,
+		).some(Boolean);
 		expect(transcriptSelected).toBe(true);
 
 		for (let r = 0; r < 3; r += 1) {
@@ -123,7 +113,7 @@ describe("headless terminal screen buffer snapshot", () => {
 				expect(screen.cellAt(r, c)?.inverse).toBe(false);
 			}
 		}
-		for (let r = 0; r < 16; r += 1) {
+		for (let r = 0; r < viewportRows; r += 1) {
 			expect(screen.cellAt(r, 93)?.inverse).toBe(false);
 			expect(screen.cellAt(r, 94)?.inverse).toBe(false);
 		}

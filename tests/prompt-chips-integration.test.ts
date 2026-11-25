@@ -1,13 +1,22 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { UserMessageComponent } from "@earendil-works/pi-coding-agent";
-import { Spacer, stripTerminalSequences, Text, visibleWidth } from "@earendil-works/pi-tui";
+import { pathToFileURL } from "node:url";
+import { defineTool } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import type { PiUiComposerEditor } from "../src/features/chrome/composer.ts";
-import conartiPiUi from "../src/index.ts";
-import { setHostClipboardProvider, type HostClipboardProvider } from "../src/shared/host-runtime.ts";
-import { createExtensionHarness, type ExtensionHarness } from "./harness/index.ts";
+import { getActiveComposerEditor } from "../src/features/chrome/composer.ts";
+import type { OutlineRailComponent } from "../src/features/outline-rail/rail-view.ts";
+import { getActiveHostRuntime, type HostClipboardProvider } from "../src/shared/host-runtime.ts";
+import { hasBlockingModalOverlay } from "../src/shared/modal-card.ts";
+import {
+	createInteractiveHarness,
+	fauxAssistantMessage,
+	fauxToolCall,
+	type InteractiveHarness,
+	type SessionEntry,
+} from "./harness/index.ts";
 
 function extractAllAnsiRgbs(lines: readonly string[]): Array<[number, number, number]> {
 	const out: Array<[number, number, number]> = [];
@@ -20,9 +29,9 @@ function extractAllAnsiRgbs(lines: readonly string[]): Array<[number, number, nu
 	return out;
 }
 
-/* Валидный 2x3 PNG (71 байт) с корректным IHDR для проверки чтения размеров и сигнатуры */
+/* Валидный 2x3 PNG (75 байт) с корректными CRC32 и IDAT для декодера Photon в AgentSession */
 const TINY_PNG_BASE64 =
-	"iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAYAAAC56t6BAAAADklEQVR4nGP4z8DAwMAAAwkB/7b5L2EAAAAASUVORK5CYII=";
+	"iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAIAAAA2iEnWAAAAEklEQVR4nGOwbvpm3fSNAYUCAGbACjPC8yHSAAAAAElFTkSuQmCC";
 const TINY_PNG_BYTES = Uint8Array.from(Buffer.from(TINY_PNG_BASE64, "base64"));
 
 function createValidBmpBytes(widthPx = 2, heightPx = 3): Uint8Array {
@@ -39,8 +48,8 @@ function createValidBmpBytes(widthPx = 2, heightPx = 3): Uint8Array {
 	buf.writeUInt16LE(1, 26);
 	buf.writeUInt16LE(24, 28);
 	buf.writeUInt32LE(pixelBytes, 34);
-	for (let r = 0; r < heightPx; r++) {
-		for (let c = 0; c < widthPx; c++) {
+	for (let r = 0; r < heightPx; r += 1) {
+		for (let c = 0; c < widthPx; c += 1) {
 			const off = 54 + r * rowStride + c * 3;
 			buf[off] = 0xd8;
 			buf[off + 1] = 0x82;
@@ -50,21 +59,63 @@ function createValidBmpBytes(widthPx = 2, heightPx = 3): Uint8Array {
 	return new Uint8Array(buf);
 }
 
-async function flushAsyncPaste(): Promise<void> {
-	for (let i = 0; i < 6; i++) {
+async function flushClipboardAction(harness: InteractiveHarness): Promise<void> {
+	for (let i = 0; i < 6; i += 1) {
 		await Promise.resolve();
 	}
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await new Promise<void>((resolve) => setTimeout(resolve, 0));
+	harness.flushFrame();
 }
 
-describe("Prompt Chips end-to-end via ExtensionHarness + HostRuntime", () => {
-	let harness: ExtensionHarness | undefined;
+function findComposerTopRow(harness: InteractiveHarness): number {
+	const screen = harness.screen();
+	for (let r = screen.height - 1; r >= 0; r -= 1) {
+		const row = screen.rowText(r);
+		if (row.startsWith("╭") && row.endsWith("╮")) {
+			return r;
+		}
+	}
+	throw new Error("Expected rounded composer top border on terminal screen");
+}
+
+function makeAssistantEntry(
+	id: string,
+	parentId: string | null,
+	text: string,
+	timestampMs: number,
+): SessionEntry {
+	return {
+		type: "message",
+		id,
+		parentId,
+		timestamp: new Date(timestampMs).toISOString(),
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text }],
+			api: "faux-responses",
+			provider: "faux",
+			model: "faux-1",
+			usage: {
+				input: 10,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 20,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: timestampMs,
+		},
+	};
+}
+
+describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
+	let harness: InteractiveHarness | undefined;
 	let tempDir: string | undefined;
 
 	afterEach(async () => {
-		setHostClipboardProvider(undefined);
 		if (harness) {
-			await harness.shutdownSession();
+			await harness.dispose();
 			harness = undefined;
 		}
 		if (tempDir) {
@@ -77,143 +128,130 @@ describe("Prompt Chips end-to-end via ExtensionHarness + HostRuntime", () => {
 		tempDir = mkdtempSync(join(tmpdir(), "pi-ui-chip-test-"));
 		const copiedFileImg = join(tempDir, "copied-from-finder.png");
 		const spacedDir = join(tempDir, "with space");
-		rmSync(spacedDir, { recursive: true, force: true });
-		const { mkdirSync } = await import("node:fs");
 		mkdirSync(spacedDir, { recursive: true });
 		const pastedPathImg = join(spacedDir, "dragged screen.png");
 		writeFileSync(copiedFileImg, TINY_PNG_BYTES);
 		writeFileSync(pastedPathImg, TINY_PNG_BYTES);
 
-		let clipboardState: HostClipboardProvider = {
-			readFilePaths: async () => null,
-			readImage: async () => ({
-				bytes: TINY_PNG_BYTES,
-				mimeType: "image/png",
-			}),
-			readText: async () => null,
-		};
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 96,
+			height: 28,
+			clipboard: {
+				image: { bytes: TINY_PNG_BYTES, mimeType: "image/png" },
+				filePaths: null,
+				text: null,
+			},
+		});
 
-		const proxyClipboard: HostClipboardProvider = {
-			readFilePaths: () => clipboardState.readFilePaths?.() ?? Promise.resolve(null),
-			readImage: () => clipboardState.readImage?.() ?? Promise.resolve(null),
-			readText: () => clipboardState.readText?.() ?? Promise.resolve(null),
-		};
+		const editor = getActiveComposerEditor()!;
 
-		setHostClipboardProvider(proxyClipboard);
-		harness = createExtensionHarness({ theme: "dark", width: 96, height: 28 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-
-		const editor = harness.editor as PiUiComposerEditor;
-
-		await harness.sendTerminalInput("\x16");
-		await flushAsyncPaste();
+		await harness.pressKey("\x16");
+		await flushClipboardAction(harness);
 		expect(editor.getText()).toBe("[🖼 Image #1]");
 		expect(editor.getText()).not.toContain("/tmp");
 
-		await harness.sendTerminalInput(" ");
-		await harness.sendTerminalInput("\x1b[118;9u");
-		await flushAsyncPaste();
+		await harness.typeText(" ");
+		await harness.pressKey("\x1b[118;9u");
+		await flushClipboardAction(harness);
 		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2]");
 
-		await harness.sendTerminalInput(" ");
-		await harness.sendTerminalInput("\x1b[1084;9u");
-		await flushAsyncPaste();
-		await harness.sendTerminalInput(" ");
-		await harness.sendTerminalInput("\x1b[27;9;1084~");
-		await flushAsyncPaste();
-		await harness.sendTerminalInput(" ");
-		await harness.sendTerminalInput("\x1b[1084;5u");
-		await flushAsyncPaste();
+		await harness.typeText(" ");
+		await harness.pressKey("\x1b[1084;9u");
+		await flushClipboardAction(harness);
+		await harness.typeText(" ");
+		await harness.pressKey("\x1b[27;9;1084~");
+		await flushClipboardAction(harness);
+		await harness.typeText(" ");
+		await harness.pressKey("\x1b[1084;5u");
+		await flushClipboardAction(harness);
 		expect(editor.getText()).toBe(
 			"[🖼 Image #1] [🖼 Image #2] [🖼 Image #3] [🖼 Image #4] [🖼 Image #5]",
 		);
 
-		harness.ctx.ui.setEditorText("");
-		await harness.sendTerminalInput("\x1b[200~\x1b[201~");
-		await flushAsyncPaste();
+		editor.setText("");
+		await harness.sendInput("\x1b[200~\x1b[201~");
+		await flushClipboardAction(harness);
 		expect(editor.getText()).toBe("[🖼 Image #1]");
 
-		await harness.sendTerminalInput(" ");
-		await harness.sendTerminalInput("\x1b[200~");
-		await harness.sendTerminalInput("\x1b[201~");
-		await flushAsyncPaste();
+		await harness.typeText(" ");
+		await harness.sendInput("\x1b[200~");
+		await harness.sendInput("\x1b[201~");
+		await flushClipboardAction(harness);
 		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2]");
 
-		clipboardState = {
-			readFilePaths: async () => null,
-			readImage: async () => null,
-			readText: async () => "should-not-paste-on-empty-bracket",
-		};
-		await harness.sendTerminalInput("\x1b[200~\x1b[201~");
-		await flushAsyncPaste();
+		/* Пустая bracketed paste при текстовом буфере без картинки не вставляет текст повторно */
+		harness.setClipboard({
+			image: null,
+			filePaths: null,
+			text: "should-not-paste-on-empty-bracket",
+		});
+		await harness.sendInput("\x1b[200~\x1b[201~");
+		await flushClipboardAction(harness);
 		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2]");
 
-		harness.ctx.ui.setEditorText("");
-		clipboardState = {
-			readFilePaths: async () => [copiedFileImg],
-			readImage: async () => null,
-			readText: async () => null,
-		};
-		await harness.sendTerminalInput("\x1b[27;9;118~");
-		await flushAsyncPaste();
+		editor.setText("");
+		harness.setClipboard({
+			filePaths: [copiedFileImg],
+			image: null,
+			text: null,
+		});
+		await harness.pressKey("\x1b[27;9;118~");
+		await flushClipboardAction(harness);
 		expect(editor.getText()).toBe("[🖼 Image #1]");
 		expect(editor.getText()).not.toContain("copied-from-finder.png");
 
 		const escapedPath = pastedPathImg.replace(/ /g, "\\ ");
-		await harness.sendTerminalInput(" ");
-		await harness.sendTerminalInput(`\x1b[200~${escapedPath}\x1b[201~`);
-		await flushAsyncPaste();
+		await harness.typeText(" ");
+		await harness.paste(escapedPath, true);
+		await flushClipboardAction(harness);
 		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2]");
 
-		const renderedPlain = editor
-			.render(96)
-			.map((l) => stripTerminalSequences(l))
-			.join("\n");
-		expect(renderedPlain).toContain("[🖼 Image #1] [🖼 Image #2]");
-		expect(renderedPlain).not.toContain(tempDir);
+		const screenText = harness.screen().text();
+		expect(screenText).toContain("[🖼 Image #1] [🖼 Image #2]");
+		expect(screenText).not.toContain(tempDir);
 	});
 
 	it("converts >=4 line or >300 char text pastes into styled blue-slate pills while keeping <=3 line pastes editable, deletes/renumbers atomically on Backspace/Delete, and re-links on tui.editor.undo without hardcoding Ctrl+Z / Cmd+Z", async () => {
-		let clipboardImageBytes: Uint8Array | null = TINY_PNG_BYTES;
-		let clipboardTextValue: string | null = null;
-
-		setHostClipboardProvider({
-			readFilePaths: async () => null,
-			readImage: async () =>
-				clipboardImageBytes ? { bytes: clipboardImageBytes, mimeType: "image/png" } : null,
-			readText: async () => clipboardTextValue,
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 92,
+			height: 28,
+			clipboard: {
+				image: { bytes: TINY_PNG_BYTES, mimeType: "image/png" },
+				text: null,
+				filePaths: null,
+			},
+			responses: [fauxAssistantMessage("Processed expanded prompt.")],
 		});
 
-		harness = createExtensionHarness({ theme: "dark", width: 92, height: 28 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
+		const editor = getActiveComposerEditor()!;
 
-		const editor = harness.editor as PiUiComposerEditor;
-
-		await harness.sendTerminalInput("\x1b[200~row one\nrow two\nrow three\x1b[201~");
+		await harness.paste("row one\nrow two\nrow three", true);
 		expect(editor.getText()).toBe("row one\nrow two\nrow three");
 
-		harness.ctx.ui.setEditorText("");
-		await harness.sendTerminalInput("\x16");
-		await flushAsyncPaste();
+		editor.setText("");
+		await harness.pressKey("\x16");
+		await flushClipboardAction(harness);
 		expect(editor.getText()).toBe("[🖼 Image #1]");
 
-		await harness.sendTerminalInput(" ");
-		const fourLineSnippet = "fn main() {\n  let x = 1;\n  println!(\"{x}\");\n}";
-		await harness.sendTerminalInput(`\x1b[200~${fourLineSnippet}\x1b[201~`);
+		await harness.typeText(" ");
+		const fourLineSnippet = 'fn main() {\n  let x = 1;\n  println!("{x}");\n}';
+		await harness.paste(fourLineSnippet, true);
 		expect(editor.getText()).toBe("[🖼 Image #1] [📋 Pasted #2 · 4 lines]");
 
-		clipboardImageBytes = null;
-		clipboardTextValue = "L".repeat(312);
-		await harness.sendTerminalInput(" ");
-		await harness.sendTerminalInput("\x1b[118;9u");
-		await flushAsyncPaste();
+		harness.setClipboard({
+			image: null,
+			text: "L".repeat(312),
+		});
+		await harness.typeText(" ");
+		await harness.pressKey("\x1b[118;9u");
+		await flushClipboardAction(harness);
 		expect(editor.getText()).toBe(
 			"[🖼 Image #1] [📋 Pasted #2 · 4 lines] [📋 Pasted #3 · 312 chars]",
 		);
 
-		await harness.sendTerminalInput("\x1b[D");
+		await harness.pressKey("\x1b[D");
 		for (const mode of ["dark", "light"] as const) {
 			harness.setTheme(mode);
 			const lines = editor.render(92);
@@ -228,89 +266,82 @@ describe("Prompt Chips end-to-end via ExtensionHarness + HostRuntime", () => {
 				expect(r > g && b > g, `purple rgb(${r},${g},${b}) in ${mode}`).toBe(false);
 			}
 		}
+		harness.setTheme("dark");
 
-		await harness.sendTerminalInput("\x01");
-		await harness.sendTerminalInput("\x1b[3~");
+		/* Home + Delete удаляет первый чип и перенумеровывает оставшиеся */
+		await harness.pressKey("\x01");
+		await harness.pressKey("\x1b[3~");
 		expect(editor.getText()).toBe(" [📋 Pasted #1 · 4 lines] [📋 Pasted #2 · 312 chars]");
 
-		await harness.sendTerminalInput("\x1b[1103;9u");
-		await harness.sendTerminalInput("\x1a");
+		/* Super+Z и Ctrl+Z (suspend) не вызывают undo, тогда как штатные Ctrl+- и Ctrl+_ откатывают и перепривязывают чипы */
+		await harness.pressKey("\x1b[1103;9u");
 		expect(editor.getText()).toBe(" [📋 Pasted #1 · 4 lines] [📋 Pasted #2 · 312 chars]");
 
-		await harness.sendTerminalInput("\x1b[45;5u");
+		await harness.pressKey("\x1b[45;5u");
 		expect(editor.getText()).toBe(
 			"[🖼 Image #1] [📋 Pasted #2 · 4 lines] [📋 Pasted #3 · 312 chars]",
 		);
 
-		await harness.sendTerminalInput("\x05");
-		await harness.sendTerminalInput("\x7f");
+		await harness.pressKey("\x05");
+		await harness.pressKey("\x7f");
 		expect(editor.getText()).toBe("[🖼 Image #1] [📋 Pasted #2 · 4 lines] ");
 
-		await harness.sendTerminalInput("\x1f");
+		await harness.pressKey("\x1f");
 		expect(editor.getText()).toBe(
 			"[🖼 Image #1] [📋 Pasted #2 · 4 lines] [📋 Pasted #3 · 312 chars]",
 		);
 
-		const inputResults = await harness.emit("input", {
-			type: "input",
-			text: editor.getText(),
-			source: "interactive",
-		});
-		const transformed = inputResults.find(
-			(r: any) => r && typeof r === "object" && r.action === "transform",
-		) as { action: "transform"; text: string; images?: Array<{ type: string; data: string; mimeType: string }> } | undefined;
+		/* Отправка через реальный InteractiveMode разворачивает текст и прикрепляет изображение в запрос к модели */
+		await harness.submitDraft();
+		expect(harness.calls).toHaveLength(1);
+		const sentUserMsg = harness.calls[0]!.messages.find((m) => m.role === "user");
+		expect(sentUserMsg).toBeDefined();
+		const contentBlocks = Array.isArray(sentUserMsg!.content) ? sentUserMsg!.content : [];
+		const textBlock = contentBlocks.find((b) => b.type === "text") as { text: string } | undefined;
+		const imgBlock = contentBlocks.find((b) => b.type === "image") as
+			| { data: string; mimeType: string }
+			| undefined;
 
-		expect(transformed).toBeDefined();
-		expect(transformed?.images).toHaveLength(1);
-		expect(transformed?.images?.[0]?.data).toBe(TINY_PNG_BASE64);
-		expect(transformed?.text).toContain("[Image #1: ");
-		expect(transformed?.text).toContain(fourLineSnippet);
-		expect(transformed?.text).toContain("L".repeat(312));
+		expect(imgBlock).toEqual({
+			type: "image",
+			data: TINY_PNG_BASE64,
+			mimeType: "image/png",
+		});
+		expect(textBlock?.text).toContain("[Image #1: ");
+		expect(textBlock?.text).toContain(fourLineSnippet);
+		expect(textBlock?.text).toContain("L".repeat(312));
 	});
 
-	it("lazily mounts a nonCapturing Hover Popup preview on adjacent/on-chip caret or mouse hover, hides it via handle.hide() on leave, and guards against blocking Modal Card overlays", async () => {
-		setHostClipboardProvider({
-			readFilePaths: async () => null,
-			readImage: async () => ({
-				bytes: TINY_PNG_BYTES,
-				mimeType: "image/png",
-				fileName: "architecture-shot.png",
-			}),
-			readText: async () => null,
+	it("lazily mounts a nonCapturing Hover Popup preview on adjacent/on-chip caret or mouse hover, hides it on leave, and guards against blocking Modal Card overlays", async () => {
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 100,
+			height: 28,
+			clipboard: {
+				image: {
+					bytes: TINY_PNG_BYTES,
+					mimeType: "image/png",
+					fileName: "architecture-shot.png",
+				},
+			},
 		});
 
-		harness = createExtensionHarness({ theme: "dark", width: 100, height: 28 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
+		expect(harness.screen().text()).not.toContain("architecture-shot.png");
 
-		const editor = harness.editor as PiUiComposerEditor;
-		harness.tui.dock.addChild(editor);
-		harness.tui.renderViewport(100, 28);
+		await harness.pressKey("\x16");
+		await flushClipboardAction(harness);
 
-		const getVisibleHoverOverlays = () =>
-			harness!.tui.overlayStack.filter(
-				(e) => e.options?.nonCapturing === true && harness!.tui.isOverlayVisible(e),
-			);
+		const afterImageText = harness.screen().text();
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
+		expect(afterImageText).toContain("architecture-shot.png");
+		expect(afterImageText).toContain("2×3");
+		expect(afterImageText).toContain("75B");
+		expect(afterImageText).toContain("Path: ");
 
-		expect(getVisibleHoverOverlays()).toHaveLength(0);
+		await harness.typeText(" notes");
+		expect(harness.screen().text()).not.toContain("architecture-shot.png");
 
-		await harness.sendTerminalInput("\x16");
-		await flushAsyncPaste();
-
-		const afterImageOverlays = getVisibleHoverOverlays();
-		expect(afterImageOverlays).toHaveLength(1);
-		const imgPopupText = stripTerminalSequences(
-			afterImageOverlays[0]!.component.render(52).join("\n"),
-		);
-		expect(imgPopupText).toContain("architecture-shot.png");
-		expect(imgPopupText).toContain("2×3");
-		expect(imgPopupText).toContain("71B");
-		expect(imgPopupText).toContain("Path: ");
-
-		await harness.sendTerminalInput(" notes");
-		expect(getVisibleHoverOverlays()).toHaveLength(0);
-
-		await harness.sendTerminalInput(" ");
+		await harness.typeText(" ");
 		const sixLinePaste = [
 			"SELECT id, email",
 			"FROM users",
@@ -319,86 +350,90 @@ describe("Prompt Chips end-to-end via ExtensionHarness + HostRuntime", () => {
 			"LIMIT 25",
 			"OFFSET 0;",
 		].join("\n");
-		await harness.sendTerminalInput(`\x1b[200~${sixLinePaste}\x1b[201~`);
+		await harness.paste(sixLinePaste, true);
 
-		const afterPasteOverlays = getVisibleHoverOverlays();
-		expect(afterPasteOverlays).toHaveLength(1);
-		const pastePopupText = stripTerminalSequences(
-			afterPasteOverlays[0]!.component.render(56).join("\n"),
-		);
-		expect(pastePopupText).toContain("Pasted #2 · 6 lines");
-		expect(pastePopupText).toContain("SELECT id, email");
-		expect(pastePopupText).toContain("WHERE active = true");
+		const afterPasteText = harness.screen().text();
+		expect(afterPasteText).toContain("Pasted #2 · 6 lines");
+		expect(afterPasteText).toContain("SELECT id, email");
+		expect(afterPasteText).toContain("WHERE active = true");
 
-		await harness.sendTerminalInput("\x0b");
-		expect(harness.activeCustomModal).toBeDefined();
-		expect(harness.tui.getTopmostVisibleOverlay()).toBeDefined();
-		expect(getVisibleHoverOverlays()).toHaveLength(0);
+		/* Открытие Command Palette (Ctrl+K) блокирует неблокирующий Hover Popup */
+		await harness.pressKey("\x0b");
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
+		expect(harness.screen().text()).toContain("Command Palette");
+		expect(harness.screen().text()).not.toContain("SELECT id, email");
 
-		harness.activeCustomModal!.done(undefined);
-		expect(harness.tui.getTopmostVisibleOverlay()).toBeUndefined();
+		await harness.pressKey("\x1b");
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 
-		await harness.sendTerminalInput(" trailing");
-		expect(getVisibleHoverOverlays()).toHaveLength(0);
+		await harness.typeText(" trailing");
+		expect(harness.screen().text()).not.toContain("SELECT id, email");
 
-		harness.tui.renderViewport(100, 28);
-		editor.handleMouse({
-			type: "move",
-			button: "none",
-			x: 6,
-			y: 1,
-			screenX: 6,
-			screenY: 25,
-			width: 100,
-			height: 3,
-		} as any);
-		const mouseHoverOverlays = getVisibleHoverOverlays();
-		expect(mouseHoverOverlays).toHaveLength(1);
-		const hoveredImgText = stripTerminalSequences(
-			mouseHoverOverlays[0]!.component.render(52).join("\n"),
-		);
-		expect(hoveredImgText).toContain("architecture-shot.png");
+		/* Наведение мыши через SGR на первый чип в композере показывает превью, уход мыши скрывает */
+		const composerBodyRow = findComposerTopRow(harness) + 1;
+		const imgPos = harness.screen().findText("[🖼 Image #1]");
+		expect(imgPos).toBeDefined();
+		await harness.mouseMove(imgPos!.col + 2, composerBodyRow);
+		expect(harness.screen().text()).toContain("architecture-shot.png");
 
-		editor.handleMouse({
-			type: "move",
-			button: "none",
-			x: 80,
-			y: 1,
-			screenX: 80,
-			screenY: 25,
-			width: 100,
-			height: 3,
-		} as any);
-		expect(getVisibleHoverOverlays()).toHaveLength(0);
+		await harness.mouseMove(85, composerBodyRow);
+		expect(harness.screen().text()).not.toContain("architecture-shot.png");
 	});
 
-	it("expands chips on Enter submission, renders compact clickable Prompt Chip pills with preview popups in both User Prompt and Sticky Prompt cards, and persists across steer/followUp and /reload", async () => {
-		setHostClipboardProvider({
-			readFilePaths: async () => null,
-			readImage: async () => ({
-				bytes: TINY_PNG_BYTES,
-				mimeType: "image/png",
-				fileName: "mockup-v2.png",
-			}),
-			readText: async () => null,
+	it("expands chips on Enter submission, renders compact clickable Prompt Chip pills with preview popups in both User Prompt and Sticky Prompt cards, and persists across steer and /reload", async () => {
+		let releaseToolGate: (() => void) | undefined;
+		let notifyToolEntered: (() => void) | undefined;
+		const toolEnteredPromise = new Promise<void>((resolve) => {
+			notifyToolEntered = resolve;
+		});
+		const holdTurnTool = defineTool({
+			name: "hold_turn",
+			label: "Hold Turn",
+			description: "Holds turn active while user submits a steer prompt with a chip",
+			parameters: Type.Object({}),
+			async execute() {
+				notifyToolEntered?.();
+				await new Promise<void>((resolve) => {
+					releaseToolGate = resolve;
+				});
+				return { content: [{ type: "text", text: "gate released" }], details: {} };
+			},
 		});
 
-		harness = createExtensionHarness({ theme: "dark", width: 96, height: 22 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 96,
+			height: 22,
+			persistSession: true,
+			customTools: [holdTurnTool],
+			clipboard: {
+				image: {
+					bytes: TINY_PNG_BYTES,
+					mimeType: "image/png",
+					fileName: "mockup-v2.png",
+				},
+			},
+			responses: [
+				fauxAssistantMessage(
+					[
+						{
+							type: "text",
+							text: Array.from({ length: 20 }, (_, idx) => `Assistant reply line ${idx + 1}`).join("\n"),
+						},
+						fauxToolCall("hold_turn", {}),
+					],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("Steer acknowledged."),
+			],
+		});
 
-		const editor = harness.editor as PiUiComposerEditor;
-		harness.tui.dock.addChild(editor);
+		const editor = getActiveComposerEditor()!;
 
-		let submittedFromEditor = "";
-		editor.onSubmit = (val: string) => {
-			submittedFromEditor = val;
-		};
-
-		await harness.sendTerminalInput("Review ");
-		await harness.sendTerminalInput("\x1b[118;9u");
-		await flushAsyncPaste();
-		await harness.sendTerminalInput(" and ");
+		await harness.typeText("Review ");
+		await harness.pressKey("\x1b[118;9u");
+		await flushClipboardAction(harness);
+		await harness.typeText(" and ");
 		const fiveLineLog = [
 			"ERROR 502 Bad Gateway",
 			"upstream: 10.0.4.12:8080",
@@ -406,320 +441,298 @@ describe("Prompt Chips end-to-end via ExtensionHarness + HostRuntime", () => {
 			"latency_ms: 15004",
 			"retryable: true",
 		].join("\n");
-		await harness.sendTerminalInput(`\x1b[200~${fiveLineLog}\x1b[201~`);
+		await harness.paste(fiveLineLog, true);
 		expect(editor.getText()).toBe("Review [🖼 Image #1] and [📋 Pasted #2 · 5 lines]");
 
-		await harness.sendTerminalInput("\r");
+		/* Отправляем первый ход без ожидания завершения удерживаемого тула, чтобы отправить реальный steer */
+		await harness.pressKey("\r");
+		await toolEnteredPromise;
 		expect(editor.getText()).toBe("");
-		expect(submittedFromEditor).toBe("Review [🖼 Image #1] and [📋 Pasted #2 · 5 lines]");
-
-		const inputRes = await harness.emit("input", {
-			type: "input",
-			text: submittedFromEditor,
-			source: "interactive",
-		});
-		const tx1 = inputRes.find((r: any) => r?.action === "transform") as {
-			action: "transform";
-			text: string;
-			images?: Array<{ type: "image"; data: string; mimeType: string }>;
-		};
-		expect(tx1).toBeDefined();
-		expect(tx1.images).toEqual([
-			{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" },
-		]);
-		expect(tx1.text).toContain("[Image #1: ");
-		expect(tx1.text).toContain("ERROR 502 Bad Gateway");
-		expect(tx1.text).toContain("retryable: true");
-
-		const ts1 = new Date(2026, 4, 10, 14, 25).getTime();
-		const userMsg1 = {
-			role: "user",
-			content: [{ type: "text", text: tx1.text }, ...(tx1.images ?? [])],
-			timestamp: ts1,
-		};
-		await harness.emit("message_start", { message: userMsg1 });
-		const userCard1 = new UserMessageComponent(tx1.text);
-		harness.tui.chatContainer.addChild(userCard1);
-		await harness.emit("message_end", { message: userMsg1 });
-
-		const entry1 = { type: "message", id: "m1", message: userMsg1 };
-		const longReply = Array.from({ length: 24 }, (_, idx) => `Assistant reply line ${idx + 1}`).join("\n");
-		harness.tui.chatContainer.addChild(new Text(longReply, 0, 0));
-
-		const entriesCountAfterTurn1 = harness.appendedEntries.filter(
-			(e) => e.customType === "conarti-prompt-chips",
-		).length;
-		expect(entriesCountAfterTurn1).toBe(1);
 
 		const steerPaste = "step A\nstep B\nstep C\nstep D";
-		await harness.sendTerminalInput("Steer with ");
-		await harness.sendTerminalInput(`\x1b[200~${steerPaste}\x1b[201~`);
-		await harness.sendTerminalInput("\r");
-		const steerInputRes = await harness.emit("input", {
-			type: "input",
-			text: submittedFromEditor,
-			source: "interactive",
-			streamingBehavior: "steer",
-		});
-		const txSteer = steerInputRes.find((r: any) => r?.action === "transform") as {
-			text: string;
-		};
-		expect(txSteer.text).toBe(`Steer with ${steerPaste}`);
-		expect(
-			harness.appendedEntries.filter((e) => e.customType === "conarti-prompt-chips"),
-		).toHaveLength(1);
+		await harness.typeText("Steer with ");
+		await harness.paste(steerPaste, true);
+		expect(editor.getText()).toBe("Steer with [📋 Pasted #1 · 4 lines]");
+		await harness.pressKey("\r");
+		await flushClipboardAction(harness);
 
-		const ts2 = new Date(2026, 4, 10, 14, 26).getTime();
-		const userMsg2 = {
-			role: "user",
-			content: [{ type: "text", text: txSteer.text }],
-			timestamp: ts2,
-		};
-		await harness.emit("message_start", { message: userMsg2 });
-		harness.tui.chatContainer.addChild(new Spacer(1));
-		const userCard2 = new UserMessageComponent(txSteer.text);
-		harness.tui.chatContainer.addChild(userCard2);
-		await harness.emit("message_end", { message: userMsg2 });
-		expect(
-			harness.appendedEntries.filter((e) => e.customType === "conarti-prompt-chips"),
-		).toHaveLength(2);
+		releaseToolGate?.();
+		await harness.waitForIdle();
 
-		const branchWithMessages = [
-			...harness.ctx.sessionManager.getEntries(),
-			entry1,
-			{ type: "message", id: "m2", message: userMsg2 },
-		];
-		harness.setEntries(branchWithMessages, branchWithMessages);
+		const persistedChipEntries = harness.sessionManager
+			.getEntries()
+			.filter((e) => e.type === "custom" && e.customType === "conarti-prompt-chips");
+		expect(persistedChipEntries).toHaveLength(2);
 
-		harness.tui.scroll.scrollTo(0, { disableFollow: true });
-		const screenAtTop = harness.tui.renderViewport(96, 22).map((l) => stripTerminalSequences(l));
-		const cardRowIdx = screenAtTop.findIndex((row) => row.includes("Review [🖼 Image #1]"));
-		expect(cardRowIdx).toBeGreaterThanOrEqual(0);
-		expect(screenAtTop[cardRowIdx]).toContain("[📋 Pasted #2 · 5 lines]");
-		expect(screenAtTop.join("\n")).not.toContain("ERROR 502 Bad Gateway");
-		expect(screenAtTop.join("\n")).not.toContain("mockup-v2.png");
+		/* В верхней части транскрипта карточка первого хода рендерит компактные пилюли без сырого лога */
+		const scroll = getActiveHostRuntime()!.scroll!;
+		const rail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
+		scroll.scrollTo(rail.offsetOf(0), { disableFollow: true });
 
-		const getVisibleHoverOverlays = () =>
-			harness!.tui.overlayStack.filter(
-				(e) => e.options?.nonCapturing === true && harness!.tui.isOverlayVisible(e),
-			);
+		const topScreen = harness.screen();
+		const cardHit = topScreen.findText("Review [🖼 Image #1]");
+		expect(cardHit).toBeDefined();
+		expect(topScreen.rowText(cardHit!.row)).toContain("[📋 Pasted #2 · 5 lines]");
+		expect(topScreen.text()).not.toContain("ERROR 502 Bad Gateway");
+		expect(topScreen.text()).not.toContain("mockup-v2.png");
 
-		const imgPillCol = screenAtTop[cardRowIdx]!.indexOf("[🖼 Image #1]") + 2;
-		harness.tui.clickMouse(imgPillCol, cardRowIdx);
-		expect(getVisibleHoverOverlays()).toHaveLength(1);
-		expect(
-			stripTerminalSequences(getVisibleHoverOverlays()[0]!.component.render(52).join("\n")),
-		).toContain("mockup-v2.png");
-		expect(harness.tui.focusComponent).toBe(editor);
+		const imgPillHit = topScreen.findText("[🖼 Image #1]");
+		expect(imgPillHit).toBeDefined();
+		await harness.mouseClick(imgPillHit!.col + 2, imgPillHit!.row);
+		expect(harness.screen().text()).toContain("mockup-v2.png");
 
-		const pastePillCol = screenAtTop[cardRowIdx]!.indexOf("[📋 Pasted #2 · 5 lines]") + 3;
-		harness.tui.clickMouse(pastePillCol, cardRowIdx);
-		expect(getVisibleHoverOverlays()).toHaveLength(1);
-		expect(
-			stripTerminalSequences(getVisibleHoverOverlays()[0]!.component.render(52).join("\n")),
-		).toContain("ERROR 502 Bad Gateway");
+		const pastePillHit = harness.screen().findText("[📋 Pasted #2 · 5 lines]");
+		expect(pastePillHit).toBeDefined();
+		await harness.mouseClick(pastePillHit!.col + 3, pastePillHit!.row);
+		expect(harness.screen().text()).toContain("ERROR 502 Bad Gateway");
 
-		harness.tui.wheelMouse(20, 5, "down");
-		expect(getVisibleHoverOverlays()).toHaveLength(0);
+		/* Прокрутка колеса скрывает попап отправленной пилюли */
+		await harness.mouseWheel("down", 20, 6, 2);
+		expect(harness.screen().text()).not.toContain("ERROR 502 Bad Gateway");
 
-		harness.tui.scroll.scrollTo(6, { disableFollow: true });
-		const screenScrolled = harness.tui.renderViewport(96, 22).map((l) => stripTerminalSequences(l));
-		expect(screenScrolled[1]).toContain("Review [🖼 Image #1] and [📋 Pasted #2 · 5 lines]");
-		expect(screenScrolled.slice(0, 4).join("\n")).not.toContain("[изображение]");
+		/* В закреплённом сверху Sticky Prompt клик по пилюле также открывает превью и закрывается по Esc */
+		scroll.scrollTo(rail.offsetOf(0) + 6, { disableFollow: true });
+		const scrolledScreen = harness.screen();
+		expect(scrolledScreen.rowText(1)).toContain("Review [🖼 Image #1] and [📋 Pasted #2 · 5 lines]");
+		expect(scrolledScreen.text()).not.toContain("[изображение]");
 
-		const stickyPasteCol = screenScrolled[1]!.indexOf("[📋 Pasted #2 · 5 lines]") + 2;
-		harness.tui.clickMouse(stickyPasteCol, 1);
-		expect(getVisibleHoverOverlays()).toHaveLength(1);
-		expect(
-			stripTerminalSequences(getVisibleHoverOverlays()[0]!.component.render(52).join("\n")),
-		).toContain("req-9912");
+		const stickyPasteCol = scrolledScreen.rowText(1).indexOf("[📋 Pasted #2 · 5 lines]");
+		expect(stickyPasteCol).toBeGreaterThan(0);
+		await harness.mouseClick(stickyPasteCol + 2, 1);
+		expect(harness.screen().text()).toContain("req-9912");
 
-		await harness.sendTerminalInput("\x1b");
-		expect(getVisibleHoverOverlays()).toHaveLength(0);
+		await harness.pressKey("\x1b");
+		expect(harness.screen().text()).not.toContain("req-9912");
 
-		const persistedSnapshot = [...harness.ctx.sessionManager.getEntries()];
-		await harness.shutdownSession();
+		/* После настоящего /reload обе реплики сохраняют реконструированные пилюли */
+		await harness.reload();
+		const postReloadScroll = getActiveHostRuntime()!.scroll!;
+		const postReloadRail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
 
-		harness = createExtensionHarness({
-			theme: "light",
-			width: 96,
-			height: 22,
-			entries: persistedSnapshot,
-			branch: persistedSnapshot,
-		});
-		harness.mount(conartiPiUi);
-		await harness.emit("session_start", { reason: "reload" });
+		postReloadScroll.scrollTo(postReloadRail.offsetOf(0), { disableFollow: true });
+		expect(harness.screen().text()).toContain("Review [🖼 Image #1] and [📋 Pasted #2 · 5 lines]");
 
-		const reloadedCard1 = new UserMessageComponent(tx1.text, {} as any, 0, [], "m1", ts1 as any);
-		const reloadedCard2 = new UserMessageComponent(txSteer.text, {} as any, 0, [], "m2", ts2 as any);
-		const legacyCard = new UserMessageComponent("Old [Image #1: /var/tmp/legacy-diagram.png] ref");
-		harness.tui.chatContainer.addChild(reloadedCard1);
-		harness.tui.chatContainer.addChild(reloadedCard2);
-		harness.tui.chatContainer.addChild(legacyCard);
-
-		const reloadedScreen = harness.tui.renderViewport(96, 22).map((l) => stripTerminalSequences(l));
-		const joinedReloaded = reloadedScreen.join("\n");
-		expect(joinedReloaded).toContain("Review [🖼 Image #1] and [📋 Pasted #2 · 5 lines]");
-		expect(joinedReloaded).toContain("Steer with [📋 Pasted #1 · 4 lines]");
-		expect(joinedReloaded).toContain("Old [🖼 Image #1] ref");
-		expect(joinedReloaded).not.toContain("legacy-diagram.png");
+		postReloadScroll.scrollTo(postReloadRail.offsetOf(1), { disableFollow: true });
+		expect(harness.screen().text()).toContain("Steer with [📋 Pasted #1 · 4 lines]");
 	});
 
-	it("handles edge cases: file:// URLs, nonexistent .png paths, !bash mode paths, clipboard errors, narrow widths 1..30, and pill toggle/outside-click dismissal", async () => {
-		const { pathToFileURL } = await import("node:url");
+	it("handles edge cases: file:// URLs, nonexistent .png paths, !bash mode paths, clipboard errors, narrow widths 1..30, legacy [Image #1: path] cards, and pill toggle/outside-click dismissal", async () => {
 		tempDir = mkdtempSync(join(tmpdir(), "pi-ui-chip-edge-"));
 		const urlImgPath = join(tempDir, "diagram with spaces.png");
 		writeFileSync(urlImgPath, TINY_PNG_BYTES);
 		const fileUrl = pathToFileURL(urlImgPath).href;
 
 		let shouldThrow = false;
-		setHostClipboardProvider({
+		const customClipboard: HostClipboardProvider = {
 			readFilePaths: async () => {
 				if (shouldThrow) throw new Error("Clipboard locked");
 				return [urlImgPath];
 			},
 			readImage: async () => null,
 			readText: async () => null,
+		};
+
+		const legacyTs = new Date(2026, 4, 10, 12, 0).getTime();
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 88,
+			height: 22,
+			clipboard: customClipboard,
+			initialEntries: [
+				{
+					type: "message",
+					id: "leg-1",
+					parentId: null,
+					timestamp: new Date(legacyTs).toISOString(),
+					message: {
+						role: "user",
+						content: "Old [Image #1: /var/tmp/legacy-diagram.png] ref",
+						timestamp: legacyTs,
+					},
+				},
+				makeAssistantEntry("leg-a1", "leg-1", "Legacy reply.", legacyTs + 1000),
+			],
 		});
 
-		harness = createExtensionHarness({ theme: "dark", width: 88, height: 22 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
+		const editor = getActiveComposerEditor()!;
 
-		const editor = harness.editor as PiUiComposerEditor;
-		harness.tui.dock.addChild(editor);
-
-		await harness.sendTerminalInput("\x1b[200~/nonexistent/missing-logo.png\x1b[201~");
+		await harness.paste("/nonexistent/missing-logo.png", true);
 		expect(editor.getText()).toBe("/nonexistent/missing-logo.png");
 
-		harness.ctx.ui.setEditorText("");
-		await harness.sendTerminalInput(`\x1b[200~${fileUrl}\x1b[201~`);
+		editor.setText("");
+		await harness.paste(fileUrl, true);
 		expect(editor.getText()).toBe("[🖼 Image #1]");
 
-		for (let w = 1; w <= 30; w++) {
+		for (let w = 1; w <= 30; w += 1) {
 			const lines = editor.render(w);
 			for (const line of lines) {
 				expect(visibleWidth(line), `width=${w}`).toBe(w);
 			}
 		}
 
-		harness.ctx.ui.setEditorText("!ls ");
-		await harness.sendTerminalInput("\x16");
-		await flushAsyncPaste();
+		editor.setText("!ls ");
+		await harness.pressKey("\x05");
+		await harness.pressKey("\x16");
+		await flushClipboardAction(harness);
 		expect(editor.getText()).toContain("diagram with spaces.png");
 		expect(editor.getText()).not.toContain("[🖼 Image");
 
 		shouldThrow = true;
-		harness.ctx.ui.setEditorText("");
-		await harness.sendTerminalInput("\x16");
-		await flushAsyncPaste();
+		editor.setText("");
+		await harness.pressKey("\x16");
+		await flushClipboardAction(harness);
 		expect(editor.getText()).toBe("");
-		expect(harness.notifications.some((n) => n.message.includes("Clipboard locked"))).toBe(true);
+		expect(harness.screen().text()).toContain("Clipboard locked");
 
-		const card = new UserMessageComponent(" Solo [Image #1: /var/tmp/solo.png] ");
-		harness.tui.chatContainer.addChild(card);
-		const screen = harness.tui.renderViewport(88, 22).map((l) => stripTerminalSequences(l));
-		const rowIdx = screen.findIndex((r) => r.includes("[🖼 Image #1]"));
-		const colIdx = screen[rowIdx]!.indexOf("[🖼 Image #1]") + 2;
+		/* Карточка со старым форматом [Image #1: /var/tmp/legacy-diagram.png] скрывает путь и переключает попап по клику */
+		getActiveHostRuntime()!.scroll!.scrollTo(0, { disableFollow: true });
+		const topScreen = harness.screen();
+		expect(topScreen.text()).toContain("Old [🖼 Image #1] ref");
+		expect(topScreen.text()).not.toContain("legacy-diagram.png");
 
-		const visiblePopups = () =>
-			harness!.tui.overlayStack.filter(
-				(e) => e.options?.nonCapturing === true && harness!.tui.isOverlayVisible(e),
-			);
+		const legPillPos = topScreen.findText("[🖼 Image #1]");
+		expect(legPillPos).toBeDefined();
 
-		harness.tui.clickMouse(colIdx, rowIdx);
-		expect(visiblePopups()).toHaveLength(1);
+		await harness.mouseClick(legPillPos!.col + 2, legPillPos!.row);
+		expect(harness.screen().text()).toContain("legacy-diagram.png");
 
-		harness.tui.clickMouse(colIdx, rowIdx);
-		expect(visiblePopups()).toHaveLength(0);
+		await harness.mouseClick(legPillPos!.col + 2, legPillPos!.row);
+		expect(harness.screen().text()).not.toContain("legacy-diagram.png");
 
-		harness.tui.clickMouse(colIdx, rowIdx);
-		expect(visiblePopups()).toHaveLength(1);
-		harness.tui.clickMouse(70, rowIdx + 4);
-		expect(visiblePopups()).toHaveLength(0);
+		await harness.mouseClick(legPillPos!.col + 2, legPillPos!.row);
+		expect(harness.screen().text()).toContain("legacy-diagram.png");
+		await harness.mouseClick(75, legPillPos!.row + 3);
+		expect(harness.screen().text()).not.toContain("legacy-diagram.png");
+
+		/* Проверяем, что добавляемые AgentSession._normalizePromptImages суффиксы [Image: original WxH, displayed at ...] не ломают реконструкцию чипов */
+		const resizedTs = new Date(2026, 4, 10, 12, 30).getTime();
+		await harness.dispose();
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 88,
+			height: 22,
+			initialEntries: [
+				{
+					type: "custom",
+					id: "c-resized",
+					parentId: null,
+					timestamp: new Date(resizedTs - 10).toISOString(),
+					customType: "conarti-prompt-chips",
+					data: {
+						timestamp: resizedTs,
+						displayText: "Inspect [🖼 Image #1] and [📋 Pasted #2 · 4 lines]",
+						expandedText: "Inspect [Image #1: /tmp/retina.png] and l1\nl2\nl3\nl4",
+						chips: [
+							{
+								id: "img-r1",
+								kind: "image",
+								number: 1,
+								token: "[🖼 Image #1]",
+								filePath: "/tmp/retina.png",
+								fileName: "retina.png",
+								mimeType: "image/png",
+								byteLength: 1024,
+							},
+							{
+								id: "paste-r2",
+								kind: "paste",
+								number: 2,
+								token: "[📋 Pasted #2 · 4 lines]",
+								lineCount: 4,
+								charCount: 11,
+								metric: "lines",
+								previewText: "l1\nl2\nl3\nl4",
+							},
+						],
+					},
+				},
+				{
+					type: "message",
+					id: "u-resized",
+					parentId: "c-resized",
+					timestamp: new Date(resizedTs).toISOString(),
+					message: {
+						role: "user",
+						timestamp: resizedTs,
+						content: [
+							{
+								type: "text",
+								text: "Inspect [Image #1: /tmp/retina.png] and l1\nl2\nl3\nl4\n\n[Image: original 3024x1964, displayed at 2000x1299. Multiply coordinates by 1.51 to map to original image.]",
+							},
+							{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" },
+						],
+					},
+				},
+				makeAssistantEntry("a-resized", "u-resized", "Retina checked.", resizedTs + 1000),
+			],
+		});
+		getActiveHostRuntime()!.scroll!.scrollTo(0, { disableFollow: true });
+		const resizedScreen = harness.screen().text();
+		expect(resizedScreen).toContain("Inspect [🖼 Image #1] and [📋 Pasted #2 · 4 lines]");
+		expect(resizedScreen).not.toContain("Multiply coordinates");
+		expect(resizedScreen).not.toContain("retina.png");
 	});
 
-	it("converts pasted BMP paths to PNG on real Enter submit (with BMP dimensions in preview), keeps !bash Ctrl+V text & tab-heavy inline pastes chip-free, syncs onChange on renumbering, and reconstructs ISO-timestamped /reload + /tree entries", async () => {
+	it("converts pasted BMP paths to PNG on real Enter submit (with BMP dimensions in preview), keeps !bash Ctrl+V text & tab-heavy inline pastes chip-free, and reconstructs ISO-timestamped /reload + /tree entries", async () => {
 		tempDir = mkdtempSync(join(tmpdir(), "pi-ui-chip-bmp-"));
 		const bmpPath = join(tempDir, "diagram.bmp");
 		writeFileSync(bmpPath, createValidBmpBytes(4, 3));
 
-		let clipText: string | null = "echo one\necho two\necho three\necho four";
-		setHostClipboardProvider({
-			readFilePaths: async () => null,
-			readImage: async () => null,
-			readText: async () => clipText,
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 96,
+			height: 26,
+			clipboard: {
+				text: "echo one\necho two\necho three\necho four",
+			},
+			responses: [fauxAssistantMessage("BMP inspected.")],
 		});
 
-		harness = createExtensionHarness({ theme: "dark", width: 96, height: 26 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
+		const editor = getActiveComposerEditor()!;
 
-		const editor = harness.editor as PiUiComposerEditor;
-		harness.tui.dock.addChild(editor);
-		harness.tui.renderViewport(96, 26);
-
-		let submittedFromEditor = "";
-		editor.onSubmit = (val: string) => {
-			submittedFromEditor = val;
-		};
-
-		harness.ctx.ui.setEditorText("!");
-		await harness.sendTerminalInput("\x05");
-		await harness.sendTerminalInput("\x16");
-		await flushAsyncPaste();
+		editor.setText("!");
+		await harness.pressKey("\x05");
+		await harness.pressKey("\x16");
+		await flushClipboardAction(harness);
 		expect(editor.getText()).not.toContain("[📋 Pasted");
 		expect(editor.getText()).toContain("echo four");
 
-		harness.ctx.ui.setEditorText("");
-		await harness.sendTerminalInput(`\x1b[200~${"\t".repeat(260)}\x1b[201~`);
+		editor.setText("");
+		await harness.paste("\t".repeat(260), true);
 		expect(editor.getText()).not.toContain("[paste #");
 
-		harness.ctx.ui.setEditorText("");
-		await harness.sendTerminalInput(`\x1b[200~${bmpPath}\x1b[201~`);
-		await harness.sendTerminalInput(" ");
-		await harness.sendTerminalInput(`\x1b[200~${bmpPath}\x1b[201~`);
+		editor.setText("");
+		await harness.paste(bmpPath, true);
+		await harness.typeText(" ");
+		await harness.paste(bmpPath, true);
 		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2]");
 
-		await harness.sendTerminalInput("\x01");
-		await harness.sendTerminalInput("\x1b[3~");
+		await harness.pressKey("\x01");
+		await harness.pressKey("\x1b[3~");
 		expect(editor.getText()).toBe(" [🖼 Image #1]");
-		expect(harness.editorText).toBe(" [🖼 Image #1]");
 
-		const visibleHoverOverlays = () =>
-			harness!.tui.overlayStack.filter(
-				(e) => e.options?.nonCapturing === true && harness!.tui.isOverlayVisible(e),
-			);
-		await harness.sendTerminalInput("\x05");
-		expect(visibleHoverOverlays()).toHaveLength(1);
-		const bmpPreview = stripTerminalSequences(
-			visibleHoverOverlays()[0]!.component.render(52).join("\n"),
-		);
-		expect(bmpPreview).toContain("diagram.bmp");
-		expect(bmpPreview).toContain("4×3");
+		await harness.pressKey("\x05");
+		const bmpPreviewText = harness.screen().text();
+		expect(bmpPreviewText).toContain("diagram.bmp");
+		expect(bmpPreviewText).toContain("4×3");
 
-		await harness.sendTerminalInput("\r");
-		expect(submittedFromEditor).toBe("[🖼 Image #1]");
-
-		const bmpInputRes = await harness.emit("input", {
-			type: "input",
-			text: submittedFromEditor,
-			source: "interactive",
-		});
-		const bmpTransformed = bmpInputRes.find((r: any) => r?.action === "transform") as {
-			action: "transform";
-			text: string;
-			images?: Array<{ type: "image"; data: string; mimeType: string }>;
-		};
-		expect(bmpTransformed).toBeDefined();
-		expect(bmpTransformed.images).toHaveLength(1);
-		expect(bmpTransformed.images![0]!.mimeType).toBe("image/png");
-		const decodedPng = Buffer.from(bmpTransformed.images![0]!.data, "base64");
+		await harness.submitDraft();
+		expect(harness.calls).toHaveLength(1);
+		const sentMsg = harness.calls[0]!.messages.find((m) => m.role === "user");
+		const sentImages = Array.isArray(sentMsg?.content)
+			? sentMsg.content.filter((b) => b.type === "image")
+			: [];
+		expect(sentImages).toHaveLength(1);
+		const firstImg = sentImages[0] as { data: string; mimeType: string };
+		expect(firstImg.mimeType).toBe("image/png");
+		const decodedPng = Buffer.from(firstImg.data, "base64");
 		expect(Array.from(decodedPng.subarray(0, 8))).toEqual([
 			0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 		]);
 
-		const allSessionEntries = [
+		/* Проверяем реконструкцию веток с ISO-timestamp после /reload и переключения ветки через /tree */
+		await harness.dispose();
+		const branchedEntries: SessionEntry[] = [
 			{
 				type: "custom",
 				id: "c-b1",
@@ -755,6 +768,7 @@ describe("Prompt Chips end-to-end via ExtensionHarness + HostRuntime", () => {
 					content: [{ type: "text", text: "Fix a\nb\nc\nd" }],
 				},
 			},
+			makeAssistantEntry("a-b1", "m-b1", "Branch 1 reply.", 1715342401000),
 			{
 				type: "custom",
 				id: "c-b2",
@@ -790,119 +804,108 @@ describe("Prompt Chips end-to-end via ExtensionHarness + HostRuntime", () => {
 					content: [{ type: "text", text: "Branch2 w\nx\ny\nz" }],
 				},
 			},
+			makeAssistantEntry("a-b2", "m-b2", "Branch 2 reply.", 1715342701000),
 		];
 
-		await harness.shutdownSession();
-		harness = createExtensionHarness({
+		let switchToBranch2: (() => Promise<void>) | undefined;
+		harness = await createInteractiveHarness({
 			theme: "dark",
 			width: 96,
 			height: 22,
-			entries: allSessionEntries,
-			branch: allSessionEntries.slice(0, 2),
+			persistSession: true,
+			initialEntries: branchedEntries,
+			initialLeafId: "a-b1",
+			extensionFactories: [
+				(pi) => {
+					pi.registerCommand("test-jump-b2", {
+						description: "Navigate session tree to a-b2 via real CommandContext.navigateTree",
+						handler: async (_args, ctx) => {
+							await ctx.navigateTree("a-b2");
+						},
+					});
+					switchToBranch2 = async () => {
+						await harness!.submitInput("/test-jump-b2");
+					};
+				},
+			],
 		});
-		harness.mount(conartiPiUi);
 
-		/* Имитируем InteractiveMode.handleReloadCommand: rebuildChatFromMessages выполняется ДО session_start */
-		const preStartCard = new UserMessageComponent(
-			"Fix a\nb\nc\nd",
-			{} as any,
-			0,
-			[],
-			"m-b1",
-			"2026-05-10T12:00:00.101Z" as any,
-		);
-		harness.tui.chatContainer.addChild(preStartCard);
-		await harness.emit("session_start", { reason: "reload" });
+		getActiveHostRuntime()!.scroll!.scrollTo(0, { disableFollow: true });
+		expect(harness.screen().text()).toContain("Fix [📋 Pasted #1 · 4 lines]");
 
-		const reloadScreen = harness.tui.renderViewport(96, 22).map((l) => stripTerminalSequences(l));
-		expect(reloadScreen.join("\n")).toContain("Fix [📋 Pasted #1 · 4 lines]");
+		await harness.reload();
+		getActiveHostRuntime()!.scroll!.scrollTo(0, { disableFollow: true });
+		expect(harness.screen().text()).toContain("Fix [📋 Pasted #1 · 4 lines]");
 
-		harness.tui.chatContainer.clear();
-		harness.setEntries(allSessionEntries, allSessionEntries.slice(2, 4));
-		await harness.emit("session_tree", {});
-		const treeCard = new UserMessageComponent(
-			"Branch2 w\nx\ny\nz",
-			{} as any,
-			0,
-			[],
-			"m-b2",
-			"2026-05-10T12:05:00.101Z" as any,
-		);
-		harness.tui.chatContainer.addChild(treeCard);
-		const treeScreen = harness.tui.renderViewport(96, 22).map((l) => stripTerminalSequences(l));
-		expect(treeScreen.join("\n")).toContain("Branch2 [📋 Pasted #1 · 4 lines]");
+		await switchToBranch2!();
+		getActiveHostRuntime()!.scroll!.scrollTo(0, { disableFollow: true });
+		expect(harness.screen().text()).toContain("Branch2 [📋 Pasted #1 · 4 lines]");
 	});
 
 	it("aligns composer hover/caret previews and pill styling across wrapped lines (including innerWidth-1 wrap boundary), keeps hand-typed literal [🖼 Image #99] non-atomic, isolates adjacent chips on Ctrl+W, and consumes Esc when dismissing sent-pill popups", async () => {
-		setHostClipboardProvider({
-			readFilePaths: async () => null,
-			readImage: async () => ({
-				bytes: TINY_PNG_BYTES,
-				mimeType: "image/png",
-				fileName: "wrap-check.png",
-			}),
-			readText: async () => null,
+		const legacyTs = new Date(2026, 4, 10, 15, 0).getTime();
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 40,
+			height: 24,
+			clipboard: {
+				image: {
+					bytes: TINY_PNG_BYTES,
+					mimeType: "image/png",
+					fileName: "wrap-check.png",
+				},
+			},
+			initialEntries: [
+				{
+					type: "message",
+					id: "esc-u1",
+					parentId: null,
+					timestamp: new Date(legacyTs).toISOString(),
+					message: {
+						role: "user",
+						content: "Check [Image #1: /var/tmp/esc-test.png]",
+						timestamp: legacyTs,
+					},
+				},
+				makeAssistantEntry("esc-a1", "esc-u1", "Checked.", legacyTs + 1000),
+			],
 		});
 
-		harness = createExtensionHarness({ theme: "dark", width: 40, height: 24 });
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-
-		const editor = harness.editor as PiUiComposerEditor;
-		harness.tui.dock.addChild(editor);
-
-		const visibleHoverOverlays = () =>
-			harness!.tui.overlayStack.filter(
-				(e) => e.options?.nonCapturing === true && harness!.tui.isOverlayVisible(e),
-			);
-
+		const editor = getActiveComposerEditor()!;
 		const imgChipCols = visibleWidth("[🖼 Image #1]");
-		await harness.sendTerminalInput(`${"x".repeat(34 - imgChipCols - 1)} `);
-		await harness.sendTerminalInput("\x16");
-		await flushAsyncPaste();
-		await harness.sendTerminalInput(" ok");
-		harness.tui.renderViewport(40, 24);
-		expect(visibleHoverOverlays()).toHaveLength(0);
+		await harness.typeText(`${"x".repeat(34 - imgChipCols - 1)} `);
+		await harness.pressKey("\x16");
+		await flushClipboardAction(harness);
+		await harness.typeText(" ok");
+		expect(harness.screen().text()).not.toContain("wrap-check.png");
 
-		editor.handleMouse({
-			type: "move",
-			button: "none",
-			x: 6,
-			y: 2,
-			screenX: 6,
-			screenY: 20,
-			width: 40,
-			height: 4,
-		} as any);
-		expect(visibleHoverOverlays()).toHaveLength(1);
-		expect(
-			stripTerminalSequences(visibleHoverOverlays()[0]!.component.render(36).join("\n")),
-		).toContain("wrap-check.png");
+		/* Находим перенесённую на вторую строку композера пилюлю [🖼 Image #1] и наводим мышь */
+		const composerTop = findComposerTopRow(harness);
+		const wrappedChipRow = composerTop + 2;
+		const wrappedChipCol = harness.screen().rowText(wrappedChipRow).indexOf("[🖼 Image #1]");
+		expect(wrappedChipCol).toBeGreaterThanOrEqual(2);
 
-		editor.handleMouse({
-			type: "move",
-			button: "none",
-			x: 35,
-			y: 2,
-			screenX: 35,
-			screenY: 20,
-			width: 40,
-			height: 4,
-		} as any);
-		expect(visibleHoverOverlays()).toHaveLength(0);
+		await harness.mouseMove(wrappedChipCol + 2, wrappedChipRow);
+		expect(harness.screen().text()).toContain("wrap-check.png");
 
-		harness.tui.renderViewport(100, 24);
-		harness.ctx.ui.setEditorText("");
-		await harness.sendTerminalInput(`${"a".repeat(86)} `);
-		await harness.sendTerminalInput("\x16");
-		await flushAsyncPaste();
-		harness.tui.renderViewport(100, 24);
-		await harness.sendTerminalInput("\x1b[D");
-		expect(visibleHoverOverlays()).toHaveLength(1);
-		expect(visibleHoverOverlays()[0]!.options?.col).toBe(4);
+		await harness.mouseMove(36, wrappedChipRow);
+		expect(harness.screen().text()).not.toContain("wrap-check.png");
 
-		harness.ctx.ui.setEditorText("");
-		await harness.sendTerminalInput("\x1b[200~l1\nl2\nl3\nl4\nl5\x1b[201~");
+		/* Граница innerWidth - 1 на широком экране 100 колонок не обрезает превью за правый край */
+		await harness.resize(100, 24);
+		editor.setText("");
+		await harness.typeText(`${"a".repeat(86)} `);
+		await harness.pressKey("\x16");
+		await flushClipboardAction(harness);
+		await harness.pressKey("\x1b[D");
+		const boundaryScreen = harness.screen();
+		const wrapHit = boundaryScreen.findText("wrap-check.png");
+		expect(wrapHit).toBeDefined();
+		expect(wrapHit!.col).toBeLessThan(20);
+
+		/* Многострочная вставка на узком экране 24 колонки сохраняет заливку пилюли на всех строках переноса */
+		editor.setText("");
+		await harness.paste("l1\nl2\nl3\nl4\nl5", true);
 		const narrowLines = editor.render(24);
 		for (const line of narrowLines) {
 			expect(visibleWidth(line)).toBe(24);
@@ -910,42 +913,44 @@ describe("Prompt Chips end-to-end via ExtensionHarness + HostRuntime", () => {
 		expect(narrowLines[1]).toContain("\x1b[48;2;");
 		expect(narrowLines[2]).toContain("\x1b[48;2;");
 
-		harness.ctx.ui.setEditorText("");
-		for (const ch of "[🖼 Image #99]") {
-			await harness.sendTerminalInput(ch);
-		}
-		await harness.sendTerminalInput("\x7f");
+		/* Набранный вручную литерал [🖼 Image #99] не считается атомарным чипом */
+		editor.setText("");
+		await harness.typeText("[🖼 Image #99]");
+		await harness.pressKey("\x7f");
 		expect(editor.getText()).toBe("[🖼 Image #99");
 
-		harness.ctx.ui.setEditorText("");
-		await harness.sendTerminalInput("\x16");
-		await flushAsyncPaste();
-		await harness.sendTerminalInput("\x16");
-		await flushAsyncPaste();
+		/* Ctrl+W на двух слитных чипах удаляет только правый чип */
+		editor.setText("");
+		await harness.pressKey("\x16");
+		await flushClipboardAction(harness);
+		await harness.pressKey("\x16");
+		await flushClipboardAction(harness);
 		expect(editor.getText()).toBe("[🖼 Image #1][🖼 Image #2]");
-		await harness.sendTerminalInput("\x17");
+		await harness.pressKey("\x17");
 		expect(editor.getText()).toBe("[🖼 Image #1]");
+		editor.setText("");
 
-		harness.ctx.ui.setEditorText("");
-		(harness.keybindings as any).matches = (data: string, action: string) =>
-			action === "app.interrupt" && data === "\x1b";
+		/* Первый Esc закрывает попап отправленной пилюли без вызова onEscape редактора, второй Esc доходит до onEscape */
+		await harness.resize(88, 24);
+		getActiveHostRuntime()!.scroll!.scrollTo(0, { disableFollow: true });
+		const origOnEscape = editor.onEscape;
 		let escapeCalled = 0;
 		editor.onEscape = () => {
 			escapeCalled += 1;
+			origOnEscape?.();
 		};
-		const card = new UserMessageComponent("Check [Image #1: /var/tmp/esc-test.png]");
-		harness.tui.chatContainer.addChild(card);
-		const screen = harness.tui.renderViewport(88, 24).map((l) => stripTerminalSequences(l));
-		const rowIdx = screen.findIndex((r) => r.includes("[🖼 Image #1]"));
-		const colIdx = screen[rowIdx]!.indexOf("[🖼 Image #1]") + 2;
-		harness.tui.clickMouse(colIdx, rowIdx);
-		expect(visibleHoverOverlays()).toHaveLength(1);
 
-		await harness.sendTerminalInput("\x1b");
-		expect(visibleHoverOverlays()).toHaveLength(0);
+		const sentScreen = harness.screen();
+		const sentPillHit = sentScreen.findText("[🖼 Image #1]");
+		expect(sentPillHit).toBeDefined();
+		await harness.mouseClick(sentPillHit!.col + 2, sentPillHit!.row);
+		expect(harness.screen().text()).toContain("esc-test.png");
+
+		await harness.pressKey("\x1b");
+		expect(harness.screen().text()).not.toContain("esc-test.png");
 		expect(escapeCalled).toBe(0);
 
-		await harness.sendTerminalInput("\x1b");
+		await harness.pressKey("\x1b");
 		expect(escapeCalled).toBe(1);
 	});
 
@@ -954,240 +959,164 @@ describe("Prompt Chips end-to-end via ExtensionHarness + HostRuntime", () => {
 		const imgPath = join(tempDir, "secret-capture.png");
 		writeFileSync(imgPath, TINY_PNG_BYTES);
 
-		const clipboard: HostClipboardProvider = {
-			readFilePaths: async () => [imgPath],
-			readImage: async () => null,
-			readText: async () => "quoted alpha\nquoted beta",
-		};
-
-		harness = createExtensionHarness({
-			theme: "dark",
-			width: 100,
-			height: 24,
-			clipboard,
-		});
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-
-		const editor = harness.editor as PiUiComposerEditor;
-		await harness.sendTerminalInput("Check ");
-		await harness.sendTerminalInput("\x16");
-		await flushAsyncPaste();
-		await harness.sendTerminalInput(" log ");
-		await harness.sendTerminalInput(
-			"\x1b[200~TRACE line 1\nTRACE line 2\nTRACE line 3\nTRACE line 4\x1b[201~",
-		);
-		await harness.sendTerminalInput(" ref ");
-		await harness.sendTerminalInput("\x1b[113;3u");
-		await flushAsyncPaste();
-
-		const draftText = editor.getText();
-		expect(draftText).toBe(
-			"Check [🖼 Image #1] log [📋 Pasted #2 · 4 lines] ref [❝ Quote #3 · 2 lines]",
-		);
-
-		editor.setText("");
-		const [tx] = (await harness.emit("input", {
-			text: draftText,
-			images: [],
-			source: "interactive",
-		})) as Array<{ action: string; text: string; images?: unknown[] }>;
-		expect(tx!.action).toBe("transform");
-
-		const ts1 = new Date(2026, 4, 10, 16, 5).getTime();
-		const userMsg1 = {
-			role: "user",
-			content: [
-				{ type: "text", text: tx!.text },
-				{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" },
-			],
-			timestamp: ts1,
-		};
-		await harness.emit("message_start", { message: userMsg1 });
-		harness.tui.chatContainer.addChild(new UserMessageComponent(tx!.text, {} as any, 0, [], "u1", ts1 as any));
-		harness.tui.chatContainer.addChild(new Text(Array.from({ length: 14 }, (_, i) => `reply1 ${i}`).join("\n"), 0, 0));
-		await harness.emit("message_end", { message: userMsg1 });
-
 		const ts2 = new Date(2026, 4, 10, 16, 9).getTime();
-		const userMsg2 = {
-			role: "user",
-			content: [{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }],
-			timestamp: ts2,
-		};
-		harness.tui.chatContainer.addChild(new UserMessageComponent("[🖼 Image #1]", {} as any, 0, [], "u2", ts2 as any));
-		harness.tui.chatContainer.addChild(new Text(Array.from({ length: 14 }, (_, i) => `reply2 ${i}`).join("\n"), 0, 0));
-
-		const entries = [
-			...harness.appendedEntries.map((e, idx) => ({
-				type: "custom",
-				id: `c-${idx + 1}`,
-				customType: e.customType,
-				data: e.data,
-			})),
-			{ type: "message", id: "u1", parentId: "c-1", message: userMsg1 },
-			{ type: "message", id: "u2", message: userMsg2 },
-		];
-		harness.setEntries(entries, entries);
-
-		const extractPreviewBody = (lines: readonly string[]) =>
-			lines
-				.filter((l) => l.startsWith("│") && l.endsWith("│"))
-				.map((l) => l.slice(1, -1).trim())
-				.join(" ");
-
-		harness.tui.renderViewport(100, 12);
-		harness.tui.moveMouse(97, 5);
-		const hoverOverlays1 = harness.tui.overlayStack.filter(
-			(e) => e.options?.nonCapturing === true && harness!.tui.isOverlayVisible(e),
-		);
-		expect(hoverOverlays1).toHaveLength(1);
-		const preview1Lines = hoverOverlays1[0]!.component
-			.render(Number(hoverOverlays1[0]!.options?.width ?? 44))
-			.map((l) => stripTerminalSequences(l));
-		const preview1 = preview1Lines.join("\n");
-		const preview1Body = extractPreviewBody(preview1Lines);
-		expect(preview1Lines[0]?.trim()).toBe("16:05");
-		expect(preview1Body).toBe(
-			"Check [🖼 Image #1] log [📋 Pasted #2 · 4 lines] ref [❝ Quote #3 · 2 lines]",
-		);
-		expect(preview1).not.toContain("secret-capture.png");
-		expect(preview1).not.toContain("[Image #1:");
-		expect(preview1).not.toContain("[изображение]");
-		expect(preview1).not.toContain("TRACE line");
-		expect(preview1).not.toContain("quoted alpha");
-
-		harness.tui.moveMouse(97, 6);
-		const hoverOverlays2 = harness.tui.overlayStack.filter(
-			(e) => e.options?.nonCapturing === true && harness!.tui.isOverlayVisible(e),
-		);
-		expect(hoverOverlays2).toHaveLength(1);
-		const preview2Lines = hoverOverlays2[0]!.component
-			.render(Number(hoverOverlays2[0]!.options?.width ?? 44))
-			.map((l) => stripTerminalSequences(l));
-		const preview2 = preview2Lines.join("\n");
-		expect(preview2Lines[0]?.trim()).toBe("16:09");
-		expect(extractPreviewBody(preview2Lines)).toBe("[🖼 Image #1]");
-		expect(preview2).not.toContain("[изображение]");
-
-		await harness.shutdownSession();
-		harness = createExtensionHarness({
-			theme: "light",
-			width: 100,
-			height: 24,
-			entries,
-			branch: entries,
-		});
-		harness.mount(conartiPiUi);
-		await harness.startSession();
-		harness.tui.chatContainer.addChild(new UserMessageComponent(tx!.text, {} as any, 0, [], "u1", ts1 as any));
-		harness.tui.chatContainer.addChild(new Text(Array.from({ length: 14 }, (_, i) => `reply1 ${i}`).join("\n"), 0, 0));
-		harness.tui.chatContainer.addChild(new UserMessageComponent("[🖼 Image #1]", {} as any, 0, [], "u2", ts2 as any));
-		harness.tui.chatContainer.addChild(new Text(Array.from({ length: 14 }, (_, i) => `reply2 ${i}`).join("\n"), 0, 0));
-
-		harness.tui.renderViewport(100, 12);
-		harness.tui.moveMouse(97, 5);
-		const reloadedOverlays = harness.tui.overlayStack.filter(
-			(e) => e.options?.nonCapturing === true && harness!.tui.isOverlayVisible(e),
-		);
-		expect(reloadedOverlays).toHaveLength(1);
-		const reloadedLines = reloadedOverlays[0]!.component
-			.render(Number(reloadedOverlays[0]!.options?.width ?? 44))
-			.map((l) => stripTerminalSequences(l));
-		const reloadedPreview = reloadedLines.join("\n");
-		expect(extractPreviewBody(reloadedLines)).toBe(
-			"Check [🖼 Image #1] log [📋 Pasted #2 · 4 lines] ref [❝ Quote #3 · 2 lines]",
-		);
-		expect(reloadedPreview).not.toContain("secret-capture.png");
-		expect(reloadedPreview).not.toContain("[изображение]");
-		expect(reloadedPreview).not.toContain("TRACE line");
-		expect(reloadedPreview).not.toContain("quoted alpha");
-
 		const ts3 = new Date(2026, 4, 10, 16, 12).getTime();
-		const customTurn3 = {
-			type: "custom",
-			id: "c-inc-3",
-			customType: "conarti-prompt-chips",
-			data: {
-				displayText: "[❝ Quote #1 · 2 lines] Compare screenshot",
-				expandedText: "> quoted one\n> quoted two\n\nCompare screenshot",
-				chips: [
-					{
-						id: "q-inc-3",
-						kind: "quote",
-						number: 1,
-						token: "[❝ Quote #1 · 2 lines]",
-						lineCount: 2,
-						charCount: 21,
-						previewText: "quoted one\nquoted two",
-					},
-				],
-			},
-		};
-		const entriesWithCustomOnly = [...entries, customTurn3];
-		harness.setEntries(entriesWithCustomOnly, entriesWithCustomOnly);
-		harness.tui.renderViewport(100, 12);
-
-		const userMsg3 = {
-			role: "user",
-			content: [
-				{ type: "text", text: "> quoted one\n> quoted two\n\nCompare screenshot" },
-				{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" },
-			],
-			timestamp: ts3,
-		};
-		const entriesWithMsg3 = [
-			...entriesWithCustomOnly,
-			{ type: "message", id: "u3", parentId: "c-inc-3", message: userMsg3 },
-		];
-		harness.setEntries(entriesWithMsg3, entriesWithMsg3);
-		harness.tui.chatContainer.addChild(
-			new UserMessageComponent(
-				"> quoted one\n> quoted two\n\nCompare screenshot\n\n[изображение]",
-				{} as any,
-				0,
-				[],
-				"u3",
-				ts3 as any,
-			),
-		);
-		harness.tui.chatContainer.addChild(new Text(Array.from({ length: 14 }, (_, i) => `reply3 ${i}`).join("\n"), 0, 0));
-
 		const ts4 = new Date(2026, 4, 10, 16, 15).getTime();
-		const entriesWithMsg4 = [
-			...entriesWithMsg3,
+
+		/* Засеваем реплики 2..4 (image-only без текста, conarti-prompt-chips с цитатой+картинкой и fallback [изображение]), а 5-ю отправим вживую */
+		const initialEntries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "u-img-only",
+				parentId: null,
+				timestamp: new Date(ts2).toISOString(),
+				message: {
+					role: "user",
+					timestamp: ts2,
+					content: [{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }],
+				},
+			},
+			makeAssistantEntry(
+				"a-img-only",
+				"u-img-only",
+				Array.from({ length: 14 }, (_, i) => `reply2 ${i}`).join("\n"),
+				ts2 + 1000,
+			),
+			{
+				type: "custom",
+				id: "c-inc-3",
+				parentId: "a-img-only",
+				timestamp: new Date(ts3 - 10).toISOString(),
+				customType: "conarti-prompt-chips",
+				data: {
+					timestamp: ts3,
+					displayText: "[❝ Quote #1 · 2 lines] Compare screenshot",
+					expandedText: "> quoted one\n> quoted two\n\nCompare screenshot",
+					chips: [
+						{
+							id: "q-inc-3",
+							kind: "quote",
+							number: 1,
+							token: "[❝ Quote #1 · 2 lines]",
+							lineCount: 2,
+							charCount: 21,
+							previewText: "quoted one\nquoted two",
+						},
+					],
+				},
+			},
+			{
+				type: "message",
+				id: "u3",
+				parentId: "c-inc-3",
+				timestamp: new Date(ts3).toISOString(),
+				message: {
+					role: "user",
+					timestamp: ts3,
+					content: [
+						{ type: "text", text: "> quoted one\n> quoted two\n\nCompare screenshot\n\n[изображение]" },
+						{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" },
+					],
+				},
+			},
+			makeAssistantEntry(
+				"a3",
+				"u3",
+				Array.from({ length: 14 }, (_, i) => `reply3 ${i}`).join("\n"),
+				ts3 + 1000,
+			),
 			{
 				type: "message",
 				id: "u4",
-				message: { role: "user", content: "Mounted fallback\n\n[изображение]", timestamp: ts4 },
+				parentId: "a3",
+				timestamp: new Date(ts4).toISOString(),
+				message: {
+					role: "user",
+					timestamp: ts4,
+					content: "Mounted fallback\n\n[изображение]",
+				},
 			},
+			makeAssistantEntry(
+				"a4",
+				"u4",
+				Array.from({ length: 14 }, (_, i) => `reply4 ${i}`).join("\n"),
+				ts4 + 1000,
+			),
 		];
-		harness.setEntries(entriesWithMsg4, entriesWithMsg4);
-		harness.tui.chatContainer.addChild(
-			new UserMessageComponent("Mounted fallback\n\n[изображение]", {} as any, 0, [], "u4", ts4 as any),
-		);
-		harness.tui.chatContainer.addChild(new Text(Array.from({ length: 14 }, (_, i) => `reply4 ${i}`).join("\n"), 0, 0));
 
-		harness.tui.renderViewport(100, 12);
-		harness.tui.moveMouse(97, 6);
-		const incOverlays3 = harness.tui.overlayStack.filter(
-			(e) => e.options?.nonCapturing === true && harness!.tui.isOverlayVisible(e),
-		);
-		expect(incOverlays3).toHaveLength(1);
-		const incLines3 = incOverlays3[0]!.component
-			.render(Number(incOverlays3[0]!.options?.width ?? 44))
-			.map((l) => stripTerminalSequences(l));
-		expect(extractPreviewBody(incLines3)).toBe("[❝ Quote #1 · 2 lines] Compare screenshot [🖼 Image #1]");
-		expect(incLines3.join("\n")).not.toContain("quoted one");
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 100,
+			height: 22,
+			persistSession: true,
+			initialEntries,
+			clipboard: {
+				filePaths: [imgPath],
+				image: null,
+				text: "quoted alpha\nquoted beta",
+			},
+			responses: [
+				fauxAssistantMessage(Array.from({ length: 14 }, (_, i) => `reply5 ${i}`).join("\n")),
+			],
+		});
 
-		harness.tui.moveMouse(97, 7);
-		const incOverlays4 = harness.tui.overlayStack.filter(
-			(e) => e.options?.nonCapturing === true && harness!.tui.isOverlayVisible(e),
+		/* Собираем и отправляем живую реплику с картинкой + многострочной вставкой + цитатой */
+		await harness.typeText("Check ");
+		await harness.pressKey("\x16");
+		await flushClipboardAction(harness);
+		await harness.typeText(" log ");
+		await harness.paste("TRACE line 1\nTRACE line 2\nTRACE line 3\nTRACE line 4", true);
+		await harness.typeText(" ref ");
+		await harness.pressKey("\x1b[113;3u");
+		await flushClipboardAction(harness);
+		expect(getActiveComposerEditor()!.getText()).toBe(
+			"Check [🖼 Image #1] log [📋 Pasted #2 · 4 lines] ref [❝ Quote #3 · 2 lines]",
 		);
-		expect(incOverlays4).toHaveLength(1);
-		const incLines4 = incOverlays4[0]!.component
-			.render(Number(incOverlays4[0]!.options?.width ?? 44))
-			.map((l) => stripTerminalSequences(l));
-		expect(extractPreviewBody(incLines4)).toBe("Mounted fallback [🖼 Image #1]");
-		expect(incLines4.join("\n")).not.toContain("[изображение]");
+		await harness.submitDraft();
+
+		const checkRailPreviews = async () => {
+			const rail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
+			const geo = rail.geometry!;
+			expect(geo.windowEnd - geo.windowStart).toBe(4);
+
+			/* Реплика 1 (image-only без текста): [🖼 Image #1] и время 16:09 */
+			await harness!.mouseMove(97, geo.ticksY);
+			const p1 = harness!.screen().text();
+			expect(p1).toContain("16:09");
+			expect(p1).toContain("[🖼 Image #1]");
+			expect(p1).not.toContain("[изображение]");
+
+			/* Реплика 2 (цитата + фото): [❝ Quote #1 · 2 lines] Compare screenshot [🖼 Image #1] без утечки текста цитаты */
+			await harness!.mouseMove(97, geo.ticksY + 1);
+			const p2 = harness!.screen().text();
+			expect(p2).toContain("[❝ Quote #1 · 2 lines]");
+			expect(p2).toContain("Compare");
+			expect(p2).toContain("screenshot [🖼 Image #1]");
+			expect(p2).not.toContain("quoted one");
+
+			/* Реплика 3 (fallback [изображение] -> [🖼 Image #1]) */
+			await harness!.mouseMove(97, geo.ticksY + 2);
+			const p3 = harness!.screen().text();
+			expect(p3).toContain("Mounted fallback [🖼 Image #1]");
+			expect(p3).not.toContain("[изображение]");
+
+			/* Реплика 4 (живая смешанная отправка): все 3 чипа без утечки секретного пути и лога */
+			await harness!.mouseMove(97, geo.ticksY + 3);
+			const p4 = harness!.screen().text();
+			expect(p4).toContain("Check [🖼 Image #1]");
+			expect(p4).toContain("[📋 Pasted #2 · 4 lines]");
+			expect(p4).toContain("[❝ Quote #3 · 2 lines]");
+			expect(p4).not.toContain("secret-capture.png");
+			expect(p4).not.toContain("[Image #1:");
+			expect(p4).not.toContain("TRACE line");
+			expect(p4).not.toContain("quoted alpha");
+		};
+
+		await checkRailPreviews();
+
+		/* После настоящего /reload и смены темы на светлую все превью в Outline Rail остаются реконструированными */
+		harness.setTheme("light");
+		await harness.reload();
+		await checkRailPreviews();
 	});
 });

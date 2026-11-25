@@ -1,4 +1,4 @@
-import { UserMessageComponent, type Theme } from "@earendil-works/pi-coding-agent";
+import { InteractiveMode, UserMessageComponent, type Theme } from "@earendil-works/pi-coding-agent";
 import {
 	stripTerminalSequences,
 	truncateToWidth,
@@ -497,6 +497,30 @@ export function renderUserPromptCardLines(
 
 export function installUserPromptCards(): void {
 	const proto = UserMessageComponent.prototype as any;
+	const interactiveProto = (InteractiveMode as unknown as { prototype?: object } | undefined)?.prototype;
+
+	/* Подставляем метку чипа изображения для реплик без текстовых блоков, чтобы InteractiveMode монтировал карточку в транскрипт */
+	if (interactiveProto) {
+		hookMethod(
+			interactiveProto,
+			"getUserMessageText",
+			"transcript.userMessageTextFallback",
+			(self, args, original) => {
+				const text = String(original.apply(self, args) ?? "");
+				if (text.trim().length > 0) return text;
+				const msg = args[0] as { role?: string; content?: unknown } | undefined;
+				if (msg?.role !== "user" || !Array.isArray(msg.content)) return text;
+				let imageCount = 0;
+				for (const block of msg.content) {
+					if (block && typeof block === "object" && (block as { type?: string }).type === "image") {
+						imageCount += 1;
+					}
+				}
+				if (imageCount <= 0) return text;
+				return Array.from({ length: imageCount }, (_, idx) => `[🖼 Image #${idx + 1}]`).join(" ");
+			},
+		);
+	}
 
 	hookMethod(
 		proto,

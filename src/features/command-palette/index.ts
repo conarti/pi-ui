@@ -1,4 +1,8 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	ExtensionRunner,
+	type ExtensionAPI,
+	type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import {
 	isKeyRelease,
 	isKeyRepeat,
@@ -12,6 +16,8 @@ import {
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 import { bgRgb, fgRgb } from "../../shared/ansi.ts";
+import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
+import { matchesLayoutChord } from "../../shared/keyboard-layout.ts";
 import {
 	createModalCard,
 	createSingleLineInput,
@@ -19,9 +25,8 @@ import {
 	hasBlockingModalOverlay,
 	openModalCard,
 } from "../../shared/modal-card.ts";
-import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
+import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
 import { getSessionWorkflow, MODE_META } from "../../shared/session-workflow.ts";
-import { claimHover } from "../../shared/runtime-hooks.ts";
 import { requestRender, runAppAction } from "../../shared/ui-action-bridge.ts";
 import { showContextInspector } from "../context-inspector/index.ts";
 import { getOutlineSettings } from "../outline-rail/index.ts";
@@ -455,12 +460,40 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 	}
 }
 
+function installCtrlKDiagnosticFilter(): void {
+	const proto = (ExtensionRunner as unknown as { prototype?: object } | undefined)?.prototype;
+	if (!proto) return;
+
+	/* Убираем ctrl+k из карты шорткатов ExtensionRunner, чтобы хост не выводил предупреждение о конфликте с deleteToLineEnd */
+	hookMethod(proto, "getShortcuts", "commandPalette.filterCtrlKConflict", (self, args, original) => {
+		const extensions = (self as { extensions?: Array<{ shortcuts?: Map<string, { description?: string }> }> })
+			.extensions;
+		if (Array.isArray(extensions)) {
+			for (const ext of extensions) {
+				const ctrlK = ext.shortcuts?.get("ctrl+k");
+				if (ctrlK?.description?.includes("Command Palette")) {
+					ext.shortcuts?.delete("ctrl+k");
+				}
+			}
+		}
+		return original.apply(self, args);
+	});
+}
+
 export function registerCommandPaletteFeature(pi: ExtensionAPI): void {
+	installCtrlKDiagnosticFilter();
 	let unsubscribeInput: (() => void) | undefined;
 
 	pi.registerShortcut("ctrl+k", {
 		description: "Открыть Command Palette (@conarti/pi-ui)",
 		handler: async (ctx) => {
+			await showCommandPalette(pi, ctx);
+		},
+	});
+
+	pi.registerCommand("palette", {
+		description: "Открыть центральное меню команд (Ctrl+K)",
+		handler: async (_args, ctx) => {
 			await showCommandPalette(pi, ctx);
 		},
 	});
@@ -471,8 +504,23 @@ export function registerCommandPaletteFeature(pi: ExtensionAPI): void {
 		unsubscribeInput = undefined;
 		if (ctx.mode !== "tui" || !ctx.hasUI) return;
 
+		let inBracketedPaste = false;
 		unsubscribeInput = ctx.ui.onTerminalInput((data) => {
-			if (isKeyRelease(data) || isKeyRepeat(data) || !matchesKey(data, "ctrl+k")) {
+			if (data.includes("\x1b[200~")) {
+				inBracketedPaste = !data.includes("\x1b[201~");
+				return undefined;
+			}
+			if (inBracketedPaste) {
+				if (data.includes("\x1b[201~")) {
+					inBracketedPaste = false;
+				}
+				return undefined;
+			}
+			if (
+				isKeyRelease(data) ||
+				isKeyRepeat(data) ||
+				(!matchesKey(data, "ctrl+k") && !matchesLayoutChord(data, "ctrl+k"))
+			) {
 				return undefined;
 			}
 			const hostTui = getActiveHostRuntime()?.tui;
@@ -496,12 +544,5 @@ export function registerCommandPaletteFeature(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", () => {
 		unsubscribeInput?.();
 		unsubscribeInput = undefined;
-	});
-
-	pi.registerCommand("palette", {
-		description: "Открыть центральное меню команд (Ctrl+K)",
-		handler: async (_args, ctx) => {
-			await showCommandPalette(pi, ctx);
-		},
 	});
 }

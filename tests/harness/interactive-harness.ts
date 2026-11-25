@@ -56,7 +56,9 @@ import {
 	type AgentSessionRuntime,
 	type CreateAgentSessionRuntimeFactory,
 	type ExtensionFactory,
+	type FileEntry,
 	type InteractiveModeOptions,
+	type SessionEntry,
 	type Theme,
 	type ToolDefinition,
 	type TuiMode,
@@ -87,6 +89,7 @@ export {
 	getCurrentSystemPrompt,
 	getCurrentTools,
 	registerFauxProvider,
+	SessionManager,
 	type AssistantMessage,
 	type AssistantMessageEventStream,
 	type FauxContentBlock,
@@ -95,6 +98,8 @@ export {
 	type FauxProviderState,
 	type FauxResponseFactory,
 	type FauxResponseStep,
+	type FileEntry,
+	type SessionEntry,
 	type SimpleStreamOptions,
 	type TranscriptContext,
 };
@@ -345,7 +350,6 @@ export interface InteractiveHarnessOptions {
 	width?: number;
 	height?: number;
 	kittyProtocolActive?: boolean;
-	trueColor?: boolean;
 	terminalColors?: {
 		foreground?: string;
 		background?: string;
@@ -356,8 +360,8 @@ export interface InteractiveHarnessOptions {
 	agentDir?: string;
 	persistSession?: boolean;
 	persistSettings?: boolean;
-	sessionManager?: SessionManager;
-	setupSession?: (sessionManager: SessionManager) => void | Promise<void>;
+	initialEntries?: FileEntry[];
+	initialLeafId?: string | null;
 	projectTrusted?: boolean;
 	settings?: Record<string, unknown>;
 	flags?: Record<string, boolean | string>;
@@ -365,19 +369,22 @@ export interface InteractiveHarnessOptions {
 	additionalExtensionPaths?: string[];
 	extensionFactories?: ExtensionFactory[];
 	additionalThemePaths?: string[];
-	tools?: string[];
-	excludeTools?: string[];
-	noTools?: "all" | "builtin";
-	customTools?: ToolDefinition<any, any, any>[];
 	models?: FauxModelDefinition[];
 	responses?: FauxResponseStep[];
-	streamSimple?: CustomStreamSimpleHandler;
-	suggestionResponses?: FauxResponseStep[];
 	tokensPerSecond?: number;
 	tokenSize?: { min?: number; max?: number };
 	thinkingLevel?: ThinkingLevel;
 	clipboard?: HostClipboardProvider | MutableClipboardState;
 	interactiveOptions?: Omit<InteractiveModeOptions, "terminal" | "tuiMode" | "initialThemeSetting">;
+	trueColor?: boolean;
+	sessionManager?: SessionManager;
+	setupSession?: (sessionManager: SessionManager) => void | Promise<void>;
+	tools?: string[];
+	excludeTools?: string[];
+	noTools?: "all" | "builtin";
+	customTools?: ToolDefinition<any, any, any>[];
+	streamSimple?: CustomStreamSimpleHandler;
+	suggestionResponses?: FauxResponseStep[];
 }
 
 interface InteractiveModeInternals {
@@ -481,27 +488,24 @@ export interface InteractiveHarness {
 	readonly tui: TUI;
 	readonly faux: FauxProviderHandle;
 	readonly calls: readonly RecordedFauxCall[];
-	readonly suggestionCalls: readonly RecordedFauxCall[];
 	readonly cwd: string;
 	readonly agentDir: string;
 	readonly width: number;
 	readonly height: number;
 	setResponses(steps: FauxResponseStep[]): void;
 	appendResponses(steps: FauxResponseStep[]): void;
-	setStreamSimple(handler: CustomStreamSimpleHandler | undefined): void;
-	setSuggestionResponses(steps: FauxResponseStep[]): void;
-	appendSuggestionResponses(steps: FauxResponseStep[]): void;
 	setClipboard(next: MutableClipboardState): void;
+	setTheme(theme: "dark" | "light" | string): void;
 	sendInput(data: string): Promise<void>;
 	pressKey(sequence: string): Promise<void>;
 	typeText(text: string): Promise<void>;
 	paste(text: string, bracketed?: boolean): Promise<void>;
+	submitDraft(): Promise<void>;
 	submitInput(text: string): Promise<void>;
+	waitForIdle(): Promise<void>;
 	prompt(text: string): Promise<void>;
 	reload(): Promise<void>;
 	setTuiMode(mode: TuiMode): Promise<boolean>;
-	setTheme(theme: "dark" | "light" | string): void;
-	flush(): Promise<void>;
 	mouseMove(col: number, row: number, modifiers?: MouseModifiers): Promise<void>;
 	mouseDown(
 		col: number,
@@ -540,6 +544,11 @@ export interface InteractiveHarness {
 	renderFrame(width?: number, height?: number): string[];
 	screen(width?: number, height?: number): TerminalScreenSnapshot;
 	dispose(): Promise<void>;
+	readonly suggestionCalls: readonly RecordedFauxCall[];
+	setStreamSimple(handler: CustomStreamSimpleHandler | undefined): void;
+	setSuggestionResponses(steps: FauxResponseStep[]): void;
+	appendSuggestionResponses(steps: FauxResponseStep[]): void;
+	flush(): Promise<void>;
 }
 
 /**
@@ -586,6 +595,8 @@ export async function createInteractiveHarness(
 		compaction: { enabled: false },
 		showHardwareCursor: false,
 		fullscreenCopyOnSelect: false,
+		/* Фиксируем шаг прокрутки колеса вместо wall-clock WheelScrollAccelerator("auto") для полной детерминированности под нагрузкой */
+		fullscreenWheelScrollLines: 3,
 		enableInstallTelemetry: false,
 		...options?.settings,
 	};
@@ -877,11 +888,48 @@ export async function createInteractiveHarness(
 		};
 	};
 
+	const normalizedSeedEntries: FileEntry[] | undefined = options?.initialEntries
+		? options.initialEntries[0]?.type === "session"
+			? [...options.initialEntries]
+			: [
+					{
+						type: "session",
+						version: 3,
+						id: "seeded-test-session",
+						timestamp: "2026-01-01T00:00:00.000Z",
+						cwd,
+					},
+					...options.initialEntries,
+				]
+		: undefined;
+
 	const initialSessionManager =
 		options?.sessionManager ??
-		(options?.persistSession
-			? SessionManager.create(cwd, join(agentDir, "sessions"))
-			: SessionManager.inMemory(cwd));
+		(() => {
+			if (options?.persistSession) {
+				const sessionsDir = join(agentDir, "sessions");
+				mkdirSync(sessionsDir, { recursive: true });
+				if (normalizedSeedEntries) {
+					const seededFile = join(sessionsDir, "seeded-session.jsonl");
+					writeFileSync(
+						seededFile,
+						`${normalizedSeedEntries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+						"utf8",
+					);
+					return SessionManager.open(seededFile, sessionsDir, cwd);
+				}
+				return SessionManager.create(cwd, sessionsDir);
+			}
+			return SessionManager.inMemory(cwd, undefined, normalizedSeedEntries);
+		})();
+
+	if (options?.initialLeafId !== undefined) {
+		if (options.initialLeafId === null) {
+			initialSessionManager.resetLeaf();
+		} else {
+			initialSessionManager.branch(options.initialLeafId);
+		}
+	}
 	if (options?.setupSession) {
 		await options.setupSession(initialSessionManager);
 	}
@@ -909,6 +957,21 @@ export async function createInteractiveHarness(
 
 	await mode.init();
 	await flushMicrotasksAndTicks(4);
+
+	/* Перенаправляем copyOnSelect в виртуальный терминал и изолированный буфер обмена вместо системного pbcopy */
+	const bindVirtualCopySelection = () => {
+		const rawRenderer = internals.renderer as {
+			copySelection?: (text: string) => Promise<boolean | string>;
+		};
+		if ("copySelection" in rawRenderer) {
+			rawRenderer.copySelection = async (text: string) => {
+				clipboardState.text = text;
+				terminal.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
+				return true;
+			};
+		}
+	};
+	bindVirtualCopySelection();
 
 	/* Подключаем перехват onSubmit и фоновый цикл обработки пользовательского ввода (без бесконечного mode.run()) */
 	let stopped = false;
@@ -1073,9 +1136,16 @@ export async function createInteractiveHarness(
 			const payload = bracketed ? `\x1b[200~${text}\x1b[201~` : text;
 			await harness.sendInput(payload);
 		},
+		async submitDraft(): Promise<void> {
+			terminal.sendInput("\r");
+			await waitForIdlePump();
+			flushFrame();
+		},
 		async submitInput(text: string): Promise<void> {
 			await harness.paste(text, true);
-			terminal.sendInput("\r");
+			await harness.submitDraft();
+		},
+		async waitForIdle(): Promise<void> {
 			await waitForIdlePump();
 			flushFrame();
 		},
@@ -1091,6 +1161,7 @@ export async function createInteractiveHarness(
 			const switched = internals.switchTuiMode(nextMode);
 			if (switched) {
 				settingsManager.setTuiMode(nextMode);
+				bindVirtualCopySelection();
 			}
 			await flushMicrotasksAndTicks(2);
 			flushFrame();
@@ -1104,7 +1175,11 @@ export async function createInteractiveHarness(
 						? "midnight-cobalt"
 						: nextTheme;
 			settingsManager.setTheme(nextName);
-			internals.themeController?.setThemeName?.(nextName, false);
+			if (typeof internals.themeController?.setThemeName === "function") {
+				internals.themeController.setThemeName(nextName, false);
+			} else {
+				internals.themeController?.setThemeSetting?.(nextName);
+			}
 			flushFrame(true);
 		},
 		async flush(): Promise<void> {
