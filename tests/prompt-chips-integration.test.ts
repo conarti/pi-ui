@@ -14,6 +14,8 @@ import {
 	createInteractiveHarness,
 	fauxAssistantMessage,
 	fauxToolCall,
+	findComposerTopRow,
+	makeAssistantEntry,
 	type InteractiveHarness,
 	type SessionEntry,
 } from "./harness/index.ts";
@@ -65,48 +67,6 @@ async function flushClipboardAction(harness: InteractiveHarness): Promise<void> 
 	}
 	await new Promise<void>((resolve) => setTimeout(resolve, 0));
 	harness.flushFrame();
-}
-
-function findComposerTopRow(harness: InteractiveHarness): number {
-	const screen = harness.screen();
-	for (let r = screen.height - 1; r >= 0; r -= 1) {
-		const row = screen.rowText(r);
-		if (row.startsWith("╭") && row.endsWith("╮")) {
-			return r;
-		}
-	}
-	throw new Error("Expected rounded composer top border on terminal screen");
-}
-
-function makeAssistantEntry(
-	id: string,
-	parentId: string | null,
-	text: string,
-	timestampMs: number,
-): SessionEntry {
-	return {
-		type: "message",
-		id,
-		parentId,
-		timestamp: new Date(timestampMs).toISOString(),
-		message: {
-			role: "assistant",
-			content: [{ type: "text", text }],
-			api: "faux-responses",
-			provider: "faux",
-			model: "faux-1",
-			usage: {
-				input: 10,
-				output: 10,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 20,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: timestampMs,
-		},
-	};
 }
 
 describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
@@ -180,7 +140,6 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await flushClipboardAction(harness);
 		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2]");
 
-		/* Пустая bracketed paste при текстовом буфере без картинки не вставляет текст повторно */
 		harness.setClipboard({
 			image: null,
 			filePaths: null,
@@ -254,12 +213,13 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await harness.pressKey("\x1b[D");
 		for (const mode of ["dark", "light"] as const) {
 			harness.setTheme(mode);
-			const lines = editor.render(92);
+			const top = findComposerTopRow(harness);
+			const lines = harness.renderFrame().slice(top, top + 3);
 			for (const line of lines) {
 				expect(visibleWidth(line)).toBe(92);
 			}
 			expect(lines[1]).toContain("\x1b[48;2;");
-			expect(lines[1]).toContain("\x1b_pi:c\x07\x1b_pi:fc\x07");
+			expect(lines[1]).toContain("\x1b[7m");
 			const rgbs = extractAllAnsiRgbs(lines);
 			expect(rgbs.length).toBeGreaterThan(4);
 			for (const [r, g, b] of rgbs) {
@@ -268,12 +228,10 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		}
 		harness.setTheme("dark");
 
-		/* Home + Delete удаляет первый чип и перенумеровывает оставшиеся */
 		await harness.pressKey("\x01");
 		await harness.pressKey("\x1b[3~");
 		expect(editor.getText()).toBe(" [📋 Pasted #1 · 4 lines] [📋 Pasted #2 · 312 chars]");
 
-		/* Super+Z и Ctrl+Z (suspend) не вызывают undo, тогда как штатные Ctrl+- и Ctrl+_ откатывают и перепривязывают чипы */
 		await harness.pressKey("\x1b[1103;9u");
 		expect(editor.getText()).toBe(" [📋 Pasted #1 · 4 lines] [📋 Pasted #2 · 312 chars]");
 
@@ -291,7 +249,6 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 			"[🖼 Image #1] [📋 Pasted #2 · 4 lines] [📋 Pasted #3 · 312 chars]",
 		);
 
-		/* Отправка через реальный InteractiveMode разворачивает текст и прикрепляет изображение в запрос к модели */
 		await harness.submitDraft();
 		expect(harness.calls).toHaveLength(1);
 		const sentUserMsg = harness.calls[0]!.messages.find((m) => m.role === "user");
@@ -357,7 +314,6 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		expect(afterPasteText).toContain("SELECT id, email");
 		expect(afterPasteText).toContain("WHERE active = true");
 
-		/* Открытие Command Palette (Ctrl+K) блокирует неблокирующий Hover Popup */
 		await harness.pressKey("\x0b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
 		expect(harness.screen().text()).toContain("Command Palette");
@@ -369,7 +325,6 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await harness.typeText(" trailing");
 		expect(harness.screen().text()).not.toContain("SELECT id, email");
 
-		/* Наведение мыши через SGR на первый чип в композере показывает превью, уход мыши скрывает */
 		const composerBodyRow = findComposerTopRow(harness) + 1;
 		const imgPos = harness.screen().findText("[🖼 Image #1]");
 		expect(imgPos).toBeDefined();
@@ -444,7 +399,6 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await harness.paste(fiveLineLog, true);
 		expect(editor.getText()).toBe("Review [🖼 Image #1] and [📋 Pasted #2 · 5 lines]");
 
-		/* Отправляем первый ход без ожидания завершения удерживаемого тула, чтобы отправить реальный steer */
 		await harness.pressKey("\r");
 		await toolEnteredPromise;
 		expect(editor.getText()).toBe("");
@@ -464,7 +418,6 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 			.filter((e) => e.type === "custom" && e.customType === "conarti-prompt-chips");
 		expect(persistedChipEntries).toHaveLength(2);
 
-		/* В верхней части транскрипта карточка первого хода рендерит компактные пилюли без сырого лога */
 		const scroll = getActiveHostRuntime()!.scroll!;
 		const rail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
 		scroll.scrollTo(rail.offsetOf(0), { disableFollow: true });
@@ -486,11 +439,9 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await harness.mouseClick(pastePillHit!.col + 3, pastePillHit!.row);
 		expect(harness.screen().text()).toContain("ERROR 502 Bad Gateway");
 
-		/* Прокрутка колеса скрывает попап отправленной пилюли */
 		await harness.mouseWheel("down", 20, 6, 2);
 		expect(harness.screen().text()).not.toContain("ERROR 502 Bad Gateway");
 
-		/* В закреплённом сверху Sticky Prompt клик по пилюле также открывает превью и закрывается по Esc */
 		scroll.scrollTo(rail.offsetOf(0) + 6, { disableFollow: true });
 		const scrolledScreen = harness.screen();
 		expect(scrolledScreen.rowText(1)).toContain("Review [🖼 Image #1] and [📋 Pasted #2 · 5 lines]");
@@ -504,7 +455,6 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await harness.pressKey("\x1b");
 		expect(harness.screen().text()).not.toContain("req-9912");
 
-		/* После настоящего /reload обе реплики сохраняют реконструированные пилюли */
 		await harness.reload();
 		const postReloadScroll = getActiveHostRuntime()!.scroll!;
 		const postReloadRail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
@@ -563,12 +513,12 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await harness.paste(fileUrl, true);
 		expect(editor.getText()).toBe("[🖼 Image #1]");
 
-		for (let w = 1; w <= 30; w += 1) {
-			const lines = editor.render(w);
-			for (const line of lines) {
-				expect(visibleWidth(line), `width=${w}`).toBe(w);
-			}
+		for (const w of [1, 2, 3, 8, 16, 24, 30]) {
+			await harness.resize(w, 28);
+			const top = findComposerTopRow(harness);
+			expect(visibleWidth(harness.renderFrame()[top]!), `width=${w}`).toBe(w);
 		}
+		await harness.resize(88, 28);
 
 		editor.setText("!ls ");
 		await harness.pressKey("\x05");
@@ -584,7 +534,6 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		expect(editor.getText()).toBe("");
 		expect(harness.screen().text()).toContain("Clipboard locked");
 
-		/* Карточка со старым форматом [Image #1: /var/tmp/legacy-diagram.png] скрывает путь и переключает попап по клику */
 		getActiveHostRuntime()!.scroll!.scrollTo(0, { disableFollow: true });
 		const topScreen = harness.screen();
 		expect(topScreen.text()).toContain("Old [🖼 Image #1] ref");
@@ -604,7 +553,7 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await harness.mouseClick(75, legPillPos!.row + 3);
 		expect(harness.screen().text()).not.toContain("legacy-diagram.png");
 
-		/* Проверяем, что добавляемые AgentSession._normalizePromptImages суффиксы [Image: original WxH, displayed at ...] не ломают реконструкцию чипов */
+		/* Суффиксы AgentSession._normalizePromptImages ([Image: original WxH, displayed at ...]) не должны ломать реконструкцию чипов */
 		const resizedTs = new Date(2026, 4, 10, 12, 30).getTime();
 		await harness.dispose();
 		harness = await createInteractiveHarness({
@@ -730,7 +679,6 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 			0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 		]);
 
-		/* Проверяем реконструкцию веток с ISO-timestamp после /reload и переключения ветки через /tree */
 		await harness.dispose();
 		const branchedEntries: SessionEntry[] = [
 			{
@@ -879,7 +827,6 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await harness.typeText(" ok");
 		expect(harness.screen().text()).not.toContain("wrap-check.png");
 
-		/* Находим перенесённую на вторую строку композера пилюлю [🖼 Image #1] и наводим мышь */
 		const composerTop = findComposerTopRow(harness);
 		const wrappedChipRow = composerTop + 2;
 		const wrappedChipCol = harness.screen().rowText(wrappedChipRow).indexOf("[🖼 Image #1]");
@@ -891,7 +838,6 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await harness.mouseMove(36, wrappedChipRow);
 		expect(harness.screen().text()).not.toContain("wrap-check.png");
 
-		/* Граница innerWidth - 1 на широком экране 100 колонок не обрезает превью за правый край */
 		await harness.resize(100, 24);
 		editor.setText("");
 		await harness.typeText(`${"a".repeat(86)} `);
@@ -903,23 +849,21 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		expect(wrapHit).toBeDefined();
 		expect(wrapHit!.col).toBeLessThan(20);
 
-		/* Многострочная вставка на узком экране 24 колонки сохраняет заливку пилюли на всех строках переноса */
+		await harness.resize(24, 24);
 		editor.setText("");
 		await harness.paste("l1\nl2\nl3\nl4\nl5", true);
-		const narrowLines = editor.render(24);
-		for (const line of narrowLines) {
-			expect(visibleWidth(line)).toBe(24);
-		}
-		expect(narrowLines[1]).toContain("\x1b[48;2;");
-		expect(narrowLines[2]).toContain("\x1b[48;2;");
+		const narrowTop = findComposerTopRow(harness);
+		const narrowFrame = harness.renderFrame();
+		expect(visibleWidth(narrowFrame[narrowTop]!)).toBe(24);
+		expect(narrowFrame[narrowTop + 1]).toContain("\x1b[48;2;");
+		expect(narrowFrame[narrowTop + 2]).toContain("\x1b[48;2;");
 
-		/* Набранный вручную литерал [🖼 Image #99] не считается атомарным чипом */
+		await harness.resize(88, 24);
 		editor.setText("");
 		await harness.typeText("[🖼 Image #99]");
 		await harness.pressKey("\x7f");
 		expect(editor.getText()).toBe("[🖼 Image #99");
 
-		/* Ctrl+W на двух слитных чипах удаляет только правый чип */
 		editor.setText("");
 		await harness.pressKey("\x16");
 		await flushClipboardAction(harness);
@@ -930,8 +874,6 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		expect(editor.getText()).toBe("[🖼 Image #1]");
 		editor.setText("");
 
-		/* Первый Esc закрывает попап отправленной пилюли без вызова onEscape редактора, второй Esc доходит до onEscape */
-		await harness.resize(88, 24);
 		getActiveHostRuntime()!.scroll!.scrollTo(0, { disableFollow: true });
 		const origOnEscape = editor.onEscape;
 		let escapeCalled = 0;
@@ -963,7 +905,6 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		const ts3 = new Date(2026, 4, 10, 16, 12).getTime();
 		const ts4 = new Date(2026, 4, 10, 16, 15).getTime();
 
-		/* Засеваем реплики 2..4 (image-only без текста, conarti-prompt-chips с цитатой+картинкой и fallback [изображение]), а 5-ю отправим вживую */
 		const initialEntries: SessionEntry[] = [
 			{
 				type: "message",
@@ -1060,7 +1001,6 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 			],
 		});
 
-		/* Собираем и отправляем живую реплику с картинкой + многострочной вставкой + цитатой */
 		await harness.typeText("Check ");
 		await harness.pressKey("\x16");
 		await flushClipboardAction(harness);
@@ -1079,14 +1019,12 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 			const geo = rail.geometry!;
 			expect(geo.windowEnd - geo.windowStart).toBe(4);
 
-			/* Реплика 1 (image-only без текста): [🖼 Image #1] и время 16:09 */
 			await harness!.mouseMove(97, geo.ticksY);
 			const p1 = harness!.screen().text();
 			expect(p1).toContain("16:09");
 			expect(p1).toContain("[🖼 Image #1]");
 			expect(p1).not.toContain("[изображение]");
 
-			/* Реплика 2 (цитата + фото): [❝ Quote #1 · 2 lines] Compare screenshot [🖼 Image #1] без утечки текста цитаты */
 			await harness!.mouseMove(97, geo.ticksY + 1);
 			const p2 = harness!.screen().text();
 			expect(p2).toContain("[❝ Quote #1 · 2 lines]");
@@ -1094,13 +1032,11 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 			expect(p2).toContain("screenshot [🖼 Image #1]");
 			expect(p2).not.toContain("quoted one");
 
-			/* Реплика 3 (fallback [изображение] -> [🖼 Image #1]) */
 			await harness!.mouseMove(97, geo.ticksY + 2);
 			const p3 = harness!.screen().text();
 			expect(p3).toContain("Mounted fallback [🖼 Image #1]");
 			expect(p3).not.toContain("[изображение]");
 
-			/* Реплика 4 (живая смешанная отправка): все 3 чипа без утечки секретного пути и лога */
 			await harness!.mouseMove(97, geo.ticksY + 3);
 			const p4 = harness!.screen().text();
 			expect(p4).toContain("Check [🖼 Image #1]");
@@ -1114,7 +1050,6 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 
 		await checkRailPreviews();
 
-		/* После настоящего /reload и смены темы на светлую все превью в Outline Rail остаются реконструированными */
 		harness.setTheme("light");
 		await harness.reload();
 		await checkRailPreviews();

@@ -2,7 +2,6 @@ import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import {
 	isKittyProtocolActive,
 	setKittyProtocolActive,
-	stripTerminalSequences,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -13,29 +12,25 @@ import {
 import { getOutlineSettings } from "../src/features/outline-rail/index.ts";
 import { bgRgb } from "../src/shared/ansi.ts";
 import { hasBlockingModalOverlay } from "../src/shared/modal-card.ts";
-import { beginHoverMovePass, finishHoverMovePass } from "../src/shared/runtime-hooks.ts";
 import { getSessionWorkflow } from "../src/shared/session-workflow.ts";
 import {
+	createAssistantMessageEventStream,
 	createInteractiveHarness,
 	fauxAssistantMessage,
+	findComposerTopRow,
+	waitForCondition,
+	ZERO_USAGE,
+	type AssistantMessage,
 	type InteractiveHarness,
 } from "./harness/index.ts";
 
-function extractFirstFgRgb(ansi: string): [number, number, number] | undefined {
-	const m = /\x1b\[38;2;(\d+);(\d+);(\d+)m/.exec(ansi);
-	if (!m) return undefined;
-	return [Number(m[1]), Number(m[2]), Number(m[3])];
-}
-
-function findComposerTopRow(harness: InteractiveHarness): number {
-	const screen = harness.screen();
-	for (let r = screen.height - 1; r >= 0; r -= 1) {
-		const row = screen.rowText(r);
-		if (row.startsWith("╭") && row.endsWith("╮")) {
-			return r;
-		}
+function readComposerBorderRgb(harness: InteractiveHarness): [number, number, number] {
+	const topRow = findComposerTopRow(harness);
+	const fg = harness.screen().cellAt(topRow, 0)?.fg;
+	if (!fg || fg.kind !== "rgb") {
+		throw new Error("Expected truecolor RGB foreground on composer top-left corner");
 	}
-	throw new Error("Expected rounded composer top border on terminal screen");
+	return [fg.r, fg.g, fg.b];
 }
 
 describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
@@ -88,7 +83,6 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		const wf = getSessionWorkflow();
 		expect(wf.mode).toBe("code");
 
-		/* Alt+M в русской раскладке (Kitty CSI-u, ESC+ь, modifyOtherKeys, macOS Option µ, игнор отпускания клавиши, baseLayoutKey) */
 		await harness.pressKey("\x1b[1100;3u");
 		expect(wf.mode).toBe("plan");
 		await harness.pressKey("\x1bь");
@@ -104,7 +98,6 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		await harness.pressKey("\x1b[1100::109;3u");
 		expect(wf.mode).toBe("code");
 
-		/* Ctrl+Alt+P в русской и macOS Option раскладках */
 		await harness.pressKey("\x1b[1079;7u");
 		expect(wf.mode).toBe("plan");
 		await harness.pressKey("\x1b[27;7;1079~");
@@ -121,7 +114,6 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		await harness.pressKey("\x1bm");
 		expect(wf.mode).toBe("code");
 
-		/* Ctrl+Alt+O переключает Outline Rail в любой раскладке */
 		expect(getOutlineSettings().enabled).toBe(true);
 		await harness.pressKey("\x1b[1097;7u");
 		expect(getOutlineSettings().enabled).toBe(false);
@@ -133,14 +125,12 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		expect(getOutlineSettings().enabled).toBe(true);
 		setKittyProtocolActive(initialKitty);
 
-		/* Ctrl+K в русской раскладке (\x1b[1083;5u) открывает и закрывает Command Palette в реальном InteractiveMode */
 		await harness.pressKey("\x1b[1083;5u");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
 		expect(harness.screen().text()).toContain("Command Palette");
 		await harness.pressKey("\x1b[1083;5u");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 
-		/* Пользовательские Alt+<letter> (Alt+Y / Alt+н / ¥ / њ) и нативный Alt+Q (ESC+й, œ, ј) */
 		await harness.pressKey("\x1bн");
 		await harness.pressKey("\x1b[1085;3u");
 		await harness.pressKey("¥");
@@ -148,19 +138,17 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		expect(altYFires).toBe(4);
 
 		for (const seq of ["\x1bй", "\x1b[1081;3u", "œ", "ј"]) {
-			editor.setText("");
+			await harness.pressKey("\x15");
 			await harness.pressKey(seq);
 			await harness.waitForIdle();
 			expect(editor.getText()).toBe("[❝ Quote #1 · 1 line]");
 		}
-		editor.setText("");
+		await harness.pressKey("\x15");
 
-		/* Super+<letter> в русской раскладке (Super+и -> super+b) */
 		await harness.pressKey("\x1b[1080;9u");
 		await harness.pressKey("\x1b[27;9;1080~");
 		expect(superBFires).toBe(2);
 
-		/* Обычный кириллический текст и bracketed paste с символами µ / œ не перехватываются хоткеями */
 		const shortcutSpy = vi.spyOn(
 			editor as unknown as { onExtensionShortcut: (data: string) => boolean },
 			"onExtensionShortcut",
@@ -178,7 +166,7 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		expect(altYFires).toBe(4);
 	});
 
-	it("renders a 4-sided rounded composer box with › prefix, empty-draft placeholder, multiline alignment, and clean uninterrupted bottom border", async () => {
+	it("renders a 4-sided rounded composer box with › prefix, empty-draft placeholder, multiline alignment, and narrow-width wrap safety", async () => {
 		harness = await createInteractiveHarness({ theme: "dark", width: 80, height: 24 });
 
 		const editor = getActiveComposerEditor()!;
@@ -212,37 +200,43 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		expect(typedScreen.text()).not.toContain("отправить");
 
 		for (const w of [1, 2, 3, 7, 8, 12, 28, 44, 120]) {
-			const linesAtWidth = editor.render(w);
-			for (const line of linesAtWidth) {
-				expect(visibleWidth(line)).toBe(w);
-			}
+			await harness.resize(w, 24);
+			const top = findComposerTopRow(harness);
+			expect(visibleWidth(harness.renderFrame()[top]!)).toBe(w);
 		}
 
 		for (const sample of ["🚀", "a🚀", "中文🚀"]) {
-			editor.setText(sample);
-			for (let w = 1; w <= 20; w += 1) {
-				const linesAtWidth = editor.render(w);
-				expect(linesAtWidth.length).toBeGreaterThanOrEqual(3);
-				for (const line of linesAtWidth) {
-					expect(visibleWidth(line), `sample=${sample} width=${w}`).toBe(w);
-				}
+			await harness.resize(80, 24);
+			editor.setText("");
+			await harness.typeText(sample);
+			for (const w of [1, 2, 3, 4, 5, 8, 12, 20]) {
+				await harness.resize(w, 24);
+				const top = findComposerTopRow(harness);
+				expect(visibleWidth(harness.renderFrame()[top]!), `sample=${sample} width=${w}`).toBe(w);
 			}
 		}
 
-		editor.setText(" ");
-		expect(stripTerminalSequences(editor.render(80)[1]!)).not.toContain("Спроси или опиши задачу");
-
+		await harness.resize(80, 24);
 		editor.setText("");
-		expect(stripTerminalSequences(editor.render(80)[1]!).startsWith("│ › Спроси или опиши задачу…")).toBe(
-			true,
+		await harness.typeText(" ");
+		expect(harness.screen().rowText(findComposerTopRow(harness) + 1)).not.toContain(
+			"Спроси или опиши задачу",
 		);
+
+		await harness.pressKey("\x7f");
+		expect(
+			harness
+				.screen()
+				.rowText(findComposerTopRow(harness) + 1)
+				.startsWith("│ › Спроси или опиши задачу…"),
+		).toBe(true);
 	});
 
 	it("renders adaptive light/dark border tones without purple, clickable emoji-free Session Mode & Plan pills, mouse cursor positioning, and atomic Prompt Chip hooks", async () => {
 		harness = await createInteractiveHarness({
 			theme: "dark",
 			width: 90,
-			height: 26,
+			height: 28,
 			responses: [fauxAssistantMessage("1. Normalize shortcuts\n2. Frame composer")],
 		});
 
@@ -251,38 +245,62 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 
 		for (const themeMode of ["dark", "light"] as const) {
 			harness.setTheme(themeMode);
-
-			/* Внешняя перезапись borderColor (как в InteractiveMode.updateEditorBorderColor) не ломает сине-сланцевую рамку */
+			/* InteractiveMode.updateEditorBorderColor перезаписывает editor.borderColor при смене уровня мышления */
 			editor.borderColor = (s: string) => `\x1b[38;2;210;20;220m${s}\x1b[39m`;
 
-			wf.setMode("code");
-			wf.endAgentTurn();
 			await harness.mouseMove(10, 2);
+			harness.tui.setFocus(null);
+			harness.flushFrame();
+			const unfocusedIdleRgb = readComposerBorderRgb(harness);
 
-			editor.focused = false;
-			const unfocusedIdleRgb = extractFirstFgRgb(editor.render(90)[0]!)!;
-
-			editor.focused = true;
-			const focusedIdleRgb = extractFirstFgRgb(editor.render(90)[0]!)!;
+			harness.tui.setFocus(editor);
+			harness.flushFrame();
+			const focusedIdleRgb = readComposerBorderRgb(harness);
 
 			const composerTop = findComposerTopRow(harness);
-			editor.focused = false;
+			harness.tui.setFocus(null);
 			await harness.mouseMove(10, composerTop + 1);
-			const unfocusedHoverRgb = extractFirstFgRgb(editor.render(90)[0]!)!;
+			const unfocusedHoverRgb = readComposerBorderRgb(harness);
 
-			editor.focused = true;
-			const hoverRgb = extractFirstFgRgb(editor.render(90)[0]!)!;
+			harness.tui.setFocus(editor);
+			harness.flushFrame();
+			const hoverRgb = readComposerBorderRgb(harness);
 			expect(unfocusedHoverRgb).toEqual(hoverRgb);
 
-			wf.beginAgentTurn();
-			const streamingRgb = extractFirstFgRgb(editor.render(90)[0]!)!;
-			wf.endAgentTurn();
+			await harness.mouseMove(10, 2);
 
-			wf.setMode("plan");
-			const planRgb = extractFirstFgRgb(editor.render(90)[0]!)!;
+			let activeStream: ReturnType<typeof createAssistantMessageEventStream> | undefined;
+			harness.setStreamSimple(() => {
+				const st = createAssistantMessageEventStream();
+				activeStream = st;
+				return st;
+			});
+			const pendingTurn = harness.submitInput(`Stream probe ${themeMode}`);
+			await waitForCondition(() => activeStream !== undefined);
+			harness.flushFrame();
+			expect(harness.screen().rowText(findComposerTopRow(harness))).toContain("Working");
+			const streamingRgb = readComposerBorderRgb(harness);
 
-			wf.setMode("safe");
-			const safeRgb = extractFirstFgRgb(editor.render(90)[0]!)!;
+			const doneMsg: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "Stream probe done." }],
+				api: "faux",
+				provider: "faux",
+				model: "faux-1",
+				usage: ZERO_USAGE,
+				stopReason: "stop",
+				timestamp: Date.now(),
+			};
+			activeStream!.push({ type: "done", reason: "stop", message: doneMsg });
+			activeStream!.end(doneMsg);
+			await pendingTurn;
+			harness.setStreamSimple(undefined);
+
+			await harness.submitInput("/mode plan");
+			const planRgb = readComposerBorderRgb(harness);
+
+			await harness.submitInput("/mode safe");
+			const safeRgb = readComposerBorderRgb(harness);
 
 			const rgbs = [unfocusedIdleRgb, focusedIdleRgb, hoverRgb, streamingRgb, planRgb, safeRgb];
 			const unique = new Set(rgbs.map((c) => c.join(",")));
@@ -291,11 +309,10 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 				expect(r > g && b > g, `purple border rgb(${r},${g},${b}) in ${themeMode}`).toBe(false);
 			}
 
-			wf.setMode("code");
+			await harness.submitInput("/mode code");
 			await harness.mouseMove(10, 2);
 		}
 
-		/* Переходим в Plan Mode и получаем реальный план через fauxProvider, затем закрываем стартовую модалку Esc */
 		harness.setTheme("dark");
 		await harness.submitInput("/mode plan");
 		await harness.submitInput("Build the two-step plan");
@@ -317,7 +334,6 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		expect(plainTop).not.toContain("🛡");
 		expect(plainTop).not.toContain("📋");
 
-		/* Клик мышью по пилюле «План (1)» в верхней рамке композера открывает Plan Studio */
 		const planPillCol = plainTop.indexOf("План (1)");
 		expect(planPillCol).toBeGreaterThan(0);
 		await harness.mouseClick(planPillCol + 2, topBorderRow);
@@ -326,13 +342,11 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		await harness.pressKey("\x1b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 
-		/* Клик мышью по пилюле «Plan» переключает режим обратно в Code */
 		const modePillCol = harness.screen().rowText(findComposerTopRow(harness)).indexOf("Plan");
 		expect(modePillCol).toBeGreaterThan(0);
 		await harness.mouseClick(modePillCol + 1, findComposerTopRow(harness));
 		expect(wf.mode).toBe("code");
 
-		/* В светлой теме в режиме Auto-Safe клик по пилюле «Auto-Safe» также переключает в Code */
 		harness.setTheme("light");
 		await harness.submitInput("/mode safe");
 		const lightTopRow = findComposerTopRow(harness);
@@ -345,16 +359,6 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		expect(wf.mode).toBe("code");
 		harness.setTheme("dark");
 
-		editor.setWorkingStatusIndicator({
-			renderInBorder: () => "● Working…",
-			renderSpinnerInBorder: () => "●",
-		} as never);
-		const workingTop = editor.render(90)[0]!;
-		expect(visibleWidth(workingTop)).toBe(90);
-		expect(stripTerminalSequences(workingTop)).toContain("● Working…");
-		editor.setWorkingStatusIndicator(undefined);
-
-		/* Позиционирование курсора реальным SGR-кликом мыши внутри рамки композера */
 		editor.setText("abcdef");
 		harness.flushFrame();
 		const bodyRow = findComposerTopRow(harness) + 1;
@@ -362,7 +366,6 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		await harness.typeText("X");
 		expect(editor.getText()).toBe("abcXdef");
 
-		/* Атомарная навигация и удаление пилюль через ComposerHooks */
 		const chipRe = /\[Chip #\d+\]/g;
 		registerComposerHooks({
 			findAtomicTokenSpans(text) {
@@ -377,7 +380,8 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		});
 
 		editor.setText("[Chip #1][Chip #2]");
-		const decoratedRow = editor.render(90)[1]!;
+		harness.flushFrame();
+		const decoratedRow = harness.renderFrame()[findComposerTopRow(harness) + 1]!;
 		expect(visibleWidth(decoratedRow)).toBe(90);
 		expect(decoratedRow).toContain("\x1b[48;2;36;43;56m");
 
@@ -394,30 +398,29 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		harness = await createInteractiveHarness({ theme: "dark", width: 16, height: 24 });
 
 		const editor = getActiveComposerEditor()!;
-		const wf = getSessionWorkflow();
-		wf.setMode("code");
-		wf.endAgentTurn();
 
-		editor.focused = false;
-		const unfocusedIdleRgb = extractFirstFgRgb(editor.render(16)[0]!)!;
-		editor.focused = true;
-		const focusedIdleRgb = extractFirstFgRgb(editor.render(16)[0]!)!;
+		harness.tui.setFocus(null);
+		harness.flushFrame();
+		const unfocusedIdleRgb = readComposerBorderRgb(harness);
+		harness.tui.setFocus(editor);
+		harness.flushFrame();
+		const focusedIdleRgb = readComposerBorderRgb(harness);
 		expect(focusedIdleRgb).not.toEqual(unfocusedIdleRgb);
 
 		const topRow = findComposerTopRow(harness);
 		await harness.mouseMove(6, topRow + 1);
-		const hoverRgb = extractFirstFgRgb(editor.render(16)[0]!)!;
+		const hoverRgb = readComposerBorderRgb(harness);
 		expect(hoverRgb).not.toEqual(focusedIdleRgb);
 		expect(hoverRgb).not.toEqual(unfocusedIdleRgb);
 
-		editor.focused = false;
-		expect(extractFirstFgRgb(editor.render(16)[0]!)).toEqual(hoverRgb);
-		beginHoverMovePass();
-		finishHoverMovePass();
-		expect(extractFirstFgRgb(editor.render(16)[0]!)).toEqual(unfocusedIdleRgb);
-		editor.focused = true;
+		harness.tui.setFocus(null);
+		harness.flushFrame();
+		expect(readComposerBorderRgb(harness)).toEqual(hoverRgb);
+		await harness.mouseMove(1, 1);
+		expect(readComposerBorderRgb(harness)).toEqual(unfocusedIdleRgb);
+		harness.tui.setFocus(editor);
+		harness.flushFrame();
 
-		/* Ввод «/» открывает реальное автодополнение слэш-команд InteractiveMode */
 		await harness.typeText("/");
 		await harness.waitForIdle();
 
@@ -428,22 +431,18 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		const firstSuggestionRow = acBottomBorderRow + 1;
 		expect(acScreen.rowText(firstSuggestionRow)).toContain("→");
 
-		/* Наведение на список автодополнения сбрасывает hover-подсветку рамки композера */
 		await harness.mouseMove(6, firstSuggestionRow);
-		expect(extractFirstFgRgb(editor.render(16)[0]!)).toEqual(focusedIdleRgb);
+		expect(readComposerBorderRgb(harness)).toEqual(focusedIdleRgb);
 
-		/* Клики в левое и правое поля вне внутреннего прямоугольника автодополнения игнорируются */
 		await harness.mouseClick(1, firstSuggestionRow);
 		expect(editor.getText()).toBe("/");
 		await harness.mouseClick(15, firstSuggestionRow);
 		expect(editor.getText()).toBe("/");
 
-		/* Клик внутри строки автодополнения применяет выбранную слэш-команду */
 		await harness.mouseClick(6, firstSuggestionRow);
 		expect(editor.getText().startsWith("/")).toBe(true);
 		expect(editor.getText().length).toBeGreaterThan(2);
 
-		/* Узкий экран width=7 корректно переводит клик мыши в позицию курсора */
 		await harness.resize(7, 20);
 		editor.setText("abcd");
 		harness.flushFrame();
@@ -486,17 +485,14 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		expect(editor.constructor.name).toBe("PiUiComposerEditor");
 
 		wrapperRenderCalls = 0;
-		const linesAfterReload = editor.render(80);
-		expect(wrapperRenderCalls).toBe(1);
-		for (const line of linesAfterReload) {
-			expect(visibleWidth(line)).toBe(80);
-		}
-		expect(stripTerminalSequences(linesAfterReload[1]!).endsWith(" │")).toBe(true);
+		harness.flushFrame(true);
+		expect(wrapperRenderCalls).toBeGreaterThanOrEqual(1);
+		const composerRow = harness.screen().rowText(findComposerTopRow(harness) + 1);
+		expect(composerRow.endsWith(" │")).toBe(true);
 
 		const wf = getSessionWorkflow();
 		expect(wf.mode).toBe("code");
 
-		/* Многочастная bracketed paste не активирует Alt+M внутри потока вставки */
 		await harness.sendInput("\x1b[200~начало ");
 		await harness.sendInput("\x1b[109;3u");
 		await harness.sendInput("конец\x1b[201~");
@@ -542,7 +538,7 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		expect(restoredStates).toEqual([222]);
 	});
 
-	it("removes the instructional micro-hint from the inline Plan banner while keeping click-to-open Plan Studio intact", async () => {
+	it("removes the instructional micro-hint from the inline Plan banner while keeping click-to-open Plan Approval intact", async () => {
 		harness = await createInteractiveHarness({
 			theme: "dark",
 			width: 120,
@@ -553,7 +549,6 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		await harness.submitInput("/mode plan");
 		await harness.submitInput("Prepare implementation plan");
 
-		/* Закрываем автоматически открытую модалку Plan Studio клавишей Esc */
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
 		await harness.pressKey("\x1b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);

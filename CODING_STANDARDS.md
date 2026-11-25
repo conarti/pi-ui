@@ -4,7 +4,7 @@ Review-stage conventions for `@conarti/pi-ui`. Mechanical invariants (peer isola
 
 ## Domain Naming
 
-- Name internal files, classes, types, state properties, and configuration presets after canonical terms in [GLOSSARY.md](GLOSSARY.md) (`Session Mode`, `Plan`, `Shell Effect`, `Turn`, `Sticky Prompt`, `Outline Rail`, `Prompt Chip`, `Tool Density`, `Modal Card`, `Hover Popup`).
+- Name internal files, classes, types, state properties, and configuration presets after canonical terms in [GLOSSARY.md](GLOSSARY.md) (`Session Mode`, `Plan`, `Plan Approval`, `Permission Prompt`, `Shell Effect`, `Turn`, `Sticky Prompt`, `Outline Rail`, `Prompt Chip`, `Prompt Suggestion`, `Tool Density`, `Modal Card`, `Hover Popup`).
 - Keep external product names out of internal module filenames and canonical union types even when an issue or spec references an external TUI for visual comparison. Preserve legacy serialized config keys only inside narrow migration parsers when backward compatibility requires it.
 
 ## Comments

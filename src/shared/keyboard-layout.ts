@@ -422,6 +422,18 @@ function normalizeOutsidePaste(data: string, options?: KeyboardLayoutNormalizeOp
 	return out;
 }
 
+export interface BracketedPasteChunkSegment {
+	readonly text: string;
+	readonly inPaste: boolean;
+	readonly trailingStartPrefixLength: number;
+}
+
+export interface BracketedPasteTracker {
+	readonly isInPaste: boolean;
+	split(data: string): BracketedPasteChunkSegment[];
+	reset(): void;
+}
+
 function nextMarkerPrefixLen(currentLen: number, marker: string, ch: string): number {
 	if (ch === marker[currentLen]) {
 		return currentLen + 1;
@@ -429,26 +441,37 @@ function nextMarkerPrefixLen(currentLen: number, marker: string, ch: string): nu
 	return ch === marker[0] ? 1 : 0;
 }
 
-export function createKeyboardLayoutNormalizer(options?: KeyboardLayoutNormalizeOptions): KeyboardLayoutNormalizer {
+/**
+ * Потоковый трекер границ bracketed paste (`\x1b[200~` .. `\x1b[201~`),
+ * сохраняющий состояние при разрезании маркеров между чанками терминального ввода.
+ */
+export function createBracketedPasteTracker(): BracketedPasteTracker {
 	let inBracketedPaste = false;
 	let startMatch = 0;
 	let endMatch = 0;
 
 	return {
-		normalize(data: string): string {
-			if (!data) return data;
+		get isInPaste() {
+			return inBracketedPaste;
+		},
+		split(data: string): BracketedPasteChunkSegment[] {
+			if (!data) return [];
 			if (!inBracketedPaste && startMatch === 0 && !data.includes("\x1b")) {
-				return normalizeNonEscapeText(data, options);
+				return [{ text: data, inPaste: false, trailingStartPrefixLength: 0 }];
 			}
 
-			let out = "";
+			const segments: BracketedPasteChunkSegment[] = [];
 			let segStart = 0;
 			for (let i = 0; i < data.length; i++) {
 				const ch = data[i]!;
 				if (inBracketedPaste) {
 					endMatch = nextMarkerPrefixLen(endMatch, BRACKETED_PASTE_END, ch);
 					if (endMatch === BRACKETED_PASTE_END.length) {
-						out += data.slice(segStart, i + 1);
+						segments.push({
+							text: data.slice(segStart, i + 1),
+							inPaste: true,
+							trailingStartPrefixLength: 0,
+						});
 						inBracketedPaste = false;
 						endMatch = 0;
 						segStart = i + 1;
@@ -459,11 +482,23 @@ export function createKeyboardLayoutNormalizer(options?: KeyboardLayoutNormalize
 						const markerStart = i + 1 - BRACKETED_PASTE_START.length;
 						if (markerStart >= segStart) {
 							if (markerStart > segStart) {
-								out += normalizeOutsidePaste(data.slice(segStart, markerStart), options);
+								segments.push({
+									text: data.slice(segStart, markerStart),
+									inPaste: false,
+									trailingStartPrefixLength: 0,
+								});
 							}
-							out += data.slice(markerStart, i + 1);
+							segments.push({
+								text: data.slice(markerStart, i + 1),
+								inPaste: true,
+								trailingStartPrefixLength: 0,
+							});
 						} else {
-							out += data.slice(segStart, i + 1);
+							segments.push({
+								text: data.slice(segStart, i + 1),
+								inPaste: true,
+								trailingStartPrefixLength: 0,
+							});
 						}
 						inBracketedPaste = true;
 						startMatch = 0;
@@ -474,23 +509,54 @@ export function createKeyboardLayoutNormalizer(options?: KeyboardLayoutNormalize
 
 			if (segStart < data.length) {
 				if (inBracketedPaste) {
-					out += data.slice(segStart);
+					segments.push({
+						text: data.slice(segStart),
+						inPaste: true,
+						trailingStartPrefixLength: 0,
+					});
 				} else {
-					const safeEnd = Math.max(segStart, data.length - startMatch);
-					if (safeEnd > segStart) {
-						out += normalizeOutsidePaste(data.slice(segStart, safeEnd), options);
-					}
-					if (safeEnd < data.length) {
-						out += data.slice(safeEnd);
-					}
+					const trailing = Math.min(startMatch, data.length - segStart);
+					segments.push({
+						text: data.slice(segStart),
+						inPaste: false,
+						trailingStartPrefixLength: trailing,
+					});
 				}
 			}
-			return out;
+			return segments;
 		},
 		reset(): void {
 			inBracketedPaste = false;
 			startMatch = 0;
 			endMatch = 0;
+		},
+	};
+}
+
+export function createKeyboardLayoutNormalizer(options?: KeyboardLayoutNormalizeOptions): KeyboardLayoutNormalizer {
+	const pasteTracker = createBracketedPasteTracker();
+
+	return {
+		normalize(data: string): string {
+			if (!data) return data;
+			let out = "";
+			for (const seg of pasteTracker.split(data)) {
+				if (seg.inPaste) {
+					out += seg.text;
+				} else if (seg.trailingStartPrefixLength > 0) {
+					const safeEnd = seg.text.length - seg.trailingStartPrefixLength;
+					if (safeEnd > 0) {
+						out += normalizeOutsidePaste(seg.text.slice(0, safeEnd), options);
+					}
+					out += seg.text.slice(safeEnd);
+				} else {
+					out += normalizeOutsidePaste(seg.text, options);
+				}
+			}
+			return out;
+		},
+		reset(): void {
+			pasteTracker.reset();
 		},
 	};
 }

@@ -75,7 +75,6 @@ describe("headless terminal screen buffer snapshot", () => {
 		await harness.submitInput("First pinned prompt");
 		await harness.submitInput("Second prompt");
 
-		/* Прокручиваем вверх к середине первого обмена через реальное колесо мыши SGR */
 		await harness.mouseWheel("up", 20, 8, 5);
 
 		const preSelect = harness.screen();
@@ -83,7 +82,6 @@ describe("headless terminal screen buffer snapshot", () => {
 		expect(targetPos).toBeDefined();
 		expect(targetPos!.row).toBeGreaterThanOrEqual(3);
 
-		/* Выделяем строки транскрипта вплоть до колонки Outline Rail и проверяем маскировку хрома */
 		await harness.mouseDrag(targetPos!.col, targetPos!.row, 94, targetPos!.row + 1, { steps: 3 });
 
 		const screen = captureTerminalScreen(harness);

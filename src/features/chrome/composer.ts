@@ -56,6 +56,9 @@ export interface ComposerPointerInfo {
 
 export interface ComposerHooks {
 	interceptInput?(data: string, editor: PiUiComposerEditor): boolean;
+	interceptEmptyDraftInput?(data: string, editor: PiUiComposerEditor): boolean;
+	getEmptyPlaceholder?(editor: PiUiComposerEditor): string | undefined;
+	hasDraftAttachments?(): boolean;
 	transformPaste?(pastedText: string, editor: PiUiComposerEditor): string | undefined;
 	findAtomicTokenSpans?(text: string, editor: PiUiComposerEditor): ReadonlyArray<{ start: number; end: number }>;
 	decorateRenderedLine?(line: string, visualLineIndex: number, editor: PiUiComposerEditor): string;
@@ -65,19 +68,27 @@ export interface ComposerHooks {
 	restoreUndoState?(snapshot: unknown, editor: PiUiComposerEditor): void;
 }
 
-export interface ComposerPromptSuggestionBridge {
-	getSuggestion(): string | undefined;
-	hasActivePromptChips?(): boolean;
-	acceptSuggestion(): string | undefined;
-	dismissSuggestion(): boolean;
-}
-
 const COMPOSER_HOOKS_KEY = Symbol.for("conarti.pi-ui.composer-hooks.v1");
-const COMPOSER_SUGGESTION_BRIDGE_KEY = Symbol.for("conarti.pi-ui.composer-prompt-suggestion.v1");
+const COMPOSER_FEATURE_HOOKS_KEY = Symbol.for("conarti.pi-ui.composer-feature-hooks.v1");
 const ACTIVE_COMPOSER_KEY = Symbol.for("conarti.pi-ui.active-composer.v1");
 const COMPOSER_FACTORY_ORIGIN = Symbol.for("conarti.pi-ui.composer-factory-origin.v1");
 const UPSTREAM_EDITOR_FACTORIES = new WeakMap<object, ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>();
 const composerGraphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+function firstGrapheme(text: string): string {
+	for (const segment of composerGraphemeSegmenter.segment(text)) {
+		return segment.segment;
+	}
+	return text[0] ?? "";
+}
+
+function getFeatureComposerHooksMap(): Map<string, ComposerHooks> {
+	const g = globalThis as Record<symbol, Map<string, ComposerHooks> | undefined>;
+	if (!g[COMPOSER_FEATURE_HOOKS_KEY]) {
+		g[COMPOSER_FEATURE_HOOKS_KEY] = new Map();
+	}
+	return g[COMPOSER_FEATURE_HOOKS_KEY]!;
+}
 
 export function getActiveComposerEditor(): PiUiComposerEditor | undefined {
 	return (globalThis as Record<symbol, PiUiComposerEditor | undefined>)[ACTIVE_COMPOSER_KEY];
@@ -95,18 +106,22 @@ export function getComposerHooks(): ComposerHooks | undefined {
 	return (globalThis as Record<symbol, ComposerHooks | undefined>)[COMPOSER_HOOKS_KEY];
 }
 
-export function registerComposerPromptSuggestionBridge(
-	bridge: ComposerPromptSuggestionBridge | undefined,
+export function registerFeatureComposerHooks(
+	featureId: string,
+	hooks: ComposerHooks | undefined,
 ): void {
-	(globalThis as Record<symbol, ComposerPromptSuggestionBridge | undefined>)[
-		COMPOSER_SUGGESTION_BRIDGE_KEY
-	] = bridge;
+	const map = getFeatureComposerHooksMap();
+	if (hooks) {
+		map.set(featureId, hooks);
+	} else {
+		map.delete(featureId);
+	}
 }
 
-export function getComposerPromptSuggestionBridge(): ComposerPromptSuggestionBridge | undefined {
-	return (globalThis as Record<symbol, ComposerPromptSuggestionBridge | undefined>)[
-		COMPOSER_SUGGESTION_BRIDGE_KEY
-	];
+function listAllComposerHooks(): ComposerHooks[] {
+	const primary = getComposerHooks();
+	const extras = [...getFeatureComposerHooksMap().values()];
+	return primary ? [primary, ...extras] : extras;
 }
 
 export interface PiUiComposerDeps {
@@ -206,10 +221,25 @@ export class PiUiComposerEditor extends CustomEditor {
 		return this.tui;
 	}
 
+	isSessionIdle(): boolean {
+		return this.deps.ctx.isIdle();
+	}
+
 	isDraftCompletelyEmpty(): boolean {
 		if (!this.internals().isEditorEmpty()) return false;
-		if (getComposerPromptSuggestionBridge()?.hasActivePromptChips?.()) return false;
+		for (const hook of listAllComposerHooks()) {
+			if (hook.hasDraftAttachments?.()) return false;
+		}
 		return true;
+	}
+
+	acceptTextWithUndoSnapshot(text: string): void {
+		const hooks = getComposerHooks();
+		const preSnap = hooks?.captureUndoState?.(this);
+		this.setTextWithUndoSnapshot(text, preSnap);
+		this.acceptedSuggestionUndoArmed = true;
+		hooks?.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
+		this.tui.requestRender();
 	}
 
 	getRenderedBoxHeight(): number {
@@ -603,27 +633,9 @@ export class PiUiComposerEditor extends CustomEditor {
 				return;
 			}
 
-			const suggestionBridge = getComposerPromptSuggestionBridge();
-			const activeSuggestion = this.isDraftCompletelyEmpty()
-				? suggestionBridge?.getSuggestion()
-				: undefined;
-			if (activeSuggestion) {
-				if (matchesKey(data, "tab") || matchesKey(data, "right")) {
-					const accepted = suggestionBridge?.acceptSuggestion();
-					if (accepted) {
-						const preSnap = hooks?.captureUndoState?.(this);
-						this.setTextWithUndoSnapshot(accepted, preSnap);
-						this.acceptedSuggestionUndoArmed = true;
-						hooks?.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
-						this.tui.requestRender();
-						return;
-					}
-				}
-				if (
-					(data === "\x1b" || matchesKey(data, "escape")) &&
-					this.deps.ctx.isIdle()
-				) {
-					if (suggestionBridge?.dismissSuggestion()) {
+			if (this.isDraftCompletelyEmpty()) {
+				for (const featureHook of listAllComposerHooks()) {
+					if (featureHook.interceptEmptyDraftInput?.(data, this)) {
 						hooks?.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
 						this.tui.requestRender();
 						return;
@@ -772,12 +784,9 @@ export class PiUiComposerEditor extends CustomEditor {
 		if (!clipped) {
 			return fitExactWidth(`${marker}${renderFakeCursor(" ")}`, innerWidth);
 		}
-		const firstSegment = composerGraphemeSegmenter.segment(clipped)[Symbol.iterator]().next().value as
-			| Intl.SegmentData
-			| undefined;
-		const firstGrapheme = firstSegment?.segment ?? clipped[0]!;
-		const rest = clipped.slice(firstGrapheme.length);
-		const styled = `${marker}${renderFakeCursor(theme.fg("dim", firstGrapheme))}${rest ? theme.fg("dim", rest) : ""}`;
+		const head = firstGrapheme(clipped);
+		const rest = clipped.slice(head.length);
+		const styled = `${marker}${renderFakeCursor(theme.fg("dim", head))}${rest ? theme.fg("dim", rest) : ""}`;
 		return fitExactWidth(styled, innerWidth);
 	}
 
@@ -817,9 +826,16 @@ export class PiUiComposerEditor extends CustomEditor {
 		const chevron = light ? fgRgb(37, 99, 235, "›") : fgRgb(125, 207, 255, "›");
 		const hooks = getComposerHooks();
 		const isEmpty = internal.isEditorEmpty();
-		const activeSuggestion = this.isDraftCompletelyEmpty()
-			? getComposerPromptSuggestionBridge()?.getSuggestion()
-			: undefined;
+		let activePlaceholder: string | undefined;
+		if (this.isDraftCompletelyEmpty()) {
+			for (const featureHook of listAllComposerHooks()) {
+				const candidate = featureHook.getEmptyPlaceholder?.(this);
+				if (candidate) {
+					activePlaceholder = candidate;
+					break;
+				}
+			}
+		}
 
 		const out: string[] = [this.renderRoundedTopBorder(width)];
 
@@ -830,7 +846,7 @@ export class PiUiComposerEditor extends CustomEditor {
 
 			let cell: string;
 			if (isEmpty && i === 0) {
-				cell = this.renderEmptyPlaceholderCell(innerWidth, activeSuggestion ?? COMPOSER_PLACEHOLDER);
+				cell = this.renderEmptyPlaceholderCell(innerWidth, activePlaceholder ?? COMPOSER_PLACEHOLDER);
 			} else {
 				const rawInner = baseLines[1 + i] ?? "";
 				const decorated = hooks?.decorateRenderedLine

@@ -8,7 +8,12 @@ import {
 } from "@earendil-works/pi-tui";
 import { fgRgb, getActiveGlobalTheme, isLightTheme, paintSurfaceRow, type RgbTuple } from "../../shared/ansi.ts";
 import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
-import { claimHover, copyToClipboard, hookMethod } from "../../shared/runtime-hooks.ts";
+import {
+	claimHover,
+	copyToClipboard,
+	createCopyFeedbackTimerRegistry,
+	hookMethod,
+} from "../../shared/runtime-hooks.ts";
 import { formatTurnTime, sanitizeTurnText } from "../../shared/turn-index.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
 
@@ -18,9 +23,15 @@ const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 
 const PILL_FORMATTER_KEY = Symbol.for("conarti.pi-ui.prompt-pill-formatter.v1");
 const PENDING_USER_TS_KEY = Symbol.for("conarti.pi-ui.pending-user-ts.v1");
-const COPY_TIMERS_KEY = Symbol.for("conarti.pi-ui.user-prompt-copy-timers.v1");
 const PILL_OSC8_OPEN_PREFIX = "\x1b]8;;conarti-pill:";
 const PILL_OSC8_CLOSE = "\x1b]8;;\x07";
+
+const userPromptCopyTimers = createCopyFeedbackTimerRegistry<{
+	__conartiCopied?: boolean;
+	__conartiCopyTimer?: unknown;
+}>("conarti.pi-ui.user-prompt-copy-timers.v1", (target) => {
+	target.__conartiCopied = false;
+});
 
 export interface PromptPillDescriptor {
 	readonly id: string;
@@ -109,34 +120,13 @@ export function recordPendingUserMessageTimestamp(timestamp: number | string | u
 	g[PENDING_USER_TS_KEY] = { value: timestamp };
 }
 
-interface ActiveCopyTimer {
-	timer: ReturnType<typeof setTimeout>;
-	target: any;
-}
-
-function getCopyTimers(): Set<ActiveCopyTimer> {
-	const g = globalThis as Record<symbol, Set<ActiveCopyTimer> | undefined>;
-	if (!g[COPY_TIMERS_KEY]) {
-		g[COPY_TIMERS_KEY] = new Set();
-	}
-	return g[COPY_TIMERS_KEY]!;
-}
-
 export function clearPendingUserMessageTimestamps(): void {
 	const g = globalThis as Record<symbol, { value?: number | string } | undefined>;
 	g[PENDING_USER_TS_KEY] = undefined;
 }
 
 export function clearUserPromptCopyTimers(): void {
-	const timers = getCopyTimers();
-	for (const entry of timers) {
-		clearTimeout(entry.timer);
-		if (entry.target) {
-			entry.target.__conartiCopied = false;
-			entry.target.__conartiCopyTimer = undefined;
-		}
-	}
-	timers.clear();
+	userPromptCopyTimers.clearAll();
 }
 
 function consumePendingUserMessageTimestamp(): number | string | undefined {
@@ -610,26 +600,11 @@ export function installUserPromptCards(): void {
 				if (matchedCopy) {
 					copyToClipboard(sanitizeTurnText(String(self.text ?? "")).trim());
 					self.__conartiCopied = true;
-					const timers = getCopyTimers();
-					if (self.__conartiCopyTimer) {
-						clearTimeout(self.__conartiCopyTimer.timer);
-						timers.delete(self.__conartiCopyTimer);
-					}
 					requestRender();
-					const entry: ActiveCopyTimer = {
-						target: self,
-						timer: setTimeout(() => {
-							timers.delete(entry);
-							if (self.__conartiCopyTimer === entry) {
-								self.__conartiCopyTimer = undefined;
-							}
-							self.__conartiCopied = false;
-							requestRender();
-						}, 1300),
-					};
-					entry.timer.unref?.();
-					self.__conartiCopyTimer = entry;
-					timers.add(entry);
+					userPromptCopyTimers.arm(self, (target) => {
+						target.__conartiCopied = false;
+						requestRender();
+					});
 					return { handled: true, render: true };
 				}
 				if (matchedPill) {

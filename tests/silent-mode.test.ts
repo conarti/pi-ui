@@ -1,9 +1,6 @@
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, MouseRegion, Spacer, Text, stripTerminalSequences } from "@earendil-works/pi-tui";
-import { renderAnswerOnly } from "../src/features/tool-calls/silent.ts";
 import { stopAllAnimations } from "../src/shared/animation-scheduler.ts";
 import {
 	createAssistantMessageEventStream,
@@ -11,18 +8,10 @@ import {
 	fauxAssistantMessage,
 	fauxThinking,
 	fauxToolCall,
+	ZERO_USAGE,
 	type AssistantMessage,
 	type InteractiveHarness,
 } from "./harness/index.ts";
-
-const ZERO_USAGE = {
-	input: 10,
-	output: 20,
-	cacheRead: 0,
-	cacheWrite: 0,
-	totalTokens: 30,
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-};
 
 describe("/silent mode transcript filtering (real InteractiveMode)", () => {
 	let harness: InteractiveHarness | undefined;
@@ -35,36 +24,41 @@ describe("/silent mode transcript filtering (real InteractiveMode)", () => {
 		stopAllAnimations();
 	});
 
-	it("filters native MouseRegion thinking nodes and trailing spacers in renderAnswerOnly (pure Seam 2)", () => {
-		const mdTheme = getMarkdownTheme();
-		const contentContainer = new Container();
-		contentContainer.addChild(new MouseRegion(new Text("Native thinking label", 1, 0), () => undefined));
-		contentContainer.addChild(new Spacer(1));
-		contentContainer.addChild(new Markdown("Native answer stays visible.", 2, 0, mdTheme));
-		contentContainer.addChild(new Spacer(1));
-		contentContainer.addChild(new Text("Trailing stop notice", 1, 0));
+	it("filters collapsed Thinking headers and trailing error/stop notices in real InteractiveMode without mutating the underlying message container", async () => {
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 104,
+			height: 30,
+			thinkingLevel: "medium",
+			responses: [
+				fauxAssistantMessage(
+					[
+						fauxThinking("Internal reasoning block"),
+						{ type: "text", text: "Native answer stays visible." },
+					],
+					{ stopReason: "aborted", errorMessage: "Cancelled" },
+				),
+			],
+		});
 
-		const fullPlain = contentContainer.render(100).map(stripTerminalSequences).join("\n");
-		expect(fullPlain).toContain("Native thinking label");
-		expect(fullPlain).toContain("Native answer stays visible.");
-		expect(fullPlain).toContain("Trailing stop notice");
+		await harness.submitInput("Check answer-only filtering");
 
-		const filteredPlain = renderAnswerOnly(
-			{ contentContainer },
-			100,
-			(w) => contentContainer.render(w),
-		)
-			.map(stripTerminalSequences)
-			.join("\n");
+		const fullText = harness.screen().text();
+		expect(fullText).toContain("Thought");
+		expect(fullText).toContain("Native answer stays visible.");
+		expect(fullText).toContain("Operation aborted");
 
-		expect(filteredPlain).toContain("Native answer stays visible.");
-		expect(filteredPlain).not.toContain("Native thinking label");
-		expect(filteredPlain).not.toContain("Trailing stop notice");
+		await harness.submitInput("/silent on");
+		const silentText = harness.screen().text();
+		expect(silentText).toContain("Native answer stays visible.");
+		expect(silentText).not.toContain("Thought");
+		expect(silentText).not.toContain("Operation aborted");
 
-		/* Исходный контейнер не мутируется необратимо и сохраняет все дочерние узлы после рендера */
-		const afterPlain = contentContainer.render(100).map(stripTerminalSequences).join("\n");
-		expect(afterPlain).toContain("Native thinking label");
-		expect(afterPlain).toContain("Trailing stop notice");
+		await harness.submitInput("/silent off");
+		const restoredText = harness.screen().text();
+		expect(restoredText).toContain("Thought");
+		expect(restoredText).toContain("Native answer stays visible.");
+		expect(restoredText).toContain("Operation aborted");
 	});
 
 	it("hides animated & collapsed ThinkingBlock, intermediate turns, tool rows, custom messages, and status notices in real InteractiveMode, then restores them on /silent off", async () => {
@@ -116,7 +110,6 @@ describe("/silent mode transcript filtering (real InteractiveMode)", () => {
 		await harness.submitInput("Fix the login bug");
 		await harness.submitInput("/emit-test-notices");
 
-		/* Базовое состояние (/silent off): видны блок размышлений, тул чтения, уведомления и ответ */
 		const baselineText = harness.screen().text();
 		expect(baselineText).toContain("Fix the login bug");
 		expect(baselineText).toContain("Read src/auth.ts");
@@ -126,7 +119,6 @@ describe("/silent mode transcript filtering (real InteractiveMode)", () => {
 		expect(baselineText).toContain("Extension custom notice ready");
 		expect(baselineText).toContain("Chat status notice line");
 
-		/* Включаем /silent on — в транскрипте остаются только промпт пользователя и финальный ответ */
 		await harness.submitInput("/silent on");
 		const silentText = harness.screen().text();
 		expect(silentText).toContain("Fix the login bug");
@@ -138,7 +130,6 @@ describe("/silent mode transcript filtering (real InteractiveMode)", () => {
 		expect(silentText).not.toContain("Extension custom notice ready");
 		expect(silentText).not.toContain("Chat status notice line");
 
-		/* Запускаем стримящийся ход с одним только активным ThinkingBlock при включённом /silent */
 		const streamReady = new Promise<void>((resolve) => {
 			resolveStreamReady = resolve;
 		});
@@ -216,7 +207,6 @@ describe("/silent mode transcript filtering (real InteractiveMode)", () => {
 		expect(harness.screen().text()).toContain("Second concise answer.");
 		expect(harness.screen().text()).not.toContain("Thought");
 
-		/* Выключаем /silent off — все скрытые карточки, размышления, тулы и уведомления возвращаются */
 		await harness.submitInput("/silent off");
 		const restoredText = harness.screen().text();
 		expect(restoredText).toContain("Read src/auth.ts");

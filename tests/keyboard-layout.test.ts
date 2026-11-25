@@ -9,6 +9,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	createBracketedPasteTracker,
 	createKeyboardLayoutNormalizer,
 	matchesLayoutChord,
 	normalizeKeyboardLayoutInput,
@@ -278,5 +279,32 @@ describe("keyboard-layout normalizer", () => {
 		expect(matchesKey(colemakCtrlAltP, "ctrl+alt+p")).toBe(true);
 
 		expect(matchesKey(normalizeKeyboardLayoutInput("\x1b[8222;5u"), "shift+ctrl+alt+o")).toBe(true);
+	});
+
+	it("tracks split-chunk and back-to-back bracketed paste boundaries and separates trailing keystrokes", () => {
+		const tracker = createBracketedPasteTracker();
+		expect(tracker.split("\x1b[20")).toEqual([
+			{ text: "\x1b[20", inPaste: false, trailingStartPrefixLength: 4 },
+		]);
+		expect(tracker.isInPaste).toBe(false);
+
+		expect(tracker.split("0~paste\x0bbody")).toEqual([
+			{ text: "0~", inPaste: true, trailingStartPrefixLength: 0 },
+			{ text: "paste\x0bbody", inPaste: true, trailingStartPrefixLength: 0 },
+		]);
+		expect(tracker.isInPaste).toBe(true);
+
+		expect(tracker.split("\x1b[201~\x1b[200~second")).toEqual([
+			{ text: "\x1b[201~", inPaste: true, trailingStartPrefixLength: 0 },
+			{ text: "\x1b[200~", inPaste: true, trailingStartPrefixLength: 0 },
+			{ text: "second", inPaste: true, trailingStartPrefixLength: 0 },
+		]);
+		expect(tracker.isInPaste).toBe(true);
+
+		expect(tracker.split("\x1b[201~\x0b")).toEqual([
+			{ text: "\x1b[201~", inPaste: true, trailingStartPrefixLength: 0 },
+			{ text: "\x0b", inPaste: false, trailingStartPrefixLength: 0 },
+		]);
+		expect(tracker.isInPaste).toBe(false);
 	});
 });

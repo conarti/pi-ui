@@ -5,6 +5,8 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { matchesKey } from "@earendil-works/pi-tui";
+import { withConartiInternalRegistration } from "../../shared/extension-superseder.ts";
 import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import {
@@ -14,11 +16,10 @@ import {
 import { requestRender } from "../../shared/ui-action-bridge.ts";
 import {
 	getActiveComposerEditor,
-	registerComposerPromptSuggestionBridge,
-	type ComposerPromptSuggestionBridge,
+	registerFeatureComposerHooks,
+	type ComposerHooks,
 } from "../chrome/composer.ts";
 import { getActivePromptChipRegistry } from "../prompt-chips/index.ts";
-import { withConartiInternalRegistration } from "../quotes/supersede-quote-blocks.ts";
 import {
 	extractAssistantTextContent,
 	MAX_PROMPT_SUGGESTION_LENGTH,
@@ -26,9 +27,9 @@ import {
 	sanitizePromptSuggestion,
 } from "./model.ts";
 import {
-	installNextPromptSuperseder,
-	isSupersededNextPromptExtension,
-} from "./supersede-next-prompt.ts";
+	installExternalSuggestionSuperseder,
+	isSupersededExternalSuggestionExtension,
+} from "./supersede-external.ts";
 
 export {
 	extractAssistantTextContent,
@@ -37,11 +38,11 @@ export {
 	sanitizePromptSuggestion,
 } from "./model.ts";
 export {
-	installNextPromptSuperseder,
-	isSupersededNextPromptExtension,
-} from "./supersede-next-prompt.ts";
+	installExternalSuggestionSuperseder,
+	isSupersededExternalSuggestionExtension,
+} from "./supersede-external.ts";
 
-const SUGGESTIONS_MODES = ["on", "off", "status"] as const;
+const SUGGESTIONS_MODES = ["on", "off"] as const;
 const SUGGESTIONS_USAGE = "Использование: /suggestions [on|off]";
 
 function resolveActiveTui() {
@@ -49,7 +50,7 @@ function resolveActiveTui() {
 }
 
 export function registerPromptSuggestionFeature(pi: ExtensionAPI): void {
-	installNextPromptSuperseder(pi);
+	installExternalSuggestionSuperseder(pi);
 	let enabled = loadPiUiUserConfig().promptSuggestions;
 	let activeSuggestion: string | undefined;
 	let lastRequest: AgentMessage[] = [];
@@ -67,23 +68,26 @@ export function registerPromptSuggestionFeature(pi: ExtensionAPI): void {
 		}
 	};
 
-	const bridge: ComposerPromptSuggestionBridge = {
-		getSuggestion: () => (enabled ? activeSuggestion : undefined),
-		hasActivePromptChips: () => getActivePromptChipRegistry().hasActiveDraftChips(),
-		acceptSuggestion: () => {
-			if (!enabled || !activeSuggestion) return undefined;
-			const accepted = activeSuggestion;
-			activeSuggestion = undefined;
-			return accepted;
-		},
-		dismissSuggestion: () => {
-			if (!activeSuggestion) return false;
-			activeSuggestion = undefined;
-			return true;
+	const suggestionComposerHooks: ComposerHooks = {
+		hasDraftAttachments: () => getActivePromptChipRegistry().hasActiveDraftChips(),
+		getEmptyPlaceholder: () => (enabled ? activeSuggestion : undefined),
+		interceptEmptyDraftInput: (data, editor) => {
+			if (!enabled || !activeSuggestion) return false;
+			if (matchesKey(data, "tab") || matchesKey(data, "right")) {
+				const accepted = activeSuggestion;
+				activeSuggestion = undefined;
+				editor.acceptTextWithUndoSnapshot(accepted);
+				return true;
+			}
+			if ((data === "\x1b" || matchesKey(data, "escape")) && editor.isSessionIdle()) {
+				activeSuggestion = undefined;
+				return true;
+			}
+			return false;
 		},
 	};
 
-	registerComposerPromptSuggestionBridge(bridge);
+	registerFeatureComposerHooks("prompt-suggestion", suggestionComposerHooks);
 
 	withConartiInternalRegistration(() => {
 		pi.registerCommand("suggestions", {
@@ -97,14 +101,6 @@ export function registerPromptSuggestionFeature(pi: ExtensionAPI): void {
 			},
 			handler: async (args, ctx) => {
 				const arg = args.trim().toLowerCase();
-				if (arg === "status") {
-					enabled = loadPiUiUserConfig().promptSuggestions;
-					ctx.ui.notify(
-						`Prompt Suggestion: ${enabled ? "включены (on)" : "выключены (off)"}`,
-						"info",
-					);
-					return;
-				}
 				if (arg !== "" && arg !== "on" && arg !== "off") {
 					ctx.ui.notify(SUGGESTIONS_USAGE, "warning");
 					return;
@@ -152,7 +148,7 @@ export function registerPromptSuggestionFeature(pi: ExtensionAPI): void {
 
 		pi.on("session_start", async (event) => {
 			enabled = loadPiUiUserConfig().promptSuggestions;
-			registerComposerPromptSuggestionBridge(bridge);
+			registerFeatureComposerHooks("prompt-suggestion", suggestionComposerHooks);
 			if (event.reason !== "reload") {
 				clearPromptSuggestion({ resetContextPrefix: true });
 			} else if (!enabled) {
@@ -187,9 +183,20 @@ export function registerPromptSuggestionFeature(pi: ExtensionAPI): void {
 				timestamp: Date.now(),
 			};
 
-			/* Запрос запускается в фоне без await, чтобы индикатор работы Pi погас сразу по завершении ответа ассистента */
+			/* Запрос запускается в фоне без await, но после микротаска повторно проверяет модалки, открытые в agent_end */
 			void (async () => {
 				try {
+					await Promise.resolve();
+					const activeTui = resolveActiveTui();
+					if (
+						controller.signal.aborted ||
+						!enabled ||
+						ctx.hasPendingMessages() ||
+						(activeTui && hasBlockingModalOverlay(activeTui))
+					) {
+						return;
+					}
+
 					const context = normalizeContext({
 						messages: convertToLlm([...requestPrefix, reply, suggestionPrompt]),
 					});
@@ -202,7 +209,13 @@ export function registerPromptSuggestionFeature(pi: ExtensionAPI): void {
 						})
 						.result();
 
-					if (controller.signal.aborted || !enabled || answer.stopReason !== "stop") {
+					const postStreamTui = resolveActiveTui();
+					if (
+						controller.signal.aborted ||
+						!enabled ||
+						answer.stopReason !== "stop" ||
+						(postStreamTui && hasBlockingModalOverlay(postStreamTui))
+					) {
 						return;
 					}
 					const cleaned = sanitizePromptSuggestion(

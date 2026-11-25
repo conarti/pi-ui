@@ -97,7 +97,6 @@ describe("Host Runtime seam (real InteractiveMode)", () => {
 	});
 
 	it("transitions live between regular and fullscreen TUI modes, rebinding ViewportChromeCompositor onto new renderers and dismissing Hover Popups cleanly", async () => {
-		/* 1. Старт в regular-режиме -> живое переключение в fullscreen */
 		harness = await createInteractiveHarness({
 			tuiMode: "regular",
 			theme: "dark",
@@ -132,7 +131,6 @@ describe("Host Runtime seam (real InteractiveMode)", () => {
 		const firstAltRenderer = unwrapHostTui(harness.tui);
 		expect(firstAltRenderer).toBeInstanceOf(TuiAltScreen);
 
-		/* Открываем неблокирующий Hover Popup выделения (╭ ❝ Цитировать ╮) перед обратным переключением режима */
 		const fsScreen = harness.screen();
 		const quoteTarget = fsScreen.findText("Quotable line across mode switch");
 		expect(quoteTarget).toBeDefined();
@@ -144,14 +142,12 @@ describe("Host Runtime seam (real InteractiveMode)", () => {
 		);
 		expect(harness.screen().text()).toContain("╭ ❝ Цитировать ╮");
 
-		/* 2. Переключение fullscreen -> regular не должно блокироваться транзиентным Hover Popup и должно снимать композитор */
 		const switchedToRegular = await harness.setTuiMode("regular");
 		expect(switchedToRegular).toBe(true);
 		expect(runtime!.isFullscreen).toBe(false);
 		expect(runtime!.scroll).toBeUndefined();
 		expect(runtime!.viewportSlots).toBeUndefined();
 
-		/* 3. Повторное переключение regular -> fullscreen создаёт новый экземпляр TuiAltScreen и перепривязывает хром */
 		const switchedBackToFullscreen = await harness.setTuiMode("fullscreen");
 		expect(switchedBackToFullscreen).toBe(true);
 		const secondAltRenderer = unwrapHostTui(harness.tui);
@@ -162,13 +158,11 @@ describe("Host Runtime seam (real InteractiveMode)", () => {
 		expect(runtime!.viewportSlots?.rightRail).toBeDefined();
 		expect(hasRenderedOutlineRail(harness)).toBe(true);
 
-		/* Прокрутка вверх на новом TuiAltScreen отрисовывает Sticky Prompt первого хода */
 		await harness.mouseWheel("up", 40, 10, 8);
 		const stickyTop = [0, 1, 2, 3].map((r) => harness!.screen().rowText(r)).join("\n");
 		expect(stickyTop).toContain("Prompt in regular mode 1");
 		await harness.mouseWheel("down", 40, 10, 12);
 
-		/* Открываем блокирующий Modal Card (/palette) и проверяем, что он запрещает смену режима TUI до закрытия по Escape */
 		await harness.paste("/palette", true);
 		await harness.sendInput("\r");
 		expect(harness.screen().text()).toContain("Поиск команд");
@@ -176,7 +170,6 @@ describe("Host Runtime seam (real InteractiveMode)", () => {
 		await harness.pressKey("\x1b");
 		expect(harness.screen().text()).not.toContain("Поиск команд");
 
-		/* Проверяем, что на новом экземпляре TuiAltScreen снова работает попап цитирования по выделению мышью */
 		const reboundScreen = harness.screen();
 		const reboundTarget = reboundScreen.findText("Quotable line across mode switch");
 		expect(reboundTarget).toBeDefined();
@@ -191,6 +184,51 @@ describe("Host Runtime seam (real InteractiveMode)", () => {
 		await harness.dispose();
 		expect(getActiveHostRuntime()).toBeUndefined();
 		harness = undefined;
+	});
+
+	it("re-asserts 1003h pointer-motion tracking after TuiAltScreen.beforeTerminalStart writes 1002h inside terminal multiplexers", async () => {
+		const prevTmux = process.env.TMUX;
+		process.env.TMUX = "/tmp/tmux-1000/default,42,0";
+		try {
+			harness = await createInteractiveHarness({
+				tuiMode: "regular",
+				theme: "dark",
+				width: 110,
+				height: 28,
+				responses: [
+					fauxAssistantMessage(buildMultiLineText("MuxTurn1", 14)),
+					fauxAssistantMessage(buildMultiLineText("MuxTurn2", 14)),
+				],
+			});
+
+			await harness.submitInput("Mux prompt 1");
+			await harness.submitInput("Mux prompt 2");
+
+			const writeOffsetFirst = harness.terminal.writes.length;
+			expect(await harness.setTuiMode("fullscreen")).toBe(true);
+			const firstSwitchStream = harness.terminal.writes.slice(writeOffsetFirst).join("");
+			expect(firstSwitchStream.indexOf("\x1b[?1049h")).toBeGreaterThanOrEqual(0);
+			expect(firstSwitchStream.indexOf("\x1b[?1002h")).toBeGreaterThanOrEqual(0);
+			expect(firstSwitchStream.lastIndexOf("\x1b[?1003h")).toBeGreaterThan(
+				firstSwitchStream.lastIndexOf("\x1b[?1002h"),
+			);
+
+			expect(await harness.setTuiMode("regular")).toBe(true);
+
+			const writeOffsetSecond = harness.terminal.writes.length;
+			expect(await harness.setTuiMode("fullscreen")).toBe(true);
+			const secondSwitchStream = harness.terminal.writes.slice(writeOffsetSecond).join("");
+			expect(secondSwitchStream.indexOf("\x1b[?1002h")).toBeGreaterThanOrEqual(0);
+			expect(secondSwitchStream.lastIndexOf("\x1b[?1003h")).toBeGreaterThan(
+				secondSwitchStream.lastIndexOf("\x1b[?1002h"),
+			);
+		} finally {
+			if (prevTmux === undefined) {
+				delete process.env.TMUX;
+			} else {
+				process.env.TMUX = prevTmux;
+			}
+		}
 	});
 
 	it("consolidates prototype hooks without stacking across reloads or legacy markers", () => {
@@ -269,7 +307,6 @@ describe("Host Runtime seam (real InteractiveMode)", () => {
 		const altMouseAfterFirst = altProto.handleMouseEvent;
 		const altCompositeAfterFirst = altProto.compositeScrollToEndIndicator;
 
-		/* Выполняем настоящий /reload через InteractiveMode */
 		await harness.reload();
 		await harness.submitInput("Run second turn after reload");
 		await harness.submitInput("/silent off");
@@ -282,10 +319,8 @@ describe("Host Runtime seam (real InteractiveMode)", () => {
 		expect(altProto.handleMouseEvent).toBe(altMouseAfterFirst);
 		expect(altProto.compositeScrollToEndIndicator).toBe(altCompositeAfterFirst);
 
-		/* После /reload Outline Rail остаётся привязанным к текущему TuiAltScreen */
 		expect(hasRenderedOutlineRail(harness)).toBe(true);
 
-		/* Переключаем стили тулов под fake timers и проверяем отсутствие утечек таймеров и belowEditor-виджетов */
 		vi.useFakeTimers();
 		await harness.submitInput("/compact-tools claude");
 		await harness.submitInput("/compact-tools codex");
@@ -353,11 +388,8 @@ describe("Host Runtime seam (real InteractiveMode)", () => {
 		const finalScreen = harness.screen();
 		const fullText = finalScreen.text();
 
-		/* Группировщик claude объединяет два последовательных чтения в сводку Read 2 files */
 		expect(fullText).toContain("Read 2 files");
-		/* Многострочный блок размышлений свёрнут до заголовка без второго абзаца */
 		expect(fullText).not.toContain("Hidden second line of thinking");
-		/* Во время исполнения тула при working: true рендерится активная строка прогресса */
 		expect(observedWorkingDuringTool).toBe(true);
 		expect(fullText).toContain("Finished reading both files.");
 

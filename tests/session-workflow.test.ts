@@ -85,7 +85,7 @@ describe("Session Workflow on real InteractiveMode", () => {
 		]);
 	});
 
-	it("restores only the subset of write tools that were active before Plan mode, including when exiting into Auto-Safe", async () => {
+	it("restores only the subset of write tools that were active before Plan mode, including when exiting into Auto Session Mode", async () => {
 		harness = await createInteractiveHarness({
 			tools: ["-write", "+find"],
 		});
@@ -117,7 +117,6 @@ describe("Session Workflow on real InteractiveMode", () => {
 			},
 		});
 
-		/* 1. Запуск напрямую с флагом --plan + /reload */
 		harness = await createInteractiveHarness({
 			flags: { plan: true },
 			tools: ["+grep"],
@@ -152,7 +151,6 @@ describe("Session Workflow on real InteractiveMode", () => {
 		await harness.dispose();
 		harness = undefined;
 
-		/* 2. Восстановление сессии в режиме Plan из conarti-ui-state, когда активные тулы уже без edit/write */
 		harness = await createInteractiveHarness({
 			tools: ["-edit", "-write"],
 			customTools: [extraTool],
@@ -179,7 +177,6 @@ describe("Session Workflow on real InteractiveMode", () => {
 		await harness.dispose();
 		harness = undefined;
 
-		/* 3. Восстановление legacy grok-ui-state без поля withheldWriteTools */
 		harness = await createInteractiveHarness({
 			tools: ["-edit", "-write"],
 			setupSession(sm) {
@@ -271,7 +268,6 @@ describe("Session Workflow on real InteractiveMode", () => {
 			executingPlan: false,
 		});
 
-		/* Переключаем Safe -> Code -> Plan по шорткату Alt+M */
 		await harness.pressKey("\x1bm");
 		await harness.pressKey("\x1bm");
 		expect(getLatestPersistedState(harness)).toMatchObject({
@@ -303,7 +299,6 @@ describe("Session Workflow on real InteractiveMode", () => {
 			],
 		});
 
-		/* 1. Скрытие баннера черновика в режиме Code реальным кликом мыши по ✕ */
 		await harness.submitInput("/mode plan");
 		await harness.submitInput("Build draft plan");
 		await harness.pressKey("\r");
@@ -328,7 +323,6 @@ describe("Session Workflow on real InteractiveMode", () => {
 		});
 		expect(harness.screen().text()).not.toContain("Открыть план");
 
-		/* 2. Скрытие баннера активного выполнения ("✕ Скрыть") очищает контекст выполнения */
 		await harness.submitInput("/mode plan");
 		await harness.submitInput("Generate executable plan");
 		await harness.pressKey("a");
@@ -354,7 +348,6 @@ describe("Session Workflow on real InteractiveMode", () => {
 		const serializedHideMsgs = JSON.stringify(callAfterHide.messages);
 		expect(serializedHideMsgs).not.toContain("[Выполнение плана]");
 
-		/* 3. Команда /plan clear во время выполнения плана */
 		await harness.submitInput("/mode plan");
 		await harness.submitInput("Generate second executable plan");
 		await harness.pressKey("a");
@@ -398,13 +391,11 @@ describe("Session Workflow on real InteractiveMode", () => {
 		await harness.submitInput("Plan parser work");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
 
-		/* Прикрепляем комментарий к шагу 1 и утверждаем план клавишей 'a' */
 		await harness.pressKey("\r");
 		await harness.typeText("Handle empty input");
 		await harness.pressKey("\r");
 		await harness.pressKey("a");
 
-		/* Дожидаемся завершения автоматически отправленного хода выполнения (Implemented parser. [DONE:1]) */
 		const deadline = Date.now() + 3000;
 		while (Date.now() < deadline && harness.calls.length < 2) {
 			await new Promise((r) => setTimeout(r, 10));
@@ -439,7 +430,6 @@ describe("Session Workflow on real InteractiveMode", () => {
 		await harness.dispose();
 		harness = undefined;
 
-		/* Переоткрываем сохранённый на диске JSONL-файл сессии в новом экземпляре InteractiveMode */
 		harness = await createInteractiveHarness({
 			cwd: projectDir,
 			agentDir,
@@ -461,7 +451,6 @@ describe("Session Workflow on real InteractiveMode", () => {
 		await harness.dispose();
 		harness = undefined;
 
-		/* Восстановление плана и комментариев из legacy-записи grok-ui-state */
 		harness = await createInteractiveHarness({
 			width: 100,
 			height: 32,

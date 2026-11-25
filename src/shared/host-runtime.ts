@@ -20,7 +20,12 @@ import {
 	type MountedViewportSlots,
 } from "./fullscreen-layout.ts";
 import { hasBlockingModalOverlay } from "./modal-card.ts";
-import { beginHoverMovePass, finishHoverMovePass, hookMethod } from "./runtime-hooks.ts";
+import {
+	beginHoverMovePass,
+	finishHoverMovePass,
+	hookMethod,
+	registerRuntimeClipboardSink,
+} from "./runtime-hooks.ts";
 import { setRequestRender } from "./ui-action-bridge.ts";
 
 export type { FullscreenShellContext, MountedViewportSlots };
@@ -123,6 +128,22 @@ function getRuntimeSlot(): RuntimeSlot {
 	}
 	return g[ACTIVE_RUNTIME_KEY]!;
 }
+
+registerRuntimeClipboardSink({
+	writeClipboardText(text: string): boolean {
+		const slot = getRuntimeSlot();
+		const writer = slot.active?.clipboard?.writeText ?? slot.clipboard?.writeText;
+		if (typeof writer !== "function") return false;
+		void writer(text);
+		return true;
+	},
+	writeHostTerminal(sequence: string): boolean {
+		const terminal = getRuntimeSlot().active?.tui?.terminal;
+		if (typeof terminal?.write !== "function") return false;
+		terminal.write(sequence);
+		return true;
+	},
+});
 
 function getCompositorMap(): WeakMap<object, ViewportChromeCompositor> {
 	const g = globalThis as Record<symbol, WeakMap<object, ViewportChromeCompositor> | undefined>;
@@ -260,7 +281,8 @@ function installViewportChromeHooks(): void {
 			const res = original.apply(self, args);
 			const runtime = getRuntimeSlot().active;
 			if (runtime && isSameHostTui(runtime.tui, self)) {
-				enablePointerMotionTracking(self as TUI);
+				/* Перезаписываем 1003h после super.beforeTerminalStart(), который в мультиплексорах ставит 1002h */
+				enablePointerMotionTracking(self as TUI, true);
 				runtime.syncRendererState();
 			}
 			return res;
@@ -401,11 +423,15 @@ function pruneOrphanedProbeOverlays(tui: TUI, preserveLast: boolean): void {
 	}
 }
 
-function enablePointerMotionTracking(tui: TUI): void {
+function enablePointerMotionTracking(tui: TUI, force = false): void {
 	const renderer = unwrapHostTui(tui) as unknown as Record<symbol, unknown> & {
+		altScreenActive?: boolean;
 		terminal?: { write?: (data: string) => void };
 	};
-	if (!renderer[MOTION_APPLIED]) {
+	if (renderer.altScreenActive === false && !force) {
+		return;
+	}
+	if (force || !renderer[MOTION_APPLIED]) {
 		renderer.terminal?.write?.(ALL_MOTION_SEQ);
 		renderer[MOTION_APPLIED] = true;
 	}
@@ -750,10 +776,9 @@ export async function acquireHostRuntime(
 			return;
 		}
 
-		healLegacyTranscriptPatches(scroll);
-		enablePointerMotionTracking(renderer);
-
 		if (!registeredSlotBuilder || !keybindings) {
+			healLegacyTranscriptPatches(scroll);
+			enablePointerMotionTracking(renderer);
 			if (activeCompositor) {
 				detachCompositor();
 			}
@@ -765,8 +790,12 @@ export async function acquireHostRuntime(
 			mountedRenderer === renderer &&
 			activeCompositor.scrollRef === scroll
 		) {
+			enablePointerMotionTracking(renderer);
 			return;
 		}
+
+		healLegacyTranscriptPatches(scroll);
+		enablePointerMotionTracking(renderer);
 
 		detachCompositor();
 

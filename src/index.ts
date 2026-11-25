@@ -39,24 +39,24 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 		await acquireHostRuntime(ctx);
 	});
 
-	// 1. Transcript cards: user prompts (`┃ ›`), two-tone code cards + Copy, wave Thinking, clean headings
+	/* 1. Карточки транскрипта, волновая анимация, Prompt Chips и цитаты */
 	registerTranscriptFeature(pi);
 	registerComposerWorkingAnimation(pi);
 	registerPromptChipsFeature(pi);
-	registerPromptSuggestionFeature(pi);
 	registerQuotesFeature(pi);
 
-	// 2. Compact / Claude / Codex tool call renderers, codemode summaries & silent mode
+	/* 2. Рендереры вызовов тулов, сводки codemode и тихий режим */
 	registerToolCallsFeature(pi);
 
-	// 3. Interactive ask_user_question questionnaire (compatible with non-capturing overlays)
+	/* 3. Интерактивный опросник ask_user_question */
 	registerAskUserFeature(pi);
 
-	// 4. Zero-fluff Plan Studio (line-pinned comments) & Auto-Safe mode
+	/* 4. Режим планирования с построчными комментариями и защита вызовов тулов */
 	registerPlanStudioFeature(pi);
 
-	// 5. Command Palette (`Ctrl+K` / `/palette`) & Context Inspector (`/context`)
+	/* 5. Command Palette (Ctrl+K / /palette) и фоновые Prompt Suggestion после модальных хуков */
 	registerCommandPaletteFeature(pi);
+	registerPromptSuggestionFeature(pi);
 
 	pi.registerFlag("plan", {
 		description: "Запустить сессию сразу в режиме Plan",

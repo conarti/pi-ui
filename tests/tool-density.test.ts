@@ -341,7 +341,6 @@ describe("Tool Density: real InteractiveMode integration", () => {
 			tools: ["+grep", "+find", "+ls"],
 			customTools: [controlledBash, controlledPs, controlledCodemode, mcpSearch],
 			responses: [
-				/* Ход 1: проверяем живой стриминг bash, powershell и codemode с 30 fps волной */
 				fauxAssistantMessage([fauxToolCall("bash", { command: "npm run check" }, { id: "run-bash" })], {
 					stopReason: "toolUse",
 				}),
@@ -551,7 +550,6 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		const turn = harness.submitInput("Explore source files");
 		await harness.flush();
 
-		/* Во время работы read-only bash группа анимируется как ◆ Exploring 2 files, 1 search */
 		const runningText = harness.screen().text();
 		expect(runningText).toContain("◆ Exploring 2 files, 1 search");
 		expect(runningText).not.toContain("Read src/a.ts");
@@ -572,26 +570,22 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		expect(foldedText).toContain("◆ Explored 2 files, 1 search");
 		expect(foldedText).not.toContain("Read src/a.ts");
 		expect(foldedText).not.toContain("(click to expand)");
-		/* Мутирующий sed -i НЕ попал в исследовательскую группу */
 		expect(foldedText).toContain("◆ Ran sed -i 's/111/999/' src/a.ts");
 		expect(foldedText).toContain("◆ custom_diagram arch");
 		expect(foldedText).not.toContain("AUTHOR_FULL_DIAGRAM_VIEW");
 
-		/* Клик по пустой строке-разделителю над группой не раскрывает группу */
 		const groupPos = foldedScreen.findText("◆ Explored 2 files, 1 search")!;
 		if (groupPos.row > 1) {
 			await harness.mouseClick(groupPos.col + 2, groupPos.row - 1);
 			expect(harness.screen().text()).not.toContain("◆ Read src/a.ts");
 		}
 
-		/* Реальный SGR-клик по заголовку группы открывает дочерние строки */
 		vi.advanceTimersByTime(500);
 		await harness.mouseClick(groupPos.col + 2, groupPos.row);
 		const openedGroupScreen = harness.screen();
 		expect(openedGroupScreen.text()).toContain("◆ Read src/a.ts");
 		expect(openedGroupScreen.text()).toContain("◆ Read src/b.ts");
 
-		/* Клик по отдельной строке ◆ Read src/a.ts внутри раскрытой группы открывает и сворачивает только её тело */
 		vi.advanceTimersByTime(500);
 		const memberPos = openedGroupScreen.findText("◆ Read src/a.ts")!;
 		await harness.mouseClick(memberPos.col + 2, memberPos.row);
@@ -605,13 +599,11 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		expect(afterMemberClose).toContain("◆ Read src/a.ts");
 		expect(afterMemberClose).toContain("◆ Read src/b.ts");
 
-		/* Клик по кастомному тулу автора раскрывает AUTHOR_FULL_DIAGRAM_VIEW */
 		vi.advanceTimersByTime(500);
 		const customPos = harness.screen().findText("◆ custom_diagram arch")!;
 		await harness.mouseClick(customPos.col + 2, customPos.row);
 		expect(harness.screen().text()).toContain("AUTHOR_FULL_DIAGRAM_VIEW");
 
-		/* /silent on скрывает все тул-строки и группы, /silent off возвращает их в прежнем виде */
 		await harness.submitInput("/silent on");
 		const silentText = harness.screen().text();
 		expect(silentText).not.toContain("◆ Read src/a.ts");
@@ -741,7 +733,6 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		expect(detailedText).toContain("cm-line-1");
 		expect(detailedText).toContain("cm-line-9");
 
-		/* Переключаем в diff-focus: диффы файлов остаются, выводы команд сворачиваются */
 		await harness.submitInput("/density diff-focus");
 		const diffFocusText = harness.screen().text();
 		expect(diffFocusText).toContain("◆ Explored 2 files");
@@ -752,7 +743,6 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		expect(diffFocusText).not.toContain("ps-line-1");
 		expect(diffFocusText).not.toContain("cm-line-1");
 
-		/* Вызываем /density без аргументов — открывается селектор InteractiveMode; выбираем Compact (3-й пункт) */
 		const selectCmd = harness.submitInput("/density");
 		await harness.flush();
 		await harness.pressKey("\x1b[B");
@@ -770,16 +760,13 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		expect(compactText).not.toContain("+export const MAX = 10;");
 		expect(compactText).not.toContain("bash-line-1");
 
-		/* Клик по свёрнутой строке ◆ Edited src/service.ts в режиме Compact раскрывает её дифф по требованию */
 		const editPos = harness.screen().findText("◆ Edited src/service.ts")!;
 		await harness.mouseClick(editPos.col + 2, editPos.row);
 		expect(harness.screen().text()).toContain("+const host = '0.0.0.0';");
 
-		/* Session override сохраняется через /reload */
 		await harness.reload();
 		expect(harness.screen().text()).not.toContain("bash-line-1");
 
-		/* Алиасы /compact-tools */
 		await harness.submitInput("/compact-tools detailed");
 		expect(harness.screen().text()).toContain("bash-line-8");
 		expect(harness.screen().text()).toContain("+const host = '0.0.0.0';");
@@ -788,7 +775,6 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		expect(harness.screen().text()).not.toContain("bash-line-1");
 		expect(harness.screen().text()).toContain("+const host = '0.0.0.0';");
 
-		/* Сохранение настройки проекта в доверенной директории */
 		await harness.submitInput("/density diff-focus project");
 		const savedJson = JSON.parse(readFileSync(join(projDir, ".pi", "compact-tools.json"), "utf8"));
 		expect(savedJson.density).toBe("diff-focus");
@@ -796,7 +782,6 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		await harness.dispose();
 		harness = undefined;
 
-		/* В недоверенном проекте запись проектного конфига блокируется с понятным предупреждением */
 		const untrustedDir = createTempDir("pi-ui-density-untrusted-");
 		harness = await createInteractiveHarness({
 			theme: "dark",
@@ -873,7 +858,6 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		expect(settledCmText).toContain("res-7");
 		expect(settledCmText).not.toContain("res-4");
 
-		/* Раскрываем строку реального codemode кликом: видим JS-код, вложенный ✓ read и все строки вывода */
 		const cmPos = harness.screen().findText("◆ Ran codemode")!;
 		await harness.mouseClick(cmPos.col + 2, cmPos.row);
 		const expandedCmText = harness.screen().text();
@@ -882,7 +866,6 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		expect(expandedCmText).toContain("res-4");
 		expect(expandedCmText).not.toContain("Took ");
 
-		/* Сворачиваем строку codemode повторным кликом и запускаем потоковый bash для проверки /density на лету */
 		await new Promise((r) => setTimeout(r, 450));
 		const cmOpenPos = harness.screen().findText("◆ Ran codemode")!;
 		await harness.mouseClick(cmOpenPos.col + 2, cmOpenPos.row);
@@ -894,7 +877,6 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		expect(harness.screen().text()).toContain("▎ b1");
 		expect(harness.screen().text()).toContain("▎ b7");
 
-		/* Переключение /density на лету во время исполнения оставляет живые строки Running, а по завершении применяет Compact */
 		await harness.paste("/density diff-focus", true);
 		await harness.pressKey("\r");
 		expect(harness.screen().text()).toContain("▎ b1");
@@ -922,7 +904,6 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		mkdirSync(join(projDir, ".pi"), { recursive: true });
 		mkdirSync(join(projDir, "src"), { recursive: true });
 
-		/* Проектный density: diff-focus перекрывает глобальный legacy style: claude */
 		writeFileSync(
 			join(agentDir, "compact-tools.json"),
 			`${JSON.stringify({ style: "claude" }, null, 2)}\n`,
@@ -1011,7 +992,6 @@ describe("Tool Density: real InteractiveMode integration", () => {
 				? Promise.resolve(pendingStreams.shift()!)
 				: new Promise<AssistantMessageEventStream>((r) => streamWaiters.push(r));
 
-		/* 1. Стриминг write с частичным путём src/e -> src/existing.ts сохраняет базовый файл и считает дифф +2 -1 */
 		const afterContent = `${[
 			...beforeLines.slice(0, 5),
 			"export const PORT = 8080;",
@@ -1061,7 +1041,6 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		s1Done.end(final1);
 		await t1;
 
-		/* Так как проектный конфиг задал diff-focus (перекрыв глобальный claude), дифф write виден, а вывод bash свёрнут */
 		const diffFocusScreen = harness.screen().text();
 		expect(diffFocusScreen).toContain("◆ Wrote src/existing.ts (+2 -1");
 		expect(diffFocusScreen).toContain("-export const PORT = 3000;");
@@ -1069,7 +1048,6 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		expect(diffFocusScreen).not.toContain("LINE_3 = 3");
 		expect(diffFocusScreen).not.toContain("out-1");
 
-		/* В detailed проверяем, что футер усечения bash отрезан и в хвосте остаются out-5..out-7 */
 		await harness.submitInput("/density detailed");
 		const detailedScreen = harness.screen().text();
 		expect(detailedScreen).toContain("│ out-1");
@@ -1079,14 +1057,12 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		expect(detailedScreen).toContain("│ out-7");
 		expect(detailedScreen).not.toContain("Showing lines 1-7");
 
-		/* При сужении экрана до 34 колонок длинные строки диффа переносятся и завершаются маркером │ … */
 		const narrowLines = harness.renderFrame(34, 44);
 		for (const line of narrowLines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(34);
 		}
 		await harness.resize(100, 44);
 
-		/* 2. Мутация аргументов потокового bash на лету (cat src/b.ts -> cat src/b.ts > src/out.ts) выводит вызов из группы */
 		const t2 = harness.submitInput("Stream mutable bash args");
 		const s2 = await nextStream();
 		const pExplore = makeStreamMsg([
@@ -1130,7 +1106,6 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		await harness.dispose();
 		harness = undefined;
 
-		/* 3. В терминале 256color (trueColor: false) рендерер использует исключительно палитру 256 цветов без SGR 38;2 */
 		harness = await createInteractiveHarness({
 			theme: "dark",
 			trueColor: false,

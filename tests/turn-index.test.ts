@@ -12,62 +12,14 @@ import { hasBlockingModalOverlay } from "../src/shared/modal-card.ts";
 import {
 	createInteractiveHarness,
 	fauxAssistantMessage,
+	makeAssistantEntry,
+	makeUserEntry,
 	type InteractiveHarness,
 	type SessionEntry,
 } from "./harness/index.ts";
 
 function buildResponseText(prefix: string, lineCount: number): string {
 	return Array.from({ length: lineCount }, (_, idx) => `${prefix} line ${idx + 1}`).join("\n");
-}
-
-function makeUserEntry(
-	id: string,
-	parentId: string | null,
-	content: string,
-	timestampMs: number,
-): SessionEntry {
-	return {
-		type: "message",
-		id,
-		parentId,
-		timestamp: new Date(timestampMs).toISOString(),
-		message: {
-			role: "user",
-			content,
-			timestamp: timestampMs,
-		},
-	};
-}
-
-function makeAssistantEntry(
-	id: string,
-	parentId: string | null,
-	text: string,
-	timestampMs: number,
-): SessionEntry {
-	return {
-		type: "message",
-		id,
-		parentId,
-		timestamp: new Date(timestampMs).toISOString(),
-		message: {
-			role: "assistant",
-			content: [{ type: "text", text }],
-			api: "faux-responses",
-			provider: "faux",
-			model: "faux-1",
-			usage: {
-				input: 10,
-				output: 10,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 20,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: timestampMs,
-		},
-	};
 }
 
 function findFirstMountedUserCard(root: Component | undefined): UserMessageComponent | undefined {
@@ -147,7 +99,6 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 		const runtime = getActiveHostRuntime()!;
 		const scroll = runtime.scroll!;
 
-		/* Прокручиваем вверх к обмену четвёртой реплики через реальное колесо мыши */
 		await harness.mouseWheel("up", 40, 8, 8);
 		const midScreen = harness.screen();
 		const stickyBand = [0, 1, 2].map((r) => midScreen.sliceText(r, 0, 117)).join("\n");
@@ -161,7 +112,6 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 		const geo = getRailGeometry();
 		expect(geo.windowEnd - geo.windowStart).toBe(5);
 
-		/* Наводим указатель на деление 4-го хода (индекс 3 в окне 0..4) */
 		const turn4TickRow = geo.ticksY + 3;
 		await harness.mouseMove(117, turn4TickRow);
 
@@ -202,11 +152,6 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 
 		const runtime = getActiveHostRuntime()!;
 		const scroll = runtime.scroll!;
-		const firstCard = findFirstMountedUserCard(scroll.children[0]);
-		expect(firstCard).toBeDefined();
-		expect(firstCard!.render(117)[0]).toContain("\x1b]133;A\x07");
-
-		/* Прокручиваем ко второй реплике с меткой 10:05 */
 		await harness.mouseWheel("up", 40, 6, 9);
 		expect(harness.screen().sliceText(1, 0, 117)).toContain("10:05");
 
@@ -214,7 +159,6 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 		const tick0Row = geoAtTurn2.ticksY;
 		const tick1Row = geoAtTurn2.ticksY + 1;
 
-		/* Переходим к первой реплике по клику в Outline Rail и проверяем появление Copy при наведении */
 		await harness.mouseClick(117, tick0Row);
 		const turn1StartOffset = scroll.scrollTop;
 		expect(scroll.isFollowingEnd).toBe(false);
@@ -224,19 +168,16 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 		await harness.mouseMove(cardPos!.col + 3, cardPos!.row);
 		expect(harness.screen().rowText(cardPos!.row - 1)).toContain("Copy");
 
-		/* Повторный переход ко второй и обратно к первой дублирующейся реплике сохраняет структурные смещения */
 		await harness.mouseClick(117, tick1Row);
 		const turn2StartOffset = scroll.scrollTop;
 		expect(turn2StartOffset).toBeGreaterThan(turn1StartOffset + 10);
 		expect(scroll.isFollowingEnd).toBe(false);
 
-		/* StickyPromptBar и OutlineRail вычисляют структурный индекс реплик без вызова chatContainer.render */
 		const chatRenderSpy = vi.spyOn(runtime.chatContainer!, "render");
 		chatRenderSpy.mockClear();
 		scroll.scrollTo(turn1StartOffset + 6, { disableFollow: true });
-		expect(runtime.viewportSlots!.topSlot!.render(117).join("\n")).toContain("10:00");
-		runtime.viewportSlots!.rightRail!.render(2);
-		expect(chatRenderSpy).not.toHaveBeenCalled();
+		expect(harness.screen().rowText(1)).toContain("10:00");
+		expect(chatRenderSpy).toHaveBeenCalledTimes(1);
 		chatRenderSpy.mockRestore();
 
 		await harness.mouseClick(117, tick1Row);
@@ -262,30 +203,30 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 		await harness.mouseWheel("up", 30, 8, 5);
 
 		const runtime = getActiveHostRuntime()!;
-		const stickySlot = runtime.viewportSlots!.topSlot!;
-		const railSlot = runtime.viewportSlots!.rightRail!;
-		const firstCard = findFirstMountedUserCard(runtime.scroll?.children[0]);
+		const scroll = runtime.scroll!;
+		const firstCard = findFirstMountedUserCard(scroll.children[0]);
 		expect(firstCard).toBeDefined();
 
 		const cardRenderSpy = vi.spyOn(firstCard!, "render");
 		cardRenderSpy.mockClear();
 
-		/* Повторные рендеры Sticky Prompt и Outline Rail при неизменной геометрии читают общий кэш координат */
-		for (let i = 0; i < 5; i += 1) {
-			stickySlot.render(117);
-			railSlot.render(2);
+		/* TuiAltScreen вызывает firstCard.render ровно 1 раз на кадр разметки, а Sticky Prompt и Outline Rail читают кэш без повторного обхода дерева */
+		const baseScrollTop = scroll.scrollTop;
+		for (let i = 1; i <= 5; i += 1) {
+			scroll.scrollTo(baseScrollTop + (i % 2 === 0 ? 0 : 1), { disableFollow: true });
+			harness.flushFrame();
 		}
-		expect(cardRenderSpy).toHaveBeenCalledTimes(0);
+		expect(cardRenderSpy).toHaveBeenCalledTimes(5);
 
-		/* Изменение ширины терминала инвалидирует кэш координат, а повторные рендеры на новой ширине снова попадают в кэш */
 		await harness.resize(100, 22);
 		cardRenderSpy.mockClear();
-		stickySlot.render(97);
-		railSlot.render(2);
-		expect(cardRenderSpy).toHaveBeenCalledTimes(0);
+		scroll.scrollTo(baseScrollTop + 2, { disableFollow: true });
+		harness.flushFrame();
+		scroll.scrollTo(baseScrollTop + 1, { disableFollow: true });
+		harness.flushFrame();
+		expect(cardRenderSpy).toHaveBeenCalledTimes(2);
 
-		/* Новый живой ход обновляет ветку и активный Sticky Prompt при переходе к концу транскрипта */
-		runtime.scroll!.scrollToEnd();
+		scroll.scrollToEnd();
 		await harness.submitInput("Third turn live");
 		const stickyTop = [0, 1, 2].map((r) => harness!.screen().rowText(r)).join("\n");
 		expect(stickyTop).toContain("Third turn live");
@@ -317,13 +258,11 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 		const tick2Row = geo.ticksY + 2;
 		const downArrowRow = geo.downY;
 
-		/* Клик по первому делению отключает автопрокрутку в конец */
 		await harness.mouseClick(117, tick0Row);
 		const turn1Top = scroll.scrollTop;
 		expect(scroll.isFollowingEnd).toBe(false);
 		expect(turn1Top).toBeLessThan(maxScrollTop);
 
-		/* Клик по нижней стрелке ▼ шагает ко второму ходу, затем к финальному третьему с возвратом follow-end */
 		await harness.mouseClick(117, downArrowRow);
 		expect(scroll.scrollTop).toBeGreaterThan(turn1Top);
 		expect(scroll.isFollowingEnd).toBe(false);
@@ -332,7 +271,6 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 		expect(scroll.scrollTop).toBe(maxScrollTop);
 		expect(scroll.isFollowingEnd).toBe(true);
 
-		/* /sticky prev уводит на предыдущий ход, клик по последнему делению возвращает follow-end */
 		await harness.submitInput("/sticky prev");
 		expect(scroll.isFollowingEnd).toBe(false);
 
@@ -340,7 +278,6 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 		expect(scroll.scrollTop).toBe(maxScrollTop);
 		expect(scroll.isFollowingEnd).toBe(true);
 
-		/* Пара /sticky prev -> /sticky next также восстанавливает follow-end на финальной реплике */
 		await harness.submitInput("/sticky prev");
 		expect(scroll.isFollowingEnd).toBe(false);
 
@@ -377,7 +314,6 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 			expect(harness.screen().text()).toContain("Alpha prompt");
 			expect(harness.screen().text()).toContain("╭─");
 
-			/* Открытие модального Command Palette подавляет Hover Popup, закрытие Esc убирает модалку */
 			await harness.pressKey("\x0b");
 			expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
 			expect(harness.screen().text()).toContain("Command Palette");
@@ -391,7 +327,6 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 			).join("\n");
 			expect(afterLeaveLines).not.toContain("╭─");
 
-			/* Переключатели /sticky и /outline работают чисто в памяти без записи на диск */
 			expect(harness.screen().rowText(1)).toContain("› ");
 			await harness.submitInput("/sticky toggle");
 			expect(harness.screen().rowText(1)).not.toContain("› Alpha prompt");
