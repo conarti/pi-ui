@@ -1,7 +1,7 @@
 /**
  * PROTOTYPE (throwaway branch: prototype/thinking-and-tool-calls)
  * Live switcher (/proto A|B|C|demo|clear|stats|translate|off and Alt+V) plus in-memory
- * animated transcript showcase (TTFT -> streaming Thinking -> Tool Calls + native Image -> Metrics).
+ * animated transcript showcase (streaming Thinking page -> Tool Calls + native Image -> Metrics).
  */
 import { deflateSync } from "node:zlib";
 import {
@@ -28,16 +28,14 @@ import { fgRgb, getActiveGlobalTheme, isLightTheme } from "../../shared/ansi.ts"
 import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
-import { bindComposerWorkingIndicator, startComposerWorkingWave, stopComposerWorkingWave } from "../chrome/working-indicator.ts";
+import { bindComposerWorkingIndicator } from "../chrome/working-indicator.ts";
 import { densityPalette } from "../tool-calls/density.ts";
 import {
-	beginWorkingTurn,
 	cyclePrototypeVariant,
 	getActiveVariantMeta,
 	getPrototypeVariant,
 	isPrototypeActive,
 	isTranslateSeamPreviewEnabled,
-	markWorkingPhase,
 	PROTOTYPE_VARIANTS,
 	setPrototypeVariant,
 	setTranslateSeamPreview,
@@ -50,12 +48,10 @@ import {
 	TTFT_PULSE_MARKER,
 	type ResponseMetricsData,
 } from "./response-metrics.ts";
-import { ThinkingBlock } from "./thinking-block.ts";
+import { ThinkingBlock, type ThinkingInteractionSlot } from "./thinking-block.ts";
 
-const PROTO_STATUS_KEY = "conarti-proto";
+const LEGACY_PROTO_STATUS_KEY = "conarti-proto";
 const DEMO_ANIM_SURFACE_KEY = "prototype.demo-showcase";
-
-/* ── Генерация миниатюрного PNG с синей призмой для проверки нативного Image ── */
 
 let cachedDemoPngBase64: string | undefined;
 
@@ -94,7 +90,6 @@ export function getDemoPrismPngBase64(): string {
 		for (let x = 0; x < width; x++) {
 			const px = rowOffset + 1 + x * 4;
 			const border = x === 0 || x === width - 1 || y === 0 || y === height - 1;
-			/* Четырёхлучевая вогнутая призма ❖ слева и спокойные полосы макета справа */
 			const dx = Math.abs(x - cx) / 18;
 			const dy = Math.abs(y - cy) / 18;
 			const starDist = Math.pow(dx, 0.65) + Math.pow(dy, 0.65);
@@ -154,8 +149,6 @@ export function getDemoPrismPngBase64(): string {
 	return cachedDemoPngBase64;
 }
 
-/* ── Интерактивный живой демо-блок в ленте (не сохраняется в JSONL) ──────── */
-
 class DemoToolGroupMock implements Component {
 	private expanded = false;
 	private hovered = false;
@@ -166,7 +159,8 @@ class DemoToolGroupMock implements Component {
 		const theme = getActiveGlobalTheme();
 		const pal = densityPalette(theme);
 		const variant = getPrototypeVariant();
-		const fit = (s: string) => truncateToWidth(s, Math.max(1, width), "…");
+		const rightGuard = width >= 48 ? 4 : 0;
+		const fit = (s: string) => truncateToWidth(s, Math.max(1, width - rightGuard), "…");
 		const glyph = pal.diamond("success", this.expanded, this.hovered);
 
 		if (variant === "C") {
@@ -174,23 +168,23 @@ class DemoToolGroupMock implements Component {
 			const expChevron = pal.dim(this.expanded ? "▾" : "▸");
 			lines.push(
 				fit(
-					`${pal.rail(" ├ ")}${glyph} ${pal.title("Изучено: 3 ф., 1 поиск", "success", this.expanded, this.hovered)} ${pal.dim("(340ms)")} ${expChevron}`,
+					`  ${glyph} ${pal.title("Explored: 3 files, 1 search", "success", this.expanded, this.hovered)} ${pal.dim("(340ms)")} ${expChevron}`,
 				),
 			);
 			lines.push(
 				fit(
-					`${pal.rail(" ├ ")}${glyph} ${pal.title("Изменено: 2 ф.", "success", this.expanded, this.hovered)} ${pal.theme.fg("toolDiffAdded", "+18")} ${pal.theme.fg("toolDiffRemoved", "-4")} ${pal.dim("(520ms)")} ${expChevron}`,
+					`  ${glyph} ${pal.title("Edited: 2 files", "success", this.expanded, this.hovered)} ${pal.theme.fg("toolDiffAdded", "+18")} ${pal.theme.fg("toolDiffRemoved", "-4")} ${pal.dim("(520ms)")} ${expChevron}`,
 				),
 			);
 			lines.push(
 				fit(
-					`${pal.rail(" └ ")}${glyph} ${pal.title("Выполнено: 1 ком.", "success", this.expanded, this.hovered)} ${pal.dim("(910ms)")} ${expChevron}`,
+					`  ${glyph} ${pal.title("Ran: 1 cmd", "success", this.expanded, this.hovered)} ${pal.dim("(910ms)")} ${expChevron}`,
 				),
 			);
 			if (this.expanded) {
-				lines.push(fit(`     ${pal.dim("· Edited src/features/transcript/thinking-block.ts (+12 -3)")}`));
-				lines.push(fit(`     ${pal.dim("· Edited src/features/tool-calls/grouping.ts (+6 -1)")}`));
-				lines.push(fit(`     ${pal.dim("· Ran npm run typecheck (0 lines · 910ms)")}`));
+				lines.push(fit(`  ${pal.rail("│")} ${pal.dim("Edited src/features/transcript/thinking-block.ts (+12 -3)")}`));
+				lines.push(fit(`  ${pal.rail("│")} ${pal.dim("Edited src/features/tool-calls/grouping.ts (+6 -1)")}`));
+				lines.push(fit(`  ${pal.rail("│")} ${pal.dim("Ran npm run typecheck (0 lines · 910ms)")}`));
 			}
 			return lines;
 		}
@@ -205,10 +199,11 @@ class DemoToolGroupMock implements Component {
 		];
 		if (this.expanded) {
 			const subGlyph = pal.diamond("success", false, false);
-			out.push(fit(`    ${subGlyph} ${pal.title("Explored", "success", false)} ${pal.target("3 files, 1 search", false)} ${pal.dim("(340ms)")}`));
-			out.push(fit(`    ${subGlyph} ${pal.title("Edited", "success", false)} ${pal.target("src/features/transcript/thinking-block.ts", false)} ${pal.dim("(+12 -3 · 280ms)")}`));
-			out.push(fit(`    ${subGlyph} ${pal.title("Edited", "success", false)} ${pal.target("src/features/tool-calls/grouping.ts", false)} ${pal.dim("(+6 -1 · 240ms)")}`));
-			out.push(fit(`    ${subGlyph} ${pal.title("Ran", "success", false)} ${pal.target("npm run typecheck", false)} ${pal.dim("(910ms)")}`));
+			const guide = pal.rail("  │");
+			out.push(fit(`${guide} ${subGlyph} ${pal.title("Explored", "success", false)} ${pal.target("3 files, 1 search", false)} ${pal.dim("(340ms)")}`));
+			out.push(fit(`${guide} ${subGlyph} ${pal.title("Edited", "success", false)} ${pal.target("src/features/transcript/thinking-block.ts", false)} ${pal.dim("(+12 -3 · 280ms)")}`));
+			out.push(fit(`${guide} ${subGlyph} ${pal.title("Edited", "success", false)} ${pal.target("src/features/tool-calls/grouping.ts", false)} ${pal.dim("(+6 -1 · 240ms)")}`));
+			out.push(fit(`${guide} ${subGlyph} ${pal.title("Ran", "success", false)} ${pal.target("npm run typecheck", false)} ${pal.dim("(910ms)")}`));
 		}
 		return out;
 	}
@@ -260,55 +255,62 @@ class DemoInlineImageRow implements Component {
 	render(width: number): string[] {
 		const theme = getActiveGlobalTheme();
 		const pal = densityPalette(theme);
-		const variant = getPrototypeVariant();
 		const glyph = pal.diamond("success", false, false);
-		const prefix = variant === "C" ? pal.rail(" └ ") : "  ";
+		const rightGuard = width >= 48 ? 4 : 0;
 		const header = truncateToWidth(
-			`${prefix}${glyph} ${pal.title("Read", "success", false)} ${pal.target("assets/prism-card.png", false)} ${pal.dim("(image/png · 180×64 · 14ms)")}`,
-			Math.max(1, width),
+			`  ${glyph} ${pal.title("Read", "success", false)} ${pal.target("assets/prism-card.png", false)} ${pal.dim("(image/png · 180×64 · 14ms)")}`,
+			Math.max(1, width - rightGuard),
 			"…",
 		);
-		const imgLines = this.imageComponent.render(Math.max(12, width - 4));
-		return [header, ...imgLines];
+		const imgLines = this.imageComponent.render(Math.max(12, width - 6));
+		const indentedImg = imgLines.map((l, idx) => (idx === 0 && l ? `  ${l}` : l));
+		return [header, ...indentedImg];
 	}
 }
 
+const DEMO_THINKING_CHUNKS: readonly string[] = [
+	"**Inspecting streaming Thinking readability**\nLet's check why a 3-line sliding tail feels frantic during fast token generation: every single word-wrap shifts all 3 rows upward several times per second.",
+	"Instead of shifting every line on every wrap, Variant B fills a 6-line page calmly from top to bottom and only advances by 3 lines when the page fills up.",
+	"Clicking the `Thinking…` header (or pressing `Ctrl+T`) right while tokens are streaming immediately unfolds the full reasoning from line 1 and keeps it open after completion.",
+	"**Checking viewport alignment & Outline Rail**\nAll transcript surfaces (`User Prompt`, `Thinking`, `Tool Calls`, and `Assistant` prose) now align cleanly along column 2, while right-aligned metrics reserve 4 columns so `Outline Rail` never overlaps text.",
+	"**Verifying inline Image pass-through**\nTool calls returning `{ type: \"image\" }` bypass collapsed `ToolGroupComponent` folding so `@earendil-works/pi-tui` renders the native `Image` inline right beneath `Read assets/prism-card.png`.",
+];
+
 class LiveDemoShowcaseContainer extends Container {
 	readonly [TTFT_PULSE_MARKER] = true;
-	private stage: "ttft" | "thinking" | "settled" = "ttft";
+	private chunkCount = 1;
+	private settled = false;
 	private thinkingExpanded = false;
 	private readonly startedAt = Date.now();
-	private readonly hoverSlot = { hovered: false };
+	private readonly hoverSlot: ThinkingInteractionSlot = { hovered: false, scrollFromBottom: 0 };
 	private readonly groupMock = new DemoToolGroupMock();
 	private readonly imageRow = new DemoInlineImageRow();
 	private timers: Array<ReturnType<typeof setTimeout>> = [];
 
 	constructor(private readonly ctx: ExtensionContext) {
 		super();
-		beginWorkingTurn(this.startedAt);
-		startComposerWorkingWave();
 		activateAnimationSurface(DEMO_ANIM_SURFACE_KEY, () => {
 			requestRender();
 		});
 
-		this.timers.push(
-			setTimeout(() => {
-				this.stage = "thinking";
-				markWorkingPhase("thinking");
-				this.rebuild();
-				requestRender();
-			}, 1300),
-		);
+		/* Пошагово подаём куски мысли каждые 900мс, чтобы можно было кликнуть заголовок ПРЯМО ВО ВРЕМЯ СТРИМИНГА */
+		for (let step = 2; step <= DEMO_THINKING_CHUNKS.length; step++) {
+			this.timers.push(
+				setTimeout(() => {
+					this.chunkCount = step;
+					this.rebuild();
+					requestRender();
+				}, (step - 1) * 900),
+			);
+		}
 
 		this.timers.push(
 			setTimeout(() => {
-				this.stage = "settled";
-				markWorkingPhase("idle");
-				stopComposerWorkingWave(false);
+				this.settled = true;
 				deactivateAnimationSurface(DEMO_ANIM_SURFACE_KEY);
 				this.rebuild();
 				requestRender();
-			}, 3600),
+			}, DEMO_THINKING_CHUNKS.length * 900 + 600),
 		);
 
 		this.rebuild();
@@ -330,44 +332,25 @@ class LiveDemoShowcaseContainer extends Container {
 		const theme = getActiveGlobalTheme(this.ctx.ui.theme);
 		const light = isLightTheme(theme);
 		const bannerFg = (s: string) => (light ? fgRgb(37, 99, 235, s) : fgRgb(118, 184, 248, s));
-		const dimFg = (s: string) => theme.fg("dim", s);
 		const meta = getActiveVariantMeta();
 
 		this.addChild(new Spacer(1));
 		this.addChild({
 			invalidate() {},
 			render: (w: number) => {
-				const tag = ` ❖ ПРОТОТИП-ДЕМО (${meta?.shortLabel ?? "off"}) · кликай блоки / Alt+V сменить вариант / /proto clear убрать `;
-				const line = truncateToWidth(`  ${bannerFg(tag)}`, Math.max(1, w), "…");
+				const tag = `❖ PROTOTYPE DEMO (${meta?.shortLabel ?? "off"}) · click Thinking header while streaming · Alt+V switch · /proto clear`;
+				const line = truncateToWidth(`  ${bannerFg(tag)}`, Math.max(1, w - 4), "…");
 				return [line + " ".repeat(Math.max(0, w - visibleWidth(line)))];
 			},
 		});
 
-		if (this.stage === "ttft") {
-			this.addChild({
-				invalidate() {},
-				render: (w: number) => {
-					const note =
-						getPrototypeVariant() === "B"
-							? `  ${bannerFg("✦")} ${dimFg("Фаза TTFT: смотри импульс здесь и живую фразу в верхней рамке Composer…")}`
-							: `  ${dimFg("Фаза TTFT: смотри фирменную фигуру и живую фразу в верхней рамке Composer…")}`;
-					return [truncateToWidth(note, Math.max(1, w), "…")];
-				},
-			});
-			return;
-		}
-
-		const sampleThinking = [
-			"Let's inspect `ThinkingBlock` in `src/features/transcript/thinking-block.ts` and check why clicking the prose body collapsed the block.",
-			"We need to keep the 3-line streaming tail calm without Markdown code-fence boxes so the final answer stays the hero of the screen.",
-			"Also check `ToolGroupController` in `grouping.ts` so `{ type: \"image\" }` results render inline via `Image` instead of folding away.",
-		].join("\n\n");
+		const activeSampleText = DEMO_THINKING_CHUNKS.slice(0, this.chunkCount).join("\n\n");
 
 		this.addChild(new Spacer(1));
 		this.addChild(
 			new ThinkingBlock(
-				sampleThinking,
-				this.stage === "thinking",
+				activeSampleText,
+				!this.settled,
 				this.thinkingExpanded,
 				() => {
 					this.thinkingExpanded = !this.thinkingExpanded;
@@ -375,15 +358,15 @@ class LiveDemoShowcaseContainer extends Container {
 					requestRender();
 				},
 				theme,
-				2300,
+				4800,
 				undefined,
 				this.hoverSlot,
-				this.startedAt + 1300,
+				this.startedAt,
 				"demo:0",
 			),
 		);
 
-		if (this.stage !== "settled") return;
+		if (!this.settled) return;
 
 		this.addChild(new Spacer(1));
 		this.addChild(this.groupMock);
@@ -392,7 +375,7 @@ class LiveDemoShowcaseContainer extends Container {
 		this.addChild(new Spacer(1));
 		this.addChild(
 			new Text(
-				"Готово: проверил `Thinking`, сводную строку `Tool Calls`, нативный рендер `Image` и кликабельную строку метрик ниже.",
+				"All four surfaces rendered: expandable streaming `Thinking`, `Compact` grouped tool calls, inline native `Image`, and the clickable response metrics row below.",
 				2,
 				0,
 			),
@@ -402,9 +385,9 @@ class LiveDemoShowcaseContainer extends Container {
 			version: 1,
 			timestamp: this.startedAt,
 			firstContentAt: this.startedAt + 580,
-			firstTextAt: this.startedAt + 2900,
-			completedAt: this.startedAt + 3600,
-			timeSinceUserMs: 3600,
+			firstTextAt: this.startedAt + 3900,
+			completedAt: this.startedAt + 4800,
+			timeSinceUserMs: 4800,
 			outputTokens: 486,
 			reasoningTokens: 164,
 			inputTokens: 19_240,
@@ -423,29 +406,11 @@ class LiveDemoShowcaseContainer extends Container {
 	}
 }
 
-/* ── Перерисовка живой сессии при переключении A / B / C / off ───────────── */
-
-function updateProtoFooterStatus(ctx: ExtensionContext): void {
-	if (ctx.mode !== "tui" || !ctx.hasUI) return;
-	if (process.env.VITEST && !isPrototypeActive()) return;
-	const meta = getActiveVariantMeta();
-	if (!meta) {
-		if (!process.env.VITEST) {
-			ctx.ui.setStatus(PROTO_STATUS_KEY, ctx.ui.theme.fg("dim", "PROTO: off | /proto A|B|C|demo"));
-		}
-		return;
-	}
-	const seamSuffix = isTranslateSeamPreviewEnabled() ? " · [RU-шов]" : "";
-	const badge = ctx.ui.theme.fg(
-		"accent",
-		`${meta.settledGlyph} PROTO: ${meta.key} (${meta.name})${seamSuffix}`,
-	);
-	const hint = ctx.ui.theme.fg("dim", " | Alt+V · /proto A|B|C|demo|stats");
-	ctx.ui.setStatus(PROTO_STATUS_KEY, `${badge}${hint}`);
-}
-
 export function refreshLiveTranscriptForPrototype(ctx: ExtensionContext): void {
-	updateProtoFooterStatus(ctx);
+	/* Не засоряем нижний статус-бар лишней строкой, чтобы не конфликтовать с pi-footer */
+	if (ctx.mode === "tui" && ctx.hasUI) {
+		ctx.ui.setStatus(LEGACY_PROTO_STATUS_KEY, undefined);
+	}
 	bindComposerWorkingIndicator(ctx);
 
 	const chat = getActiveHostRuntime()?.chatContainer as { children?: unknown[] } | undefined;
@@ -491,7 +456,7 @@ export function registerPrototypeShowcaseFeature(pi: ExtensionAPI): void {
 			| { addChild?: (c: unknown) => void }
 			| undefined;
 		if (!chat || typeof chat.addChild !== "function") {
-			ctx.ui.notify("Контейнер ленты ещё не готов.", "warning");
+			ctx.ui.notify("Transcript container is not ready yet.", "warning");
 			return;
 		}
 		if (!isPrototypeActive()) {
@@ -504,13 +469,15 @@ export function registerPrototypeShowcaseFeature(pi: ExtensionAPI): void {
 
 	pi.on("session_start", (_event, ctx) => {
 		activeCtx = ctx;
+		if (ctx.mode === "tui" && ctx.hasUI) {
+			ctx.ui.setStatus(LEGACY_PROTO_STATUS_KEY, undefined);
+		}
 		unsubscribeProto?.();
 		unsubscribeProto = subscribePrototypeChanges(() => {
 			if (activeCtx) {
 				refreshLiveTranscriptForPrototype(activeCtx);
 			}
 		});
-		updateProtoFooterStatus(ctx);
 	});
 
 	pi.on("agent_start", () => {
@@ -529,7 +496,7 @@ export function registerPrototypeShowcaseFeature(pi: ExtensionAPI): void {
 	});
 
 	pi.registerShortcut("alt+v", {
-		description: "Прототип: переключить вариант ленты (A / B / C)",
+		description: "Prototype: cycle transcript variant (A / B / C)",
 		handler: async (ctx) => {
 			activeCtx = ctx;
 			const next = cyclePrototypeVariant();
@@ -543,7 +510,7 @@ export function registerPrototypeShowcaseFeature(pi: ExtensionAPI): void {
 	const subcommands = ["a", "b", "c", "next", "demo", "clear", "stats", "translate", "off"] as const;
 
 	pi.registerCommand("proto", {
-		description: "Управление живым прототипом ленты: /proto [A|B|C|demo|clear|stats|translate|off]",
+		description: "Control live transcript prototype: /proto [A|B|C|demo|clear|stats|translate|off]",
 		getArgumentCompletions: (prefix) => {
 			const typed = prefix.trim().toLowerCase();
 			const matches = subcommands
@@ -575,14 +542,14 @@ export function registerPrototypeShowcaseFeature(pi: ExtensionAPI): void {
 			if (cmd === "off") {
 				clearDemo();
 				setPrototypeVariant("off");
-				ctx.ui.notify("Прототип отключён (возвращён текущий вид main).", "info");
+				ctx.ui.notify("Prototype disabled (restored current main rendering).", "info");
 				return;
 			}
 
 			if (cmd === "demo" || cmd === "sample") {
 				mountDemo(ctx);
 				ctx.ui.notify(
-					"Запущено живое демо внизу ленты (TTFT -> Thinking -> Tool Calls + Image -> Метрики).",
+					"Started 5s live demo at the bottom of transcript - try clicking Thinking while it streams!",
 					"info",
 				);
 				return;
@@ -590,7 +557,7 @@ export function registerPrototypeShowcaseFeature(pi: ExtensionAPI): void {
 
 			if (cmd === "clear") {
 				clearDemo();
-				ctx.ui.notify("Демо-блок убран из ленты.", "info");
+				ctx.ui.notify("Cleared demo preview from transcript.", "info");
 				return;
 			}
 
@@ -599,8 +566,8 @@ export function registerPrototypeShowcaseFeature(pi: ExtensionAPI): void {
 				setTranslateSeamPreview(next);
 				ctx.ui.notify(
 					next
-						? "Включён предпросмотр шва автоперевода Thinking ([RU · авто])."
-						: "Предпросмотр шва автоперевода Thinking выключен.",
+						? "Demo translation seam ON (shown on /proto demo; live translator engine is scheduled in Echelon 3)."
+						: "Demo translation seam OFF.",
 					"info",
 				);
 				return;
@@ -612,7 +579,7 @@ export function registerPrototypeShowcaseFeature(pi: ExtensionAPI): void {
 			}
 
 			ctx.ui.notify(
-				"Использование: /proto [A|B|C|demo|clear|stats|translate|off] (или Alt+V / клик по пилюле PROTO).",
+				"Usage: /proto [A|B|C|demo|clear|stats|translate|off] (or Alt+V / click PROTO pill).",
 				"info",
 			);
 		},

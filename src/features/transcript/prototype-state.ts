@@ -1,16 +1,14 @@
 /**
  * PROTOTYPE (throwaway branch: prototype/thinking-and-tool-calls)
- * Three variants of Thinking, Working/TTFT, Tool Calls + inline Images, and Response Metrics
- * mounted inside the live Pi transcript, switchable via PI_UI_PROTO_VARIANT, /proto A|B|C|demo|stats|off,
- * Alt+V, and the clickable Composer border pill.
+ * Three English-first variants of Thinking, Working/TTFT, Tool Calls + inline Images,
+ * and Response Metrics mounted inside the live Pi transcript.
  */
-import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
 	getAnimationElapsedMs,
 	paintBreathingWaveGlyph,
 	type WaveSampleOptions,
 } from "../../shared/animation-scheduler.ts";
-import { fgRgb, getActiveGlobalTheme, isLightTheme } from "../../shared/ansi.ts";
+import { getActiveGlobalTheme, isLightTheme } from "../../shared/ansi.ts";
 
 export type PrototypeVariant = "A" | "B" | "C" | "off";
 export type ActivePrototypeVariant = Exclude<PrototypeVariant, "off">;
@@ -20,6 +18,7 @@ export interface PrototypeVariantMeta {
 	readonly key: ActivePrototypeVariant;
 	readonly name: string;
 	readonly shortLabel: string;
+	readonly pillLabel: string;
 	readonly summary: string;
 	readonly settledGlyph: string;
 	readonly subtleGlyph: string;
@@ -33,7 +32,8 @@ export const PROTOTYPE_VARIANTS: Record<ActivePrototypeVariant, PrototypeVariant
 		key: "A",
 		name: "Quiet Whisper",
 		shortLabel: "A · Quiet Whisper",
-		summary: "Орбитальное кольцо ◌/◑/●, бесшовный шёпот Thinking, Compact-сводка в 1 строку, тихая подпись метрик слева",
+		pillLabel: "◌ A · Quiet ↻",
+		summary: "Orbital ring ◌/◑/●, 1-line calm streaming Thinking ticker (click expands full stream), Compact all-grouped tools, left turn sign-off",
 		settledGlyph: "◈",
 		subtleGlyph: "•",
 		runningFrames: ["◌", "◔", "◑", "◕", "●", "◕", "◑", "◔"],
@@ -44,7 +44,8 @@ export const PROTOTYPE_VARIANTS: Record<ActivePrototypeVariant, PrototypeVariant
 		key: "B",
 		name: "Prism Rail",
 		shortLabel: "B · Prism Rail",
-		summary: "Фирменная призма ❖/✦, живой TTFT-импульс в ленте + рамке, тактильный Thinking с швом перевода, правая линейка метрик",
+		pillLabel: "❖ B · Prism ↻",
+		summary: "Prism mark ❖/✦, contextual working summary, 6-line page-stabilized streaming Thinking (click unfolds full stream), right metrics rule",
 		settledGlyph: "❖",
 		subtleGlyph: "❖",
 		runningFrames: ["·", "✦", "✧", "❖", "✧", "✦"],
@@ -55,7 +56,8 @@ export const PROTOTYPE_VARIANTS: Record<ActivePrototypeVariant, PrototypeVariant
 		key: "C",
 		name: "Structured Studio",
 		shortLabel: "C · Structured Studio",
-		summary: "Гекса-решётка ⬢ + фазовый бейдж [TTFT], тонированная плашка Thinking, конвейер по типам шагов, приборная полоса метрик",
+		pillLabel: "⬢ C · Studio ↻",
+		summary: "Hex lattice ⬢ + phase tag, 8-line wheel-scrollable live Thinking box, category-grouped tools, two-zone metrics strip",
 		settledGlyph: "⬢",
 		subtleGlyph: "⬢",
 		runningFrames: ["⠋", "⠙", "⠸", "⣠", "⣄", "⡆"],
@@ -78,13 +80,12 @@ export type ThinkingDisplayProvider = (input: {
 
 interface PrototypeRuntimeState {
 	variant: PrototypeVariant;
-	translatePreview: boolean;
+	demoTranslated: boolean;
 	metricsVisible: boolean;
 	phase: WorkingPhase;
 	turnStartedAt?: number;
 	firstContentAt?: number;
-	activeToolHint?: string;
-	phraseSeed: number;
+	contextualSummary?: string;
 	thinkingProvider?: ThinkingDisplayProvider;
 	listeners: Set<() => void>;
 }
@@ -104,10 +105,9 @@ function getProtoState(): PrototypeRuntimeState {
 	if (!g[PROTO_STATE_SYMBOL]) {
 		g[PROTO_STATE_SYMBOL] = {
 			variant: parseInitialVariant(),
-			translatePreview: false,
+			demoTranslated: false,
 			metricsVisible: true,
 			phase: "idle",
-			phraseSeed: 0,
 			listeners: new Set(),
 		};
 	}
@@ -142,13 +142,13 @@ export function cyclePrototypeVariant(): PrototypeVariant {
 }
 
 export function isTranslateSeamPreviewEnabled(): boolean {
-	return getProtoState().translatePreview;
+	return getProtoState().demoTranslated;
 }
 
 export function setTranslateSeamPreview(enabled: boolean): void {
 	const state = getProtoState();
-	if (state.translatePreview === enabled) return;
-	state.translatePreview = enabled;
+	if (state.demoTranslated === enabled) return;
+	state.demoTranslated = enabled;
 	notifyPrototypeChanged();
 }
 
@@ -164,9 +164,8 @@ export function setResponseMetricsEnabled(enabled: boolean): void {
 }
 
 /**
- * Clean seam for future streaming auto-translation of Thinking blocks.
- * External or internal translation pipelines register a pure display provider
- * without mutating the underlying AssistantMessage content in session history.
+ * Clean seam for future streaming auto-translation of Thinking blocks (Echelon 3).
+ * Never shows a translated badge unless a real translation payload is supplied.
  */
 export function registerThinkingDisplayProvider(provider: ThinkingDisplayProvider | undefined): void {
 	const state = getProtoState();
@@ -174,23 +173,11 @@ export function registerThinkingDisplayProvider(provider: ThinkingDisplayProvide
 	notifyPrototypeChanged();
 }
 
-function previewTranslateSample(raw: string): string {
-	const sampleMap: ReadonlyArray<readonly [RegExp, string]> = [
-		[/\bLet's inspect\b/gi, "Проверим"],
-		[/\bLet's check\b/gi, "Проверим"],
-		[/\bWe need to\b/gi, "Нужно"],
-		[/\bFirst,\s*/gi, "Сначала "],
-		[/\bNow let's\b/gi, "Теперь давайте"],
-		[/\bChecking\b/gi, "Проверяю"],
-		[/\bReading\b/gi, "Читаю"],
-		[/\bLooking at\b/gi, "Смотрю на"],
-	];
-	let out = raw;
-	for (const [re, rep] of sampleMap) {
-		out = out.replace(re, rep);
-	}
-	return out;
-}
+const DEMO_TRANSLATED_TEXT = [
+	"Проверим `ThinkingBlock` в `src/features/transcript/thinking-block.ts`: клик по заголовку во время стриминга сразу разворачивает полный текст мысли и сохраняет его открытым после завершения.",
+	"В компактном режиме страница на 6 строк заполняется сверху вниз спокойно, без подпрыгивания строк на каждом переносе слова.",
+	"Проверим `ToolGroupController` в `grouping.ts`, чтобы результаты с `{ type: \"image\" }` всегда рендерились инлайн через `Image`, а не прятались внутрь свёрнутой сводки.",
+].join("\n\n");
 
 export function resolveThinkingDisplay(input: {
 	readonly rawText: string;
@@ -201,11 +188,11 @@ export function resolveThinkingDisplay(input: {
 	if (state.thinkingProvider) {
 		return state.thinkingProvider(input);
 	}
-	if (state.translatePreview && /[A-Za-z]{4,}/.test(input.rawText)) {
+	if (state.demoTranslated && input.runKey === "demo:0") {
 		return {
-			text: previewTranslateSample(input.rawText),
+			text: DEMO_TRANSLATED_TEXT,
 			mode: "translated",
-			badge: input.isStreaming ? "RU · поток" : "RU · авто",
+			badge: "RU",
 		};
 	}
 	return {
@@ -228,7 +215,7 @@ export function notifyPrototypeChanged(): void {
 		try {
 			listener();
 		} catch {
-			/* Игнорируем сбои отдельных подписчиков при горячем переключении прототипа. */
+			/* Ignore transient subscriber errors during hot reload or live variant switches. */
 		}
 	}
 }
@@ -255,82 +242,92 @@ export function getPrototypeSettledGlyph(variant?: PrototypeVariant): string {
 	return PROTOTYPE_VARIANTS[v].settledGlyph;
 }
 
-/* ── Живые фазы и глаголы статуса Working / TTFT ─────────────────────────── */
+/* ── Contextual, meaning-aware Working / TTFT status extraction ──────────── */
 
-const TTFT_VERBS: readonly string[] = [
-	"Ловлю волну…",
-	"Вникаю в контекст…",
-	"Настраиваю фокус…",
-	"Собираю нить…",
-	"Ищу лучшую точку входа…",
-];
+function cleanSnippetWords(raw: string, maxChars = 48): string | undefined {
+	const single = raw
+		.replace(/`([^`]+)`/gu, "$1")
+		.replace(/[*_#~[\]()]/gu, "")
+		.replace(/\s+/gu, " ")
+		.trim();
+	if (!single) return undefined;
+	if (single.length <= maxChars) return single;
+	const cut = single.slice(0, maxChars - 1).replace(/\s+\S*$/u, "");
+	return `${cut || single.slice(0, maxChars - 1)}…`;
+}
 
-const THINKING_VERBS: readonly string[] = [
-	"Прокручиваю варианты…",
-	"Сверяю архитектуру…",
-	"Взвешиваю компромиссы…",
-	"Выстраиваю маршрут…",
-	"Проверяю детали…",
-];
+/**
+ * Extracts a concise, concrete status phrase from the model's live Thinking stream
+ * (preferring explicit bold/markdown section titles, otherwise the latest active clause).
+ */
+export function summarizeLiveThinkingIntent(rawThinking: string): string | undefined {
+	if (!rawThinking.trim()) return undefined;
+	const lines = rawThinking
+		.replace(/\r\n?/gu, "\n")
+		.split("\n")
+		.map((l) => l.trim())
+		.filter((l) => l.length > 0 && !/^(?:`{3,}|~{3,})/u.test(l));
+	if (lines.length === 0) return undefined;
 
-const TOOL_VERBS: readonly string[] = [
-	"Исследую проект…",
-	"Сверяю фактуру в коде…",
-	"Проверяю гипотезу…",
-	"Собираю картину…",
-];
+	/* 1. Ищем последний явный смысловой заголовок (**Heading** или ### Heading) */
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i]!;
+		const boldMatch = /^\*\*([^*]{4,64})\*\*(?::|\s|$)/u.exec(line);
+		if (boldMatch?.[1]) {
+			const cleaned = cleanSnippetWords(boldMatch[1], 46);
+			if (cleaned) return cleaned.endsWith("…") ? cleaned : `${cleaned}…`;
+		}
+		const mdMatch = /^#{1,4}\s+(.{4,64})$/u.exec(line);
+		if (mdMatch?.[1]) {
+			const cleaned = cleanSnippetWords(mdMatch[1], 46);
+			if (cleaned) return cleaned.endsWith("…") ? cleaned : `${cleaned}…`;
+		}
+	}
 
-const TEXT_VERBS: readonly string[] = [
-	"Кристаллизую ответ…",
-	"Формулирую решение…",
-	"Шлифую детали…",
-	"Собираю всё воедино…",
-];
+	/* 2. Иначе берём свежую осмысленную фразу из последней непустой строки */
+	const latest = lines[lines.length - 1]!;
+	const strippedLead = latest
+		.replace(/^(?:[-*+]\s+|\d+\.\s+)/u, "")
+		.replace(/^(?:ok(?:ay)?[,.]?\s+|so\s+|now\s+|first[,.]?\s+|let's\s+|we\s+(?:need|should|can)\s+to\s+|we\s+(?:need|should|can)\s+)/iu, "");
+	if (strippedLead.length < 6) return undefined;
+	const firstClause = strippedLead.split(/[.!?;—–]/u)[0]?.trim() ?? strippedLead;
+	const cleaned = cleanSnippetWords(firstClause, 46);
+	if (!cleaned) return undefined;
+	const capitalized = cleaned[0]!.toUpperCase() + cleaned.slice(1);
+	return capitalized.endsWith("…") ? capitalized : `${capitalized}…`;
+}
 
 export function beginWorkingTurn(now = Date.now()): void {
 	const state = getProtoState();
 	state.phase = "ttft";
 	state.turnStartedAt = now;
 	state.firstContentAt = undefined;
-	state.activeToolHint = undefined;
-	state.phraseSeed = (state.phraseSeed + 1) % 97;
+	state.contextualSummary = undefined;
 }
 
 export function markWorkingPhase(
 	phase: WorkingPhase,
-	options?: { now?: number; toolHint?: string },
+	options?: { now?: number; summary?: string },
 ): void {
 	const state = getProtoState();
 	const now = options?.now ?? Date.now();
-	if (phase !== "idle" && phase !== "ttft" && state.firstContentAt === undefined) {
+	if (phase === "idle") {
+		state.phase = "idle";
+		state.turnStartedAt = undefined;
+		state.firstContentAt = undefined;
+		state.contextualSummary = undefined;
+		return;
+	}
+	state.turnStartedAt ??= now;
+	if (phase !== "ttft" && state.firstContentAt === undefined) {
 		state.firstContentAt = now;
 	}
 	state.phase = phase;
-	if (options?.toolHint !== undefined) {
-		state.activeToolHint = options.toolHint;
-	} else if (phase !== "tool") {
-		state.activeToolHint = undefined;
+	if (options?.summary !== undefined) {
+		state.contextualSummary = options.summary;
+	} else if (phase === "ttft") {
+		state.contextualSummary = undefined;
 	}
-	if (phase === "idle") {
-		state.turnStartedAt = undefined;
-		state.firstContentAt = undefined;
-		state.activeToolHint = undefined;
-	}
-}
-
-export function getWorkingSnapshot(): {
-	readonly phase: WorkingPhase;
-	readonly turnStartedAt?: number;
-	readonly firstContentAt?: number;
-	readonly activeToolHint?: string;
-} {
-	const state = getProtoState();
-	return {
-		phase: state.phase,
-		turnStartedAt: state.turnStartedAt,
-		firstContentAt: state.firstContentAt,
-		activeToolHint: state.activeToolHint,
-	};
 }
 
 function formatCompactElapsed(ms: number): string {
@@ -341,32 +338,34 @@ function formatCompactElapsed(ms: number): string {
 	return `${Math.floor(sec / 60)}m ${sec % 60}s`;
 }
 
-function pickPhasePhrase(phase: WorkingPhase, elapsedTurnMs: number, seed: number, toolHint?: string): string {
-	if (phase === "tool" && toolHint) {
-		return toolHint;
+function resolveDefaultPhaseLabel(phase: WorkingPhase): string {
+	switch (phase) {
+		case "ttft":
+			return "Connecting…";
+		case "thinking":
+			return "Thinking…";
+		case "tool":
+			return "Running tools…";
+		case "text":
+			return "Responding…";
+		case "idle":
+		default:
+			return "Working…";
 	}
-	const pool =
-		phase === "ttft"
-			? TTFT_VERBS
-			: phase === "thinking"
-				? THINKING_VERBS
-				: phase === "tool"
-					? TOOL_VERBS
-					: TEXT_VERBS;
-	const bucket = Math.floor(Math.max(0, elapsedTurnMs) / 2600);
-	return pool[(seed + bucket) % pool.length] ?? "Работаю…";
 }
 
+/**
+ * Returns the animated brand glyph and a plain-text status string WITHOUT inner SGR resets
+ * and WITHOUT redundant "(esc to interrupt)" hints, so WorkingStatusIndicator paints evenly.
+ */
 export function buildLiveWorkingPresentation(options?: {
 	now?: number;
 	animElapsedMs?: number;
-	theme?: Theme;
-	interruptKey?: string;
+	theme?: unknown;
 	variant?: ActivePrototypeVariant;
 }): {
 	readonly indicatorFrame: string;
 	readonly borderMessage: string;
-	readonly ttftTranscriptLine?: string;
 } {
 	const state = getProtoState();
 	const activeVariant = options?.variant ?? (state.variant === "off" ? "B" : state.variant);
@@ -374,11 +373,10 @@ export function buildLiveWorkingPresentation(options?: {
 	const animMs = options?.animElapsedMs ?? getAnimationElapsedMs();
 	const theme = options?.theme ?? getActiveGlobalTheme();
 	const light = isLightTheme(theme);
-	const interruptHint = options?.interruptKey ?? "esc";
 
 	const phase: WorkingPhase = state.phase === "idle" ? "ttft" : state.phase;
 	const elapsedTurnMs = state.turnStartedAt !== undefined ? Math.max(0, now - state.turnStartedAt) : animMs;
-	const phrase = pickPhasePhrase(phase, elapsedTurnMs, state.phraseSeed, state.activeToolHint);
+	const summary = state.contextualSummary || resolveDefaultPhaseLabel(phase);
 	const timerText = formatCompactElapsed(elapsedTurnMs);
 	const indicatorFrame = samplePrototypeRunningGlyph(0, {
 		theme,
@@ -388,36 +386,22 @@ export function buildLiveWorkingPresentation(options?: {
 	});
 
 	if (activeVariant === "C") {
-		const badgeLabel =
+		const phaseTag =
 			phase === "ttft"
-				? `TTFT ${timerText}`
+				? "TTFT"
 				: phase === "thinking"
-					? `МЫСЛЬ ${timerText}`
+					? "THINK"
 					: phase === "tool"
-						? `ШАГИ ${timerText}`
-						: `ОТВЕТ ${timerText}`;
-		const badgeStyled = light
-			? fgRgb(37, 99, 235, `[${badgeLabel}]`)
-			: fgRgb(125, 196, 255, `[${badgeLabel}]`);
+						? "TOOLS"
+						: "REPLY";
 		return {
 			indicatorFrame,
-			borderMessage: `${badgeStyled} ${phrase} (${interruptHint} стоп)`,
+			borderMessage: `[${phaseTag} ${timerText}] ${summary}`,
 		};
-	}
-
-	const subtleDot = light ? fgRgb(148, 163, 184, "·") : fgRgb(92, 108, 132, "·");
-	const styledTimer = light ? fgRgb(71, 85, 105, timerText) : fgRgb(138, 156, 182, timerText);
-	const borderMessage = `${phrase} ${subtleDot} ${styledTimer} (${interruptHint} прервать)`;
-
-	let ttftTranscriptLine: string | undefined;
-	if (activeVariant === "B" && phase === "ttft") {
-		const phraseStyled = light ? fgRgb(71, 85, 105, phrase) : fgRgb(132, 152, 180, phrase);
-		ttftTranscriptLine = `  ${indicatorFrame} ${phraseStyled} ${subtleDot} ${styledTimer}`;
 	}
 
 	return {
 		indicatorFrame,
-		borderMessage,
-		ttftTranscriptLine,
+		borderMessage: `${summary} · ${timerText}`,
 	};
 }

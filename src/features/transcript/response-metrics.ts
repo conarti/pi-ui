@@ -1,9 +1,9 @@
 /**
  * PROTOTYPE (throwaway branch: prototype/thinking-and-tool-calls)
- * Native response metrics stamp + live TTFT transcript pulse + Session Speed Summary Modal Card.
- * Supersedes external ~/.pi/agent/extensions/response-metrics.ts while keeping 100% compatibility
- * with historical `response-metrics` and `pi-stamp` entries.
+ * Native English-first response metrics row + contextual working-phase observer + Session Speed Modal Card.
+ * Compatible with historical `response-metrics` and `pi-stamp` entries.
  */
+import { basename } from "node:path";
 import type {
 	EntryRenderer,
 	ExtensionAPI,
@@ -20,28 +20,23 @@ import {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
-import {
-	activateAnimationSurface,
-	deactivateAnimationSurface,
-} from "../../shared/animation-scheduler.ts";
 import { fgRgb, isLightTheme, renderPill } from "../../shared/ansi.ts";
 import {
 	matchesExtensionSourcePath,
 	registerSupersededExtensionPredicate,
 	withConartiInternalRegistration,
 } from "../../shared/extension-superseder.ts";
-import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
 import { createModalCard, openModalCard } from "../../shared/modal-card.ts";
 import { claimHover, copyToClipboard } from "../../shared/runtime-hooks.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
 import {
 	beginWorkingTurn,
-	buildLiveWorkingPresentation,
 	getPrototypeVariant,
 	isPrototypeActive,
 	isResponseMetricsEnabled,
 	markWorkingPhase,
 	setResponseMetricsEnabled,
+	summarizeLiveThinkingIntent,
 	type PrototypeVariant,
 } from "./prototype-state.ts";
 
@@ -52,7 +47,6 @@ export const TTFT_PULSE_MARKER = Symbol.for("conarti.pi-ui.ttft-pulse");
 const MIN_STREAM_DECODE_MS = 100;
 const MIN_STREAM_OUTPUT_TOKENS = 2;
 const MIN_THINKING_GAP_MS = 300;
-const TTFT_PULSE_SURFACE_KEY = "transcript.ttft-pulse";
 
 export interface ResponseMetricsData {
 	version: 1;
@@ -255,30 +249,30 @@ export function normalizeLegacyPiStamp(
 function buildExpandedDetailParts(data: ResponseMetricsData, computed: ComputedMetrics): string[] {
 	const detailParts: string[] = [];
 	if (computed.streamTps !== undefined && computed.effectiveTps !== undefined) {
-		detailParts.push(`полн. ${formatMetricsRate(computed.effectiveTps)} tok/s`);
+		detailParts.push(`eff ${formatMetricsRate(computed.effectiveTps)} tok/s`);
 	}
 	if (computed.decodeMs !== undefined) {
-		detailParts.push(`декод ${formatMetricsDuration(computed.decodeMs)}`);
+		detailParts.push(`stream ${formatMetricsDuration(computed.decodeMs)}`);
 	}
-	detailParts.push(`ход ${formatMetricsDuration(computed.totalMs)}`);
+	detailParts.push(`total ${formatMetricsDuration(computed.totalMs)}`);
 	if (
 		computed.firstTextMs !== undefined &&
 		computed.ttftMs !== undefined &&
 		computed.firstTextMs - computed.ttftMs >= MIN_THINKING_GAP_MS
 	) {
-		detailParts.push(`первый текст ${formatMetricsDuration(computed.firstTextMs)}`);
+		detailParts.push(`first text ${formatMetricsDuration(computed.firstTextMs)}`);
 	}
 	if (isPositiveCount(data.outputTokens)) {
 		const reas = isPositiveCount(data.reasoningTokens)
-			? ` (мысль ${formatTokenCount(data.reasoningTokens)})`
+			? ` (r ${formatTokenCount(data.reasoningTokens)})`
 			: "";
-		detailParts.push(`выход ${formatTokenCount(data.outputTokens)}${reas}`);
+		detailParts.push(`out ${formatTokenCount(data.outputTokens)}${reas}`);
 	}
 	if (isPositiveCount(data.inputTokens)) {
 		const cache = isPositiveCount(data.cacheReadTokens)
-			? ` (кэш ${formatTokenCount(data.cacheReadTokens)})`
+			? ` (cache ${formatTokenCount(data.cacheReadTokens)})`
 			: "";
-		detailParts.push(`вход ${formatTokenCount(data.inputTokens)}${cache}`);
+		detailParts.push(`in ${formatTokenCount(data.inputTokens)}${cache}`);
 	}
 	return detailParts;
 }
@@ -322,7 +316,7 @@ export class ResponseMetricsRowComponent implements Component {
 	invalidate(): void {}
 
 	render(width: number): string[] {
-		if (width < 4 || !isResponseMetricsEnabled()) return [];
+		if (width < 8 || !isResponseMetricsEnabled()) return [];
 		const variant: PrototypeVariant = getPrototypeVariant();
 		if (variant === "off") {
 			return formatLegacyMetricsLines(this.data, this.expanded).flatMap((source) =>
@@ -332,11 +326,18 @@ export class ResponseMetricsRowComponent implements Component {
 				}),
 			);
 		}
+		if (this.data.stopReason === "toolUse") return [];
 
 		const computed = computeMetrics(this.data);
 		if (!computed) return [];
 
 		const light = isLightTheme(this.themeRef);
+		/* Оставляем справа 4 колонки под Outline Rail (width - 3 .. width - 2) и скроллбар (width - 1) */
+		const rightClearance = width >= 48 ? 4 : 1;
+		const usableWidth = Math.max(8, width - rightClearance);
+		const padFullWidth = (line: string): string =>
+			line + " ".repeat(Math.max(0, width - visibleWidth(line)));
+
 		const elapsedMs = isValidMs(this.data.timeSinceUserMs)
 			? this.data.timeSinceUserMs
 			: computed.totalMs;
@@ -352,14 +353,14 @@ export class ResponseMetricsRowComponent implements Component {
 		const timeLabel = formatClockTime(this.data.completedAt || this.data.timestamp);
 
 		const dimFg = (s: string) =>
-			light ? fgRgb(110, 124, 145, s) : fgRgb(104, 118, 142, s);
+			light ? fgRgb(120, 134, 156, s) : fgRgb(104, 118, 142, s);
 		const valFg = (s: string) =>
 			this.hovered
 				? light
 					? fgRgb(29, 78, 216, s)
 					: fgRgb(145, 198, 252, s)
 				: light
-					? fgRgb(71, 85, 105, s)
+					? fgRgb(78, 94, 118, s)
 					: fgRgb(136, 152, 178, s);
 		const accentFg = (s: string) =>
 			light ? fgRgb(37, 99, 235, s) : fgRgb(110, 182, 248, s);
@@ -368,44 +369,46 @@ export class ResponseMetricsRowComponent implements Component {
 		const lines: string[] = [];
 
 		if (variant === "A") {
-			const parts: string[] = [`${this.hovered ? accentFg("◈") : dimFg("✓")} ${valFg(totalLabel)}`];
+			const parts: string[] = [
+				`${this.hovered ? accentFg("◈") : dimFg("✓")} ${valFg(`Worked for ${totalLabel}`)}`,
+			];
 			if (ttftLabel) parts.push(dimFg(ttftLabel));
 			if (speedLabel) parts.push(valFg(speedLabel));
 			parts.push(dimFg(timeLabel));
 			if (this.hovered) {
-				parts.push(accentFg("[статистика ↗]"));
+				parts.push(accentFg("stats ↗"));
 			}
-			const row = truncateToWidth(`  ${parts.join(sep)}`, width, "…");
-			lines.push(row + " ".repeat(Math.max(0, width - visibleWidth(row))));
+			const row = truncateToWidth(`  ${parts.join(sep)}`, usableWidth, "…");
+			lines.push(padFullWidth(row));
 		} else if (variant === "B") {
 			const rightParts: string[] = [];
 			if (speedLabel) rightParts.push(valFg(speedLabel));
 			if (ttftLabel) rightParts.push(dimFg(ttftLabel));
-			rightParts.push(valFg(`ход ${totalLabel}`));
-			rightParts.push(dimFg(this.hovered ? "сводка ↗" : timeLabel));
+			rightParts.push(valFg(`turn ${totalLabel}`));
+			rightParts.push(this.hovered ? accentFg("stats ↗") : dimFg(timeLabel));
 			const leadGlyph = this.hovered ? accentFg("❖") : dimFg("❖");
-			const rightBlock = `  ${leadGlyph} ${rightParts.join(sep)} `;
+			const rightBlock = `  ${leadGlyph} ${rightParts.join(sep)}`;
 			const rightW = visibleWidth(rightBlock);
-			const ruleBudget = Math.max(0, width - rightW - 2);
+			const ruleBudget = Math.max(0, usableWidth - rightW - 2);
 			const ruleColor = (s: string) =>
 				this.hovered
 					? light
 						? fgRgb(147, 197, 253, s)
 						: fgRgb(62, 88, 126, s)
 					: light
-						? fgRgb(218, 226, 238, s)
+						? fgRgb(212, 222, 236, s)
 						: fgRgb(46, 56, 74, s);
 			if (ruleBudget >= 6) {
 				const rule = `  ${ruleColor("┄".repeat(ruleBudget))}`;
-				const full = truncateToWidth(`${rule}${rightBlock}`, width, "…");
-				lines.push(full + " ".repeat(Math.max(0, width - visibleWidth(full))));
+				const full = truncateToWidth(`${rule}${rightBlock}`, usableWidth, "…");
+				lines.push(padFullWidth(full));
 			} else {
-				const pad = " ".repeat(Math.max(0, width - rightW));
-				const full = truncateToWidth(`${pad}${rightBlock}`, width, "…");
-				lines.push(full + " ".repeat(Math.max(0, width - visibleWidth(full))));
+				const pad = " ".repeat(Math.max(0, usableWidth - rightW));
+				const full = truncateToWidth(`${pad}${rightBlock}`, usableWidth, "…");
+				lines.push(padFullWidth(full));
 			}
 		} else {
-			/* Variant C: двухзонная приборная полоса с пилюлями справа. */
+			/* Variant C: two-zone instrument strip with right clearance */
 			const leftMeta: string[] = [dimFg(formatClockTime(this.data.completedAt || this.data.timestamp, true))];
 			if (this.data.model) {
 				const eff = this.data.thinkingLevel ? ` (${this.data.thinkingLevel})` : "";
@@ -439,26 +442,26 @@ export class ResponseMetricsRowComponent implements Component {
 				);
 			}
 			pills.push(
-				renderPill(`Всего ${totalLabel}`, {
+				renderPill(`Turn ${totalLabel}`, {
 					theme: this.themeRef,
 					hovered: false,
 				}),
 			);
 			pills.push(
-				renderPill("Сводка ↗", {
+				renderPill("Stats ↗", {
 					theme: this.themeRef,
 					hovered: this.hovered,
 					active: this.hovered,
 					variant: "secondary",
 				}),
 			);
-			const rightStr = `${pills.join(" ")} `;
+			const rightStr = pills.join(" ");
 			const rightW = visibleWidth(rightStr);
-			const maxLeft = Math.max(0, width - rightW - 2);
+			const maxLeft = Math.max(0, usableWidth - rightW - 2);
 			const clippedLeft = maxLeft >= 10 ? truncateToWidth(leftStr, maxLeft, "…") : "";
-			const gap = " ".repeat(Math.max(1, width - visibleWidth(clippedLeft) - rightW));
-			const combined = truncateToWidth(`${clippedLeft}${gap}${rightStr}`, width, "…");
-			lines.push(combined + " ".repeat(Math.max(0, width - visibleWidth(combined))));
+			const gap = " ".repeat(Math.max(1, usableWidth - visibleWidth(clippedLeft) - rightW));
+			const combined = truncateToWidth(`${clippedLeft}${gap}${rightStr}`, usableWidth, "…");
+			lines.push(padFullWidth(combined));
 		}
 
 		if (this.expanded) {
@@ -466,12 +469,12 @@ export class ResponseMetricsRowComponent implements Component {
 			if (details.length > 0) {
 				const detailText = dimFg(details.join(" · "));
 				if (variant === "A") {
-					const dRow = truncateToWidth(`    ${detailText}`, width, "…");
-					lines.push(dRow + " ".repeat(Math.max(0, width - visibleWidth(dRow))));
+					const dRow = truncateToWidth(`    ${detailText}`, usableWidth, "…");
+					lines.push(padFullWidth(dRow));
 				} else {
-					const clipped = truncateToWidth(`${detailText} `, width, "…");
-					const pad = " ".repeat(Math.max(0, width - visibleWidth(clipped)));
-					lines.push(`${pad}${clipped}`);
+					const clipped = truncateToWidth(detailText, usableWidth, "…");
+					const pad = " ".repeat(Math.max(0, usableWidth - visibleWidth(clipped)));
+					lines.push(padFullWidth(`${pad}${clipped}`));
 				}
 			}
 		}
@@ -505,23 +508,7 @@ export class ResponseMetricsRowComponent implements Component {
 	}
 }
 
-/* ── Живой эфемерный TTFT-импульс в ленте (Variant B) ───────────────────── */
-
-class TtftPulseComponent implements Component {
-	readonly [TTFT_PULSE_MARKER] = true;
-
-	invalidate(): void {}
-
-	render(width: number): string[] {
-		if (width <= 0 || getPrototypeVariant() !== "B") return [];
-		const pres = buildLiveWorkingPresentation();
-		if (!pres.ttftTranscriptLine) return [];
-		const row = truncateToWidth(pres.ttftTranscriptLine, width, "…");
-		return ["", row + " ".repeat(Math.max(0, width - visibleWidth(row)))];
-	}
-}
-
-/* ── Сводная статистика сессии (Modal Card `/stats` / `/metrics` / клик) ── */
+/* ── Session Speed & Tokens Summary Modal Card (/stats | /metrics | click) ─ */
 
 interface TurnMetricsRecord {
 	turnIndex: number;
@@ -581,7 +568,6 @@ export function collectSessionMetrics(branch: readonly unknown[]): {
 		return { records, usedSampleData: false };
 	}
 
-	/* Демонстрационные строки для пустой ветки прототипа, явно помеченные как пример. */
 	const now = Date.now();
 	const samples: ResponseMetricsData[] = [
 		{
@@ -638,7 +624,7 @@ function buildMarkdownSummaryTable(records: readonly TurnMetricsRecord[]): strin
 	}
 
 	const lines: string[] = [
-		"| Модель + Effort | Ходов | Мед. TTFT | Стрим tok/s | Полн. tok/s | Выход (мысль) |",
+		"| Model + Effort | Calls | Med TTFT | Stream tok/s | Eff tok/s | Output (reasoning) |",
 		"|---|---:|---:|---:|---:|---:|",
 	];
 
@@ -658,7 +644,7 @@ function buildMarkdownSummaryTable(records: readonly TurnMetricsRecord[]): strin
 	}
 
 	lines.push("");
-	lines.push("| Ход | Модель | TTFT | Стрим tok/s | Полн. tok/s | Время | Выход (мысль) |");
+	lines.push("| Turn | Model | TTFT | Stream tok/s | Eff tok/s | Duration | Output (reasoning) |");
 	lines.push("|---:|---|---:|---:|---:|---:|---:|");
 	for (const rec of records) {
 		const model = rec.data.model ?? "unknown";
@@ -696,16 +682,16 @@ export async function openResponseMetricsModal(ctx: ExtensionContext): Promise<v
 				const body: string[] = [];
 				if (usedSampleData) {
 					body.push(
-						dim("В текущей ветке ещё нет завершённых замеров - показан демонстрационный макет таблицы."),
+						dim("No recorded responses in the current branch yet - showing sample layout."),
 					);
 					body.push("");
 				}
 
-				body.push(accent("Сводка по моделям и уровню рассуждений (медианы):"));
+				body.push(accent("By Model + Effort (medians):"));
 				const modelCol = Math.max(16, Math.min(30, innerW - 46));
 				body.push(
 					dim(
-						`${padCell("Модель + Effort", modelCol)}  ${padCell("Ходы", 5, "right")}  ${padCell("TTFT", 7, "right")}  ${padCell("Стрим", 11, "right")}  ${padCell("Полн.", 11, "right")}  ${padCell("Выход (r)", 13, "right")}`,
+						`${padCell("Model + Effort", modelCol)}  ${padCell("Calls", 5, "right")}  ${padCell("TTFT", 7, "right")}  ${padCell("Stream", 11, "right")}  ${padCell("Eff", 11, "right")}  ${padCell("Out (r)", 13, "right")}`,
 					),
 				);
 
@@ -731,15 +717,15 @@ export async function openResponseMetricsModal(ctx: ExtensionContext): Promise<v
 				}
 
 				body.push("");
-				body.push(accent("По ходам текущей ветки:"));
+				body.push(accent("Recent Calls in Branch:"));
 				const turnModelCol = Math.max(12, Math.min(24, innerW - 50));
 				body.push(
 					dim(
-						`${padCell("Ход", 5)}  ${padCell("Модель", turnModelCol)}  ${padCell("TTFT", 7, "right")}  ${padCell("Стрим", 11, "right")}  ${padCell("Полн.", 11, "right")}  ${padCell("Время", 8, "right")}  ${padCell("Выход (r)", 13, "right")}`,
+						`${padCell("Turn", 5)}  ${padCell("Model", turnModelCol)}  ${padCell("TTFT", 7, "right")}  ${padCell("Stream", 11, "right")}  ${padCell("Eff", 11, "right")}  ${padCell("Time", 8, "right")}  ${padCell("Out (r)", 13, "right")}`,
 					),
 				);
 
-				for (const rec of records) {
+				for (const rec of records.slice(-30)) {
 					const m = rec.data.model ?? "unknown";
 					const ttft = rec.computed.ttftMs !== undefined ? formatMetricsDuration(rec.computed.ttftMs) : "-";
 					const st = rec.computed.streamTps !== undefined ? `${formatMetricsRate(rec.computed.streamTps)} t/s` : "-";
@@ -778,25 +764,25 @@ export async function openResponseMetricsModal(ctx: ExtensionContext): Promise<v
 					const enabled = isResponseMetricsEnabled();
 
 					return card.render(width, theme, {
-						title: "❖ Скорость и токены сессии",
+						title: "❖ Session Speed & Tokens",
 						headerMeta:
 							maxOffset > 0
 								? `${scrollOffset + 1}..${Math.min(built.lines.length, scrollOffset + maxVisible)}/${built.lines.length}`
-								: `${built.sample ? "макет" : "живые замеры"}`,
+								: `${built.sample ? "sample" : "live"}`,
 						closable: true,
 						onClose: () => done(undefined),
 						bodyLines: visibleLines,
 						footerPills: [
 							{
 								id: "copy-table",
-								label: copiedFlash ? "✓ Скопировано в буфер" : "Копировать таблицу · C",
+								label: copiedFlash ? "✓ Copied Markdown" : "Copy Table · C",
 								variant: copiedFlash ? "success" : "primary",
 								active: copiedFlash,
 								onClick: copySummary,
 							},
 							{
 								id: "toggle-row",
-								label: enabled ? "Строка под ответом: Вкл · M" : "Строка под ответом: Выкл · M",
+								label: enabled ? "Metrics Row: On · M" : "Metrics Row: Off · M",
 								variant: enabled ? "secondary" : "neutral",
 								active: enabled,
 								onClick: () => {
@@ -806,7 +792,7 @@ export async function openResponseMetricsModal(ctx: ExtensionContext): Promise<v
 							},
 							{
 								id: "close",
-								label: "Закрыть · Esc",
+								label: "Close · Esc",
 								onClick: () => done(undefined),
 							},
 						],
@@ -867,7 +853,7 @@ export async function openResponseMetricsModal(ctx: ExtensionContext): Promise<v
 	);
 }
 
-/* ── Регистрация фичи и перехват жизненных циклов ответа ────────────────── */
+/* ── Lifecycle hooks and contextual Working Summary extraction ───────────── */
 
 function elapsedSinceLastUser(entries: readonly unknown[], completedAt: number): number | undefined {
 	for (let i = entries.length - 1; i >= 0; i -= 1) {
@@ -896,25 +882,55 @@ function extractUsage(message: unknown): {
 	};
 }
 
-function describeToolHint(toolName: string): string {
+function describeToolAction(toolName: string, rawArgs: unknown): string {
+	const args = isRecord(rawArgs) ? rawArgs : {};
+	if (typeof args.toolSummary === "string" && args.toolSummary.trim()) {
+		const s = args.toolSummary.trim();
+		return s.endsWith("…") ? s : `${s}…`;
+	}
+	const rawPath =
+		typeof args.path === "string"
+			? args.path
+			: typeof args.file_path === "string"
+				? args.file_path
+				: "";
+	const shortPath = rawPath ? basename(rawPath) || rawPath : "";
+
 	switch (toolName) {
 		case "read":
-			return "Читаю файлы…";
-		case "grep":
-		case "find":
-		case "ls":
-			return "Ищу в проекте…";
+			return shortPath ? `Reading ${shortPath}…` : "Reading file…";
 		case "edit":
+			return shortPath ? `Editing ${shortPath}…` : "Editing file…";
 		case "write":
-			return "Вношу правки…";
+			return shortPath ? `Writing ${shortPath}…` : "Writing file…";
+		case "grep":
+		case "find": {
+			const pat = typeof args.pattern === "string" ? args.pattern.slice(0, 28) : "";
+			return pat ? `Searching ${pat}…` : "Searching codebase…";
+		}
+		case "ls":
+			return shortPath ? `Listing ${shortPath}…` : "Listing files…";
 		case "bash":
-		case "powershell":
-			return "Выполняю команду…";
+		case "powershell": {
+			const cmd = typeof args.command === "string" ? args.command.trim().split(/\s+/u).slice(0, 3).join(" ") : "";
+			return cmd ? `Running ${cmd.slice(0, 32)}…` : "Running command…";
+		}
 		case "codemode":
-			return "Выполняю сценарий…";
+			return "Running batched tools…";
 		default:
-			return `Вызываю ${toolName}…`;
+			return `Calling ${toolName}…`;
 	}
+}
+
+function extractLatestThinkingFromMessage(message: unknown): string | undefined {
+	if (!isRecord(message) || !Array.isArray(message.content)) return undefined;
+	for (let i = message.content.length - 1; i >= 0; i--) {
+		const block = message.content[i];
+		if (isRecord(block) && block.type === "thinking" && typeof block.thinking === "string") {
+			return summarizeLiveThinkingIntent(block.thinking);
+		}
+	}
+	return undefined;
 }
 
 export function registerResponseMetricsFeature(pi: ExtensionAPI): void {
@@ -927,35 +943,6 @@ export function registerResponseMetricsFeature(pi: ExtensionAPI): void {
 	let activeTiming: ActiveTiming | undefined;
 	let finalizedTiming: FinalizedTiming | undefined;
 	let activeThinkingLevel: string | undefined;
-	let activeTtftPulse: TtftPulseComponent | undefined;
-
-	const unmountTtftPulse = () => {
-		deactivateAnimationSurface(TTFT_PULSE_SURFACE_KEY);
-		if (!activeTtftPulse) return;
-		const chat = getActiveHostRuntime()?.chatContainer as { removeChild?: (c: unknown) => void } | undefined;
-		chat?.removeChild?.(activeTtftPulse);
-		activeTtftPulse = undefined;
-	};
-
-	const mountTtftPulseIfNeeded = () => {
-		if (!tuiActive || !isPrototypeActive() || getPrototypeVariant() !== "B") {
-			unmountTtftPulse();
-			return;
-		}
-		const chat = getActiveHostRuntime()?.chatContainer as
-			| { children?: unknown[]; addChild?: (c: unknown) => void; removeChild?: (c: unknown) => void }
-			| undefined;
-		if (!chat || typeof chat.addChild !== "function") return;
-		if (!activeTtftPulse) {
-			activeTtftPulse = new TtftPulseComponent();
-		}
-		if (Array.isArray(chat.children) && !chat.children.includes(activeTtftPulse)) {
-			chat.addChild(activeTtftPulse);
-		}
-		activateAnimationSurface(TTFT_PULSE_SURFACE_KEY, () => {
-			requestRender();
-		});
-	};
 
 	const triggerSummaryModal = () => {
 		if (activeCtx) {
@@ -984,6 +971,7 @@ export function registerResponseMetricsFeature(pi: ExtensionAPI): void {
 		const legacyStampRenderer: EntryRenderer<unknown> = (entry, options, theme) => {
 			const normalized = normalizeLegacyPiStamp(entry.data);
 			if (!normalized || "userTimestamp" in normalized) return undefined;
+			if (!isResponseMetricsEnabled()) return undefined;
 			return new ResponseMetricsRowComponent(
 				normalized,
 				options.expanded,
@@ -1001,13 +989,11 @@ export function registerResponseMetricsFeature(pi: ExtensionAPI): void {
 			activeTiming = undefined;
 			finalizedTiming = undefined;
 			activeThinkingLevel = undefined;
-			unmountTtftPulse();
 		});
 
 		pi.on("agent_start", (_event, ctx) => {
 			activeCtx = ctx;
 			beginWorkingTurn(Date.now());
-			mountTtftPulseIfNeeded();
 		});
 
 		pi.on("turn_start", (_event, ctx) => {
@@ -1018,8 +1004,6 @@ export function registerResponseMetricsFeature(pi: ExtensionAPI): void {
 				typeof (ctx as unknown as { thinkingLevel?: unknown }).thinkingLevel === "string"
 					? ((ctx as unknown as { thinkingLevel: string }).thinkingLevel)
 					: undefined;
-			beginWorkingTurn(Date.now());
-			mountTtftPulseIfNeeded();
 		});
 
 		pi.on("message_start", (event) => {
@@ -1036,13 +1020,13 @@ export function registerResponseMetricsFeature(pi: ExtensionAPI): void {
 			const subEvent = event.assistantMessageEvent as { type?: string; delta?: string } | undefined;
 
 			if (isMeaningfulAssistantUpdate(subEvent)) {
-				unmountTtftPulse();
 				if (subEvent?.type === "thinking_delta" || subEvent?.type === "thinking_end") {
-					markWorkingPhase("thinking", { now });
+					const intent = extractLatestThinkingFromMessage(event.message);
+					markWorkingPhase("thinking", { now, summary: intent ?? "Thinking…" });
 				} else if (subEvent?.type === "toolcall_delta" || subEvent?.type === "toolcall_end") {
 					markWorkingPhase("tool", { now });
 				} else if (subEvent?.type === "text_delta" || subEvent?.type === "text_end") {
-					markWorkingPhase("text", { now });
+					markWorkingPhase("text", { now, summary: "Responding…" });
 				}
 			}
 
@@ -1058,12 +1042,11 @@ export function registerResponseMetricsFeature(pi: ExtensionAPI): void {
 		});
 
 		pi.on("tool_execution_start", (event) => {
-			unmountTtftPulse();
-			markWorkingPhase("tool", { toolHint: describeToolHint(event.toolName) });
+			const rawArgs = (event as { args?: unknown }).args;
+			markWorkingPhase("tool", { summary: describeToolAction(event.toolName, rawArgs) });
 		});
 
 		pi.on("message_end", (event, ctx) => {
-			unmountTtftPulse();
 			if (!tuiActive || event.message.role !== "assistant" || !isValidMs(event.message.timestamp)) {
 				return;
 			}
@@ -1094,13 +1077,12 @@ export function registerResponseMetricsFeature(pi: ExtensionAPI): void {
 				completedAt,
 				...(firstContentAt !== undefined ? { firstContentAt } : {}),
 				...(firstTextAt !== undefined ? { firstTextAt } : {}),
-				...(timeSinceUserMs !== undefined ? { timeSinceUserMs } : {}),
+				...(timeSinceUserMs !== undefined ? { timeSinceUserMs: timeSinceUserMs } : {}),
 			};
 			activeTiming = undefined;
 		});
 
 		pi.on("turn_end", (event) => {
-			unmountTtftPulse();
 			const timing = finalizedTiming;
 			const thinkingLevel = activeThinkingLevel;
 			activeTiming = undefined;
@@ -1136,14 +1118,12 @@ export function registerResponseMetricsFeature(pi: ExtensionAPI): void {
 				...(stopReason !== undefined ? { stopReason } : {}),
 			};
 
-			/* Не записываем персистентные записи во время тестового запуска vitest без прототипа. */
 			if (!process.env.VITEST || isPrototypeActive()) {
 				pi.appendEntry<ResponseMetricsData>(METRICS_ENTRY_TYPE, entry);
 			}
 		});
 
 		pi.on("agent_end", () => {
-			unmountTtftPulse();
 			markWorkingPhase("idle");
 			activeTiming = undefined;
 			finalizedTiming = undefined;
@@ -1151,7 +1131,6 @@ export function registerResponseMetricsFeature(pi: ExtensionAPI): void {
 		});
 
 		pi.on("session_shutdown", () => {
-			unmountTtftPulse();
 			markWorkingPhase("idle");
 			tuiActive = false;
 			activeCtx = undefined;
@@ -1165,19 +1144,19 @@ export function registerResponseMetricsFeature(pi: ExtensionAPI): void {
 			const trimmed = args.trim().toLowerCase();
 			if (trimmed === "on" || trimmed === "true") {
 				setResponseMetricsEnabled(true);
-				ctx.ui.notify("Строка метрик ответа включена.", "info");
+				ctx.ui.notify("Response metrics row enabled.", "info");
 				return;
 			}
 			if (trimmed === "off" || trimmed === "false") {
 				setResponseMetricsEnabled(false);
-				ctx.ui.notify("Строка метрик ответа скрыта.", "info");
+				ctx.ui.notify("Response metrics row hidden.", "info");
 				return;
 			}
 			if (trimmed === "toggle") {
 				const next = !isResponseMetricsEnabled();
 				setResponseMetricsEnabled(next);
 				ctx.ui.notify(
-					next ? "Строка метрик ответа включена." : "Строка метрик ответа скрыта.",
+					next ? "Response metrics row enabled." : "Response metrics row hidden.",
 					"info",
 				);
 				return;
@@ -1186,12 +1165,12 @@ export function registerResponseMetricsFeature(pi: ExtensionAPI): void {
 		};
 
 		pi.registerCommand("metrics", {
-			description: "Открыть сводную статистику скорости и токенов сессии (или /metrics on|off)",
+			description: "Open Session Speed & Tokens summary modal (or /metrics on|off)",
 			handler: handleMetricsCommand,
 		});
 
 		pi.registerCommand("stats", {
-			description: "Сводная таблица TTFT и tok/s по текущей сессии",
+			description: "Open Session Speed & Tokens summary modal",
 			handler: handleMetricsCommand,
 		});
 	});

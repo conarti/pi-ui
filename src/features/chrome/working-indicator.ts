@@ -18,6 +18,8 @@ const WORKING_CONTROLLER_KEY = Symbol.for("conarti.pi-ui.composer-working-contro
 interface ComposerWorkingState {
 	ctx?: ExtensionContext;
 	suppressed?: boolean;
+	lastFrame?: string;
+	lastMessage?: string;
 }
 
 function getWorkingState(): ComposerWorkingState {
@@ -39,14 +41,29 @@ export function buildWaveIndicator(options?: WaveSampleOptions): WorkingIndicato
 	};
 }
 
-function applyWorkingIndicatorFrame(ctx: ExtensionContext): void {
+function applyWorkingIndicatorFrame(ctx: ExtensionContext, force = false): void {
+	const state = getWorkingState();
 	if (!isPrototypeActive()) {
-		ctx.ui.setWorkingIndicator(buildWaveIndicator({ theme: ctx.ui.theme }));
+		const frame = renderComposerWorkingFrame({ theme: ctx.ui.theme });
+		if (force || state.lastFrame !== frame) {
+			state.lastFrame = frame;
+			ctx.ui.setWorkingIndicator({ frames: [frame] });
+		}
+		if (state.lastMessage !== undefined) {
+			state.lastMessage = undefined;
+			ctx.ui.setWorkingMessage(undefined);
+		}
 		return;
 	}
 	const pres = buildLiveWorkingPresentation({ theme: ctx.ui.theme });
-	ctx.ui.setWorkingIndicator({ frames: [pres.indicatorFrame] });
-	ctx.ui.setWorkingMessage(pres.borderMessage);
+	if (force || state.lastFrame !== pres.indicatorFrame) {
+		state.lastFrame = pres.indicatorFrame;
+		ctx.ui.setWorkingIndicator({ frames: [pres.indicatorFrame] });
+	}
+	if (force || state.lastMessage !== pres.borderMessage) {
+		state.lastMessage = pres.borderMessage;
+		ctx.ui.setWorkingMessage(pres.borderMessage);
+	}
 }
 
 export function bindComposerWorkingIndicator(ctx: ExtensionContext): void {
@@ -55,7 +72,7 @@ export function bindComposerWorkingIndicator(ctx: ExtensionContext): void {
 	state.ctx = ctx;
 	deactivateAnimationSurface(COMPOSER_SURFACE_KEY);
 	if (state.suppressed) return;
-	ctx.ui.setWorkingIndicator(buildWaveIndicator({ theme: ctx.ui.theme }));
+	applyWorkingIndicatorFrame(ctx, true);
 	if (ctx.isIdle?.() === false) {
 		startComposerWorkingWave();
 	}
@@ -70,7 +87,7 @@ export function setComposerWorkingSuppressed(suppressed: boolean, ctx?: Extensio
 	}
 	const targetCtx = ctx ?? state.ctx;
 	if (targetCtx && targetCtx.mode === "tui" && targetCtx.hasUI) {
-		targetCtx.ui.setWorkingIndicator(buildWaveIndicator({ theme: targetCtx.ui.theme }));
+		applyWorkingIndicatorFrame(targetCtx, true);
 		if (targetCtx.isIdle?.() === false) {
 			startComposerWorkingWave();
 		}
@@ -84,6 +101,8 @@ export function restoreDefaultWorkingIndicator(ctx?: ExtensionContext): void {
 		return;
 	}
 	state.suppressed = false;
+	state.lastFrame = undefined;
+	state.lastMessage = undefined;
 	ctx?.ui.setWorkingIndicator();
 }
 
@@ -94,7 +113,7 @@ export function startComposerWorkingWave(): void {
 	activateAnimationSurface(COMPOSER_SURFACE_KEY, () => {
 		const current = getWorkingState();
 		const activeCtx = current.ctx;
-		if ( current.suppressed || !activeCtx || activeCtx.mode !== "tui" || !activeCtx.hasUI) {
+		if (current.suppressed || !activeCtx || activeCtx.mode !== "tui" || !activeCtx.hasUI) {
 			deactivateAnimationSurface(COMPOSER_SURFACE_KEY);
 			return;
 		}
@@ -105,9 +124,11 @@ export function startComposerWorkingWave(): void {
 export function stopComposerWorkingWave(clearContext = false): void {
 	deactivateAnimationSurface(COMPOSER_SURFACE_KEY);
 	const state = getWorkingState();
-	if (state.ctx && state.ctx.mode === "tui" && state.ctx.hasUI && isPrototypeActive()) {
+	if (state.ctx && state.ctx.mode === "tui" && state.ctx.hasUI && state.lastMessage !== undefined) {
+		state.lastMessage = undefined;
 		state.ctx.ui.setWorkingMessage(undefined);
 	}
+	state.lastFrame = undefined;
 	if (clearContext) {
 		state.ctx = undefined;
 		state.suppressed = false;

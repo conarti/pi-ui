@@ -284,27 +284,44 @@ export class ToolGroupComponent extends Container {
 		} as Component);
 		if (!state.expanded) return;
 		if (isPrototypeActive()) {
-			/* В раскрытой группе прототипа убираем лишние ведущие пустые строки между шагами */
+			/* В раскрытой группе прототипа выводим вложенные шаги компактным деревом с рельсой слева и без пустых зазоров */
 			for (const member of members) {
-				if (isKind(member, ToolExecutionComponent)) {
+				if (isKind(member, ToolExecutionComponent) || isKind(member, AssistantMessageComponent)) {
 					const comp = member as Component;
+					let strippedTopBlank = false;
 					this.addChild({
 						render: (w: number) => {
-							const rendered = comp.render(w);
-							return rendered.length > 1 && rendered[0] === "" ? rendered.slice(1) : rendered;
+							const innerW = Math.max(8, w - 2);
+							const rendered = comp.render(innerW);
+							strippedTopBlank =
+								rendered.length > 1 && stripTerminalSequences(rendered[0] ?? "").trim() === "";
+							const body = strippedTopBlank ? rendered.slice(1) : rendered;
+							const pal = densityPalette(getActiveHostRuntime()?.ctx.ui.theme as Theme);
+							const guide = pal.rail("  │");
+							return body.map((line) => {
+								const trimmedLead = line.startsWith("  ") ? line.slice(1) : line;
+								return truncateToWidth(`${guide}${trimmedLead}`, Math.max(1, w), "…");
+							});
 						},
 						invalidate: () => comp.invalidate(),
 						handleMouse: (ev: unknown) => {
 							if (typeof (comp as { handleMouse?: (e: unknown) => unknown }).handleMouse !== "function") {
 								return undefined;
 							}
-							const mouseEv = ev as { y?: number };
-							return (comp as { handleMouse: (e: unknown) => unknown }).handleMouse(
-								typeof mouseEv.y === "number" ? { ...mouseEv, y: mouseEv.y + 1 } : mouseEv,
-							);
+							const mouseEv = ev as { x?: number; y?: number; width?: number };
+							return (comp as { handleMouse: (e: unknown) => unknown }).handleMouse({
+								...mouseEv,
+								...(typeof mouseEv.x === "number" ? { x: Math.max(0, mouseEv.x - 2) } : {}),
+								...(typeof mouseEv.y === "number"
+									? { y: mouseEv.y + (strippedTopBlank ? 1 : 0) }
+									: {}),
+								...(typeof mouseEv.width === "number"
+									? { width: Math.max(8, mouseEv.width - 2) }
+									: {}),
+							});
 						},
 					} as Component);
-				} else {
+				} else if (!isKind(member, Spacer)) {
 					this.addChild(member as Component);
 				}
 			}
@@ -352,25 +369,57 @@ function resolveRowGroupBucket(
 	return kindOf(row) !== undefined ? "explore" : undefined;
 }
 
-type AssistantLike = { lastMessage?: { content?: Array<{ type: string; text?: string }> } };
+type AssistantLike = {
+	isStreaming?: boolean;
+	thinkingVisibilityOverrides?: Map<number, boolean>;
+	lastMessage?: { content?: Array<{ type: string; text?: string }> };
+};
 
-/** A turn with no text for the reader: it only thought, then handed off to tools. */
+/** A settled turn with no text for the reader: it only thought, then handed off to tools. */
 function isThinkingOnly(child: unknown): boolean {
 	if (!isKind(child, AssistantMessageComponent)) return false;
-	const content = (child as AssistantLike).lastMessage?.content ?? [];
+	const assistant = child as AssistantLike;
+	/* Стримящийся или вручную раскрытый Thinking никогда не прячем внутрь свёрнутой группы */
+	if (isPrototypeActive()) {
+		if (assistant.isStreaming) return false;
+		if (assistant.thinkingVisibilityOverrides) {
+			for (const hidden of assistant.thinkingVisibilityOverrides.values()) {
+				if (hidden === false) return false;
+			}
+		}
+	}
+	const content = assistant.lastMessage?.content ?? [];
 	return !content.some((block) => block.type === "text" && block.text?.trim());
 }
 
+function isEmptyCustomEntry(child: unknown): boolean {
+	if (!child || typeof child !== "object") return false;
+	if (child.constructor?.name !== "CustomEntryComponent") return false;
+	const rec = child as {
+		hasContent?: () => boolean;
+		entry?: { customType?: string; data?: { stopReason?: string } };
+	};
+	if (typeof rec.hasContent === "function" && !rec.hasContent()) return true;
+	if (
+		isPrototypeActive() &&
+		rec.entry?.customType === "response-metrics" &&
+		rec.entry?.data?.stopReason === "toolUse"
+	) {
+		return true;
+	}
+	return false;
+}
+
 /**
- * What may sit between two calls of one group: a turn that only thought, and the
- * status lines Pi writes into the chat itself, such as "Tool output: collapsed".
+ * What may sit between two calls of one group: a settled turn that only thought,
+ * empty/hidden custom entries, and status lines Pi writes into the chat itself.
  */
 function isFoldable(child: unknown): boolean {
 	if (child && typeof child === "object" && (child as Record<PropertyKey, unknown>)[TTFT_PULSE_MARKER]) {
 		return false;
 	}
+	if (isEmptyCustomEntry(child)) return true;
 	if (isThinkingOnly(child)) {
-		/* В Variant C каждый блок размышления остаётся отдельной карточкой даже внутри серии инструментов */
 		return getPrototypeVariant() !== "C";
 	}
 	return isKind(child, Text) || isKind(child, Spacer);
@@ -389,15 +438,25 @@ export function groupChildren(
 	let rows: ToolRowLike[] = [];
 	let members: unknown[] = [];
 	let pending: unknown[] = [];
+	let leadingThinking: unknown[] = [];
 	let currentBucket: GroupBucket | undefined;
+	const allowLeadThinkingFold =
+		isPrototypeActive() &&
+		style === "density" &&
+		density === "compact" &&
+		getPrototypeVariant() !== "C";
+
 	const flush = () => {
 		if (style === "density" && rows.length === 1) {
-			grouped.push(...members);
+			grouped.push(...leadingThinking, ...members);
 		} else if (rows.length > 0) {
-			grouped.push(makeGroup(rows, members));
+			grouped.push(makeGroup(rows, [...leadingThinking, ...members]));
+		} else if (leadingThinking.length > 0) {
+			grouped.push(...leadingThinking);
 		}
 		rows = [];
 		members = [];
+		leadingThinking = [];
 		currentBucket = undefined;
 	};
 	for (const child of children) {
@@ -410,6 +469,10 @@ export function groupChildren(
 			rows.push(child as ToolRowLike);
 			members.push(...pending, child);
 			pending = [];
+			continue;
+		}
+		if (rows.length === 0 && allowLeadThinkingFold && isFoldable(child)) {
+			leadingThinking.push(child);
 			continue;
 		}
 		if (rows.length > 0 && isFoldable(child)) {
@@ -752,8 +815,10 @@ export class ToolGroupController {
 			protoOn && (hovered || variant === "C")
 				? ` ${pal.dim(expanded ? (variant === "C" ? "▾" : "⌄") : variant === "C" ? "▸" : "›")}`
 				: "";
-		const prefix = variant === "C" ? pal.rail(" ├ ") : " ";
+		const prefix = protoOn ? "  " : " ";
+		const rightGuard = protoOn && width >= 48 ? 4 : 0;
+		const usableW = Math.max(8, width - rightGuard);
 
-		return ["", fit(`${prefix}${diamond} ${styledSummary}${diffBadge}${meta}${disclosure}`)];
+		return ["", truncateToWidth(`${prefix}${diamond} ${styledSummary}${diffBadge}${meta}${disclosure}`, usableW, "…")];
 	}
 }

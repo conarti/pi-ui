@@ -713,9 +713,7 @@ export class PiUiComposerEditor extends CustomEditor {
 		}
 		if (!process.env.VITEST) {
 			const protoMeta = getActiveVariantMeta();
-			const protoLabel = protoMeta
-				? `${protoMeta.settledGlyph} PROTO: ${protoMeta.shortLabel} ↻`
-				: "PROTO: off ↻";
+			const protoLabel = protoMeta ? protoMeta.pillLabel : "PROTO: off ↻";
 			allPills.push({
 				id: "proto",
 				str: renderPill(protoLabel, {

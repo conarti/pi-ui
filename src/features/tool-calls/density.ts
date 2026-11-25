@@ -287,25 +287,29 @@ export function formatAllGroupedSummary<
 		countExploration(exploreRows);
 
 	if (variant === "C") {
-		const ruParts: string[] = [];
+		const enParts: string[] = [];
 		if (editCount > 0) {
-			ruParts.push(`${running ? "Правка" : "Изменено"}: ${editCount} ф.`);
+			enParts.push(
+				`${running ? "Editing" : "Edited"}: ${editCount} ${editCount === 1 ? "file" : "files"}`,
+			);
 		}
 		if (commandCount > 0) {
-			ruParts.push(`${running ? "Запуск" : "Выполнено"}: ${commandCount} ком.`);
+			enParts.push(
+				`${running ? "Running" : "Ran"}: ${commandCount} ${commandCount === 1 ? "cmd" : "cmds"}`,
+			);
 		}
 		if (expFiles + expSearches + expDirs > 0) {
 			const eItems: string[] = [];
-			if (expFiles > 0) eItems.push(`${expFiles} ф.`);
-			if (expSearches > 0) eItems.push(`${expSearches} поиск.`);
-			if (expDirs > 0) eItems.push(`${expDirs} дир.`);
-			ruParts.push(`${running ? "Изучение" : "Изучено"}: ${eItems.join(", ")}`);
+			if (expFiles > 0) eItems.push(`${expFiles} ${expFiles === 1 ? "file" : "files"}`);
+			if (expSearches > 0) eItems.push(`${expSearches} ${expSearches === 1 ? "search" : "searches"}`);
+			if (expDirs > 0) eItems.push(`${expDirs} ${expDirs === 1 ? "dir" : "dirs"}`);
+			enParts.push(`${running ? "Exploring" : "Explored"}: ${eItems.join(", ")}`);
 		}
 		if (customCount > 0) {
-			ruParts.push(`${customCount} инстр.`);
+			enParts.push(`${customCount} ${customCount === 1 ? "tool" : "tools"}`);
 		}
 		return {
-			summary: ruParts.join(" · ") || (running ? "Выполнение…" : "Выполнено"),
+			summary: enParts.join(" · ") || (running ? "Running…" : "Completed"),
 			changes: totalAdded > 0 || totalRemoved > 0 ? { added: totalAdded, removed: totalRemoved } : undefined,
 		};
 	}
@@ -690,24 +694,28 @@ export function renderDensityCall(options: {
 			const styledTarget = target ? ` ${pal.target(target, expanded, hovered)}` : "";
 			const meta = formatParentheticalMeta(pal, status, state, name, getNestedSummary?.());
 			const variant = getPrototypeVariant();
+			const protoOn = variant !== "off";
+			const rightGuard = protoOn && width >= 48 ? 4 : 0;
+			const usableWidth = Math.max(8, width - rightGuard);
 			const hoverChevron =
-				hovered && status !== "running" && variant !== "off"
+				hovered && status !== "running" && protoOn
 					? ` ${pal.dim(expanded ? "⌄" : "›")}`
 					: "";
-			const leadPrefix = variant === "C" ? " ├ " : " ";
-			const styledPrefix = variant === "C" ? pal.rail(leadPrefix) : leadPrefix;
-			const head = `${styledPrefix}${diamond} ${styledVerb}${styledTarget}${meta}${hoverChevron}`;
-			const lines = [truncateToWidth(head, width, "…")];
+			const leadPrefix = protoOn ? "  " : " ";
+			const head = `${leadPrefix}${diamond} ${styledVerb}${styledTarget}${meta}${hoverChevron}`;
+			const lines = [truncateToWidth(head, usableWidth, "…")];
 
 			if (status === "running" && isCommandLikeTool(name) && !state.density) {
-				const avail = Math.max(1, width - 5);
+				const subPad = protoOn ? "    " : "   ";
+				const avail = Math.max(1, usableWidth - (protoOn ? 6 : 5));
 				const bar = paintDensityWaveGlyph(pal.theme, pal.light, 1, "▎");
-				lines.push(`   ${bar} ${pal.dim(truncateToWidth("Running…", avail, "…"))}`);
+				lines.push(`${subPad}${bar} ${pal.dim(truncateToWidth("Running…", avail, "…"))}`);
 			}
 
 			if (expanded && !isCommandLikeTool(name) && name !== "read" && name !== "edit" && name !== "write" && name !== "grep" && name !== "find" && name !== "ls") {
 				if (Object.keys(args).length > 0) {
-					lines.push(...renderArguments(args, pal.theme, pal.rail("   │ ")).render(width));
+					const argRail = pal.rail(protoOn ? "    │ " : "   │ ");
+					lines.push(...renderArguments(args, pal.theme, argRail).render(usableWidth));
 				}
 			}
 			return lines;

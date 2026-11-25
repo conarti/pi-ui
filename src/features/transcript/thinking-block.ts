@@ -25,6 +25,7 @@ import {
 	isPrototypeActive,
 	resolveThinkingDisplay,
 	samplePrototypeRunningGlyph,
+	summarizeLiveThinkingIntent,
 	type ActivePrototypeVariant,
 } from "./prototype-state.ts";
 
@@ -243,10 +244,36 @@ function createSoftThinkingMarkdown(text: string, themeRef: Theme, light: boolea
 	return md;
 }
 
+const STREAMING_PAGE_LINES = 6;
+const STREAMING_PAGE_STEP = 3;
+const STREAMING_BOX_LINES = 8;
+
+function stabilizedPageWindow(
+	lines: readonly string[],
+	pageSize = STREAMING_PAGE_LINES,
+	stepSize = STREAMING_PAGE_STEP,
+): { readonly slice: readonly string[]; readonly hiddenAbove: number } {
+	if (lines.length <= pageSize) {
+		return { slice: lines, hiddenAbove: 0 };
+	}
+	const steps = Math.ceil((lines.length - pageSize) / stepSize);
+	const start = Math.min(lines.length - 1, steps * stepSize);
+	return {
+		slice: lines.slice(start),
+		hiddenAbove: start,
+	};
+}
+
+export interface ThinkingInteractionSlot {
+	hovered: boolean;
+	scrollFromBottom?: number;
+}
+
 export class ThinkingBlock implements Component {
 	readonly [THINKING_BLOCK_MARKER] = true;
-	private readonly hoverSlot: { hovered: boolean; headerHovered?: boolean };
+	private readonly hoverSlot: ThinkingInteractionSlot;
 	private markdownCache?: { light: boolean; md: Markdown };
+	private lastTotalStreamLines = 0;
 
 	constructor(
 		private readonly thinkingText: string,
@@ -256,12 +283,12 @@ export class ThinkingBlock implements Component {
 		private readonly themeRef: Theme,
 		private readonly durationMs?: number,
 		markdownSlot?: { light: boolean; md: Markdown },
-		hoverSlot?: { hovered: boolean; headerHovered?: boolean },
+		hoverSlot?: ThinkingInteractionSlot,
 		private readonly startedAt?: number,
 		private readonly runKey?: string,
 	) {
 		this.markdownCache = markdownSlot;
-		this.hoverSlot = hoverSlot ?? { hovered: false, headerHovered: false };
+		this.hoverSlot = hoverSlot ?? { hovered: false, scrollFromBottom: 0 };
 	}
 
 	invalidate(): void {
@@ -338,8 +365,10 @@ export class ThinkingBlock implements Component {
 		activeTheme: Theme,
 	): string[] {
 		const outerPad = width >= 48 ? 2 : 1;
+		const rightClearance = width >= 48 ? 4 : 1;
 		const margin = " ".repeat(outerPad);
-		const cappedWidth = Math.max(12, Math.min(width - outerPad * 2, MAX_THOUGHTS_WIDTH));
+		const usableWidth = Math.max(12, width - outerPad - rightClearance);
+		const cappedWidth = Math.max(12, Math.min(usableWidth, MAX_THOUGHTS_WIDTH));
 		const textAvail = Math.max(8, cappedWidth - 4);
 		const isHovered = Boolean(this.hoverSlot.hovered);
 		const display = resolveThinkingDisplay({
@@ -354,6 +383,8 @@ export class ThinkingBlock implements Component {
 			variant === "B",
 		);
 		const nonEmptyProse = proseLines.filter((l) => stripTerminalSequences(l).trim().length > 0);
+		this.lastTotalStreamLines = nonEmptyProse.length;
+
 		const liveStreamingDuration =
 			this.isStreamingNow && this.startedAt !== undefined
 				? formatThinkingDuration(Math.max(0, Date.now() - this.startedAt))
@@ -361,15 +392,18 @@ export class ThinkingBlock implements Component {
 		const seamBadge = display.badge
 			? ` ${light ? fgRgb(37, 99, 235, `[${display.badge}]`) : fgRgb(118, 184, 248, `[${display.badge}]`)}`
 			: "";
-		const dimHint = (s: string) => (light ? fgRgb(148, 163, 184, s) : fgRgb(86, 100, 122, s));
+		const dimHint = (s: string) => (light ? fgRgb(136, 150, 172, s) : fgRgb(86, 100, 122, s));
 		const headerMuted = (s: string) =>
 			isHovered
 				? light
 					? fgRgb(37, 99, 235, s)
 					: fgRgb(145, 195, 248, s)
 				: light
-					? fgRgb(100, 116, 139, s)
+					? fgRgb(92, 108, 132, s)
 					: fgRgb(118, 132, 154, s);
+
+		const padFullWidth = (line: string): string =>
+			line + " ".repeat(Math.max(0, width - visibleWidth(line)));
 
 		const out: string[] = [];
 
@@ -377,29 +411,51 @@ export class ThinkingBlock implements Component {
 			const surfaceRgb: readonly [number, number, number] = light
 				? [241, 245, 249]
 				: [24, 30, 42];
-			const cardW = Math.min(width - outerPad * 2, Math.max(28, cappedWidth));
+			const bgStart = `\x1b[48;2;${surfaceRgb[0]};${surfaceRgb[1]};${surfaceRgb[2]}m`;
+			const cardW = Math.min(usableWidth, Math.max(24, cappedWidth));
 			const paintRow = (inner: string): string => {
-				const clipped = truncateToWidth(inner, cardW, "…");
+				const clipped = truncateToWidth(inner, cardW, "…").replaceAll("\x1b[0m", `\x1b[0m${bgStart}`);
 				const pad = " ".repeat(Math.max(0, cardW - visibleWidth(clipped)));
 				const tinted = bgRgb(surfaceRgb[0], surfaceRgb[1], surfaceRgb[2], `${clipped}${pad}`);
-				const full = `${margin}${tinted}`;
-				return full + " ".repeat(Math.max(0, width - visibleWidth(full)));
+				return padFullWidth(`${margin}${tinted}`);
 			};
 
 			if (this.isStreamingNow) {
 				const glyph = samplePrototypeRunningGlyph(0, { light, theme: activeTheme, variant: "C" });
 				const timer = liveStreamingDuration ? ` · ${liveStreamingDuration}` : "";
-				out.push(paintRow(` ${glyph} ${headerMuted(`Размышление${timer}`)}${seamBadge} `));
-				for (const rowText of nonEmptyProse.slice(-STREAMING_THOUGHT_TAIL_LINES)) {
-					const rail = waveAccentGlyph(out.length, "│", light);
-					out.push(paintRow(` ${rail} ${rowText} `));
+				if (this.isExpanded) {
+					out.push(paintRow(` ${glyph} ${headerMuted(`⌄ Thinking${timer}`)}${seamBadge} `));
+					for (let i = 0; i < proseLines.length; i++) {
+						const rail = waveAccentGlyph(i + 1, "│", light);
+						const rowText = proseLines[i]!;
+						out.push(paintRow(rowText ? ` ${rail} ${rowText} ` : ` ${rail} `));
+					}
+					return out;
+				}
+
+				const maxBack = Math.max(0, nonEmptyProse.length - STREAMING_BOX_LINES);
+				const back = Math.max(0, Math.min(this.hoverSlot.scrollFromBottom ?? 0, maxBack));
+				this.hoverSlot.scrollFromBottom = back;
+				const endIdx = nonEmptyProse.length - back;
+				const startIdx = Math.max(0, endIdx - STREAMING_BOX_LINES);
+				const windowSlice = nonEmptyProse.slice(startIdx, endIdx);
+				const scrollNote =
+					back > 0
+						? dimHint(` · ⏸ -${back} lines ▸`)
+						: startIdx > 0
+							? dimHint(` · +${startIdx} lines ▸`)
+							: dimHint(" ▸");
+
+				out.push(paintRow(` ${glyph} ${headerMuted(`Thinking${timer}`)}${seamBadge}${scrollNote} `));
+				for (let i = 0; i < windowSlice.length; i++) {
+					const rail = waveAccentGlyph(i + 1, "│", light);
+					out.push(paintRow(` ${rail} ${windowSlice[i]!} `));
 				}
 				return out;
 			}
 
-			const durText = formatThinkingDuration(this.durationMs);
-			const cLabel = durText ? `Мысль · ${durText}` : "Мысль";
-			const countText = nonEmptyProse.length > 0 ? dimHint(` · ${nonEmptyProse.length} стр.`) : "";
+			const cLabel = formatThoughtLabel(this.durationMs);
+			const countText = nonEmptyProse.length > 0 ? dimHint(` · ${nonEmptyProse.length} lines`) : "";
 			const hex = isHovered
 				? light
 					? fgRgb(37, 99, 235, "⬢")
@@ -411,11 +467,7 @@ export class ThinkingBlock implements Component {
 				return out;
 			}
 
-			out.push(
-				paintRow(
-					` ${hex} ${headerMuted(cLabel)}${seamBadge} ${dimHint(isHovered ? "▾ свернуть" : "▾")} `,
-				),
-			);
+			out.push(paintRow(` ${hex} ${headerMuted(cLabel)}${seamBadge} ${dimHint("▾")} `));
 			const openRail = light ? fgRgb(148, 163, 184, "│") : fgRgb(72, 88, 114, "│");
 			for (const rowText of proseLines) {
 				out.push(paintRow(rowText ? ` ${openRail} ${rowText} ` : ` ${openRail} `));
@@ -430,20 +482,64 @@ export class ThinkingBlock implements Component {
 				theme: activeTheme,
 				variant,
 			});
-			const streamWord = variant === "A" ? "Размышляю…" : "Thinking…";
 			const timerSuffix = liveStreamingDuration ? dimHint(` · ${liveStreamingDuration}`) : "";
+
+			/* Клик по заголовку или Ctrl+T во время стриминга сразу разворачивает ВЕСЬ поток мыслей с первой строки */
+			if (this.isExpanded) {
+				const hdrRow = truncateToWidth(
+					`${margin}${leadGlyph} ${headerMuted("⌄ Thinking…")}${timerSuffix}${seamBadge}`,
+					width - rightClearance,
+					"…",
+				);
+				out.push(padFullWidth(hdrRow));
+				const openSpine = light ? fgRgb(148, 163, 184, "│") : fgRgb(76, 92, 118, "│");
+				for (let i = 0; i < proseLines.length; i++) {
+					const rowText = proseLines[i]!;
+					const spine =
+						i >= proseLines.length - 4 ? waveAccentGlyph(i + 1, "│", light) : openSpine;
+					const bodyLine = rowText ? `${margin}${spine} ${rowText}` : `${margin}${spine}`;
+					out.push(padFullWidth(truncateToWidth(bodyLine, width - rightClearance, "…")));
+				}
+				return out;
+			}
+
+			if (variant === "A") {
+				/* Variant A: спокойная 1-строчная живая сводка без мелькающего хвоста; клик раскрывает весь поток */
+				const intent = summarizeLiveThinkingIntent(display.text);
+				const intentPart = intent ? dimHint(` · ${intent}`) : "";
+				const morePart =
+					nonEmptyProse.length > 1 ? dimHint(` (+${nonEmptyProse.length} lines ›)`) : dimHint(" ›");
+				const row = truncateToWidth(
+					`${margin}${leadGlyph} ${headerMuted("Thinking")}${timerSuffix}${seamBadge}${intentPart}${morePart}`,
+					width - rightClearance,
+					"…",
+				);
+				return [padFullWidth(row)];
+			}
+
+			/* Variant B: стабильная страница на 6 строк (заполняется сверху вниз без прыжков на каждом переносе слова) */
+			const page = stabilizedPageWindow(nonEmptyProse, STREAMING_PAGE_LINES, STREAMING_PAGE_STEP);
+			const hiddenCue =
+				page.hiddenAbove > 0
+					? dimHint(`  · +${page.hiddenAbove} lines ›`)
+					: nonEmptyProse.length > 0
+						? dimHint(" ›")
+						: "";
 			const hdrRow = truncateToWidth(
-				`${margin}${leadGlyph} ${headerMuted(streamWord)}${timerSuffix}${seamBadge}`,
-				width,
+				`${margin}${leadGlyph} ${headerMuted("Thinking…")}${timerSuffix}${seamBadge}${hiddenCue}`,
+				width - rightClearance,
 				"…",
 			);
-			out.push(hdrRow + " ".repeat(Math.max(0, width - visibleWidth(hdrRow))));
+			out.push(padFullWidth(hdrRow));
 
-			const tail = nonEmptyProse.slice(-STREAMING_THOUGHT_TAIL_LINES);
-			for (let i = 0; i < tail.length; i++) {
+			for (let i = 0; i < page.slice.length; i++) {
 				const spine = waveAccentGlyph(i + 1, "▎", light);
-				const row = truncateToWidth(`${margin}${spine} ${tail[i]!}`, width, "…");
-				out.push(row + " ".repeat(Math.max(0, width - visibleWidth(row))));
+				const row = truncateToWidth(
+					`${margin}${spine} ${page.slice[i]!}`,
+					width - rightClearance,
+					"…",
+				);
+				out.push(padFullWidth(row));
 			}
 			return out;
 		}
@@ -458,13 +554,12 @@ export class ThinkingBlock implements Component {
 				: light
 					? fgRgb(148, 163, 184, "❙")
 					: fgRgb(78, 92, 114, "❙");
-			const hoverCue = variant === "B" && isHovered ? dimHint("  · клик раскрыть") : "";
 			const line = truncateToWidth(
-				`${margin}${collapsedSpine} ${headerMuted(`› ${label}`)}${seamBadge}${hoverCue}`,
-				width,
+				`${margin}${collapsedSpine} ${headerMuted(`› ${label}`)}${seamBadge}`,
+				width - rightClearance,
 				"…",
 			);
-			return [line + " ".repeat(Math.max(0, width - visibleWidth(line)))];
+			return [padFullWidth(line)];
 		}
 
 		const openSpine = light ? fgRgb(148, 163, 184, "│") : fgRgb(76, 92, 118, "│");
@@ -473,18 +568,17 @@ export class ThinkingBlock implements Component {
 				? fgRgb(37, 99, 235, variant === "B" ? "┃" : "│")
 				: fgRgb(97, 175, 239, variant === "B" ? "┃" : "│")
 			: openSpine;
-		const hoverCue = variant === "B" && isHovered ? dimHint("  · клик свернуть") : "";
 		const hdr = truncateToWidth(
-			`${margin}${topSpine} ${headerMuted(`⌄ ${label}`)}${seamBadge}${hoverCue}`,
-			width,
+			`${margin}${topSpine} ${headerMuted(`⌄ ${label}`)}${seamBadge}`,
+			width - rightClearance,
 			"…",
 		);
-		out.push(hdr + " ".repeat(Math.max(0, width - visibleWidth(hdr))));
+		out.push(padFullWidth(hdr));
 
 		for (const rowText of proseLines) {
 			const bodyLine = rowText ? `${margin}${openSpine} ${rowText}` : `${margin}${openSpine}`;
-			const row = truncateToWidth(bodyLine, width, "…");
-			out.push(row + " ".repeat(Math.max(0, width - visibleWidth(row))));
+			const row = truncateToWidth(bodyLine, width - rightClearance, "…");
+			out.push(padFullWidth(row));
 		}
 		return out;
 	}
@@ -574,7 +668,10 @@ export class ThinkingBlock implements Component {
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		const protoActive = isPrototypeActive();
-		const onHeaderRow = !this.isExpanded || event.y === 0;
+		const variant = getPrototypeVariant();
+		const isSingleRow = !this.isExpanded && (!this.isStreamingNow || variant === "A");
+		const onHeaderRow = isSingleRow || event.y === 0;
+
 		if (event.type === "move") {
 			const shouldHighlight = protoActive ? onHeaderRow : true;
 			claimHover(this.hoverSlot, () => {
@@ -589,11 +686,37 @@ export class ThinkingBlock implements Component {
 			}
 			return undefined;
 		}
-		if (this.isStreamingNow && protoActive) {
-			return undefined;
+
+		/* В Variant C колесо мыши над стримящимся компактным окном позволяет прокручивать ранние строки мысли на месте */
+		if (
+			protoActive &&
+			variant === "C" &&
+			this.isStreamingNow &&
+			!this.isExpanded &&
+			this.lastTotalStreamLines > STREAMING_BOX_LINES
+		) {
+			const evType = String(event.type);
+			if (evType === "wheel" || evType === "mouse_wheel_up" || evType === "mouse_wheel_down") {
+				const maxBack = Math.max(0, this.lastTotalStreamLines - STREAMING_BOX_LINES);
+				const step =
+					evType === "mouse_wheel_up"
+						? 2
+						: evType === "mouse_wheel_down"
+							? -2
+							: ((event as unknown as { deltaY?: number }).deltaY ?? 0) < 0
+								? 2
+								: -2;
+				const prev = this.hoverSlot.scrollFromBottom ?? 0;
+				const next = Math.max(0, Math.min(maxBack, prev + step));
+				if (next !== prev) {
+					this.hoverSlot.scrollFromBottom = next;
+					return { handled: true, render: true };
+				}
+			}
 		}
-		/* Перехватываем press и click в раскрытом блоке только на заголовке (y === 0), чтобы не ломать выделение текста в теле */
-		if (event.type === "press" && event.button === "left" && onHeaderRow) {
+
+		/* Клик по заголовку (y === 0) работает и ВО ВРЕМЯ стриминга, и после завершения, не ломая выделение текста в теле */
+		if (event.type === "press" && event.button === "left" && (!protoActive ? (!this.isExpanded || event.y === 0) : onHeaderRow)) {
 			return { handled: true, render: false };
 		}
 		if (event.type === "click" && event.button === "left" && (!protoActive || onHeaderRow)) {
