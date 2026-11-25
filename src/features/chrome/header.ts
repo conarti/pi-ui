@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { homedir } from "node:os";
 import { basename } from "node:path";
 import { VERSION, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import {
@@ -9,29 +10,21 @@ import {
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 import {
+	formatCompactTokens,
 	getThemeSurfacePalette,
-	paintThemeSurfaceRow,
-	renderPill,
+	themeBgRgb,
 	themeFgRgb,
 	type HitBox,
 } from "../../shared/ansi.ts";
 import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
-import { claimHover } from "../../shared/runtime-hooks.ts";
-import { getSessionWorkflow } from "../../shared/session-workflow.ts";
+import { claimHover, copyToClipboard } from "../../shared/runtime-hooks.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
 import { showCommandPalette } from "../command-palette/index.ts";
-import { cycleSessionMode } from "../plan-studio/index.ts";
-import { showPlanStudio } from "../plan-studio/studio-overlay.ts";
-import { setSessionStyleOverride } from "../tool-calls/command.ts";
-import {
-	cyclePrototypeVariant,
-	getActiveVariantMeta,
-	getPrototypeVariant,
-	isPrototypeActive,
-} from "../transcript/prototype-state.ts";
-import { openResponseMetricsModal } from "../transcript/response-metrics.ts";
+import { getPrototypeVariant, isPrototypeActive } from "../transcript/prototype-state.ts";
+import { computeLiveContextTokens, showContextMenuModal } from "./context-modal.ts";
 
 const GIT_BRANCH_CACHE_KEY = Symbol.for("conarti.pi-ui.git-branch-cache.v1");
+const FRACTIONAL_BLOCKS = [" ", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"] as const;
 
 interface GitBranchCacheEntry {
 	branch: string | null;
@@ -100,6 +93,35 @@ function readCachedGitBranch(cwd: string): string | null {
 	return entry?.branch ?? null;
 }
 
+function formatTildeWorkspacePath(cwd: string): string {
+	const home = homedir();
+	if (home && cwd.startsWith(home)) {
+		const rest = cwd.slice(home.length);
+		return rest ? `~${rest}` : "~";
+	}
+	return cwd;
+}
+
+function renderHoverContextBar(
+	percent: number,
+	targetWidth: number,
+	barRgb: readonly [number, number, number],
+	trackRgb: readonly [number, number, number],
+	theme: Theme,
+): string {
+	const pctStr = `${percent.toFixed(1)}%`;
+	const barCells = Math.max(3, targetWidth - visibleWidth(pctStr) - 1);
+	const clamped = Math.max(0, Math.min(100, percent));
+	const eighths = Math.max(clamped > 0 ? 2 : 0, Math.round((clamped / 100) * barCells * 8));
+	let bar = "";
+	for (let i = 0; i < barCells; i++) {
+		const cellEighths = Math.max(0, Math.min(8, eighths - i * 8));
+		bar += FRACTIONAL_BLOCKS[cellEighths]!;
+	}
+	const paintedTrack = themeBgRgb(theme, trackRgb, themeFgRgb(theme, barRgb, bar));
+	return `${paintedTrack} ${theme.fg("text", pctStr)}`;
+}
+
 class SessionHeaderView implements Component {
 	private hoveredId: string | null = null;
 	private hits: HitBox[] = [];
@@ -132,7 +154,6 @@ class SessionHeaderView implements Component {
 		this.hits = [];
 		if (width < 24) return [];
 
-		/* Suppress inside-ScrollView fallback header whenever fullscreen pinnedHeader is active */
 		if (!this.pinnedMode && isPrototypeActive() && getActiveHostRuntime()?.isFullscreen) {
 			return [];
 		}
@@ -140,15 +161,13 @@ class SessionHeaderView implements Component {
 		const theme = this.getTheme();
 		const palette = getThemeSurfacePalette(theme);
 		const variant = getPrototypeVariant();
-		const projectName = basename(this.ctx.cwd) || this.ctx.cwd;
 		const gitBranch = readCachedGitBranch(this.ctx.cwd);
-		const wf = getSessionWorkflow();
 
-		const starMark = themeFgRgb(theme, palette.accent, "✦");
-		const sep = theme.fg("dim", "·");
-
-		/* Legacy fallback when prototype is disabled (e.g. baseline tests) */
+		/* Legacy fallback when prototype is disabled (baseline tests) */
 		if (variant === "off") {
+			const projectName = basename(this.ctx.cwd) || this.ctx.cwd;
+			const starMark = themeFgRgb(theme, palette.accent, "✦");
+			const sep = theme.fg("dim", "·");
 			const brand = `${starMark} ${theme.bold("pi")} ${theme.fg("dim", `v${VERSION} · @conarti/pi-ui`)}`;
 			const branchText = gitBranch ? ` ${themeFgRgb(theme, palette.info, `(${gitBranch})`)}` : "";
 			const proj = `${theme.fg("muted", projectName)}${branchText}`;
@@ -173,160 +192,86 @@ class SessionHeaderView implements Component {
 			return [truncateToWidth(left, width, "…")];
 		}
 
-		const protoMeta = getActiveVariantMeta();
-		const sessionName = this.ctx.sessionManager?.getSessionName?.()?.trim();
-		const leftParts: string[] = [
-			`${starMark} ${theme.bold("pi-ui")}`,
-			theme.fg("text", sessionName || projectName),
-		];
-		if (gitBranch) {
-			if (variant === "B") {
-				leftParts.push(
-					renderPill(gitBranch, {
-						hovered: false,
-						active: false,
-						variant: "neutral",
-						theme,
-					}),
-				);
-			} else {
-				leftParts.push(themeFgRgb(theme, palette.codeMetaFg, gitBranch));
-			}
-		}
-		const left = `  ${leftParts.join(` ${sep} `)}`;
+		/* Grok-faithful Top Header:
+		   Left:  `  <git-branch> ~/Projects/pi-ui`
+		   Right: `3.9k / 256k` -> morphs in-place on hover to `▎    10.3%` (fixed width, zero shift),
+		          click opens the 3-tab Context usage / Session usage / Session info modal.
+		   Row 1: 1 blank row of pure canvas air above Sticky Prompt / transcript. */
+		const outerPad = width >= 40 ? 2 : 1;
+		const tildePath = formatTildeWorkspacePath(this.ctx.cwd);
+		const isWorkspaceHov = this.hoveredId === "workspace";
+		const branchStyled = gitBranch
+			? `${isWorkspaceHov ? theme.fg("muted", gitBranch) : themeFgRgb(theme, palette.codeMetaFg, gitBranch)} `
+			: "";
+		const pathStyled = isWorkspaceHov
+			? theme.fg("text", tildePath)
+			: theme.fg("text", tildePath);
+		const leftContent = `${branchStyled}${pathStyled}`;
 
-		const rightSpecs: Array<{
-			id: string;
-			rendered: string;
-			onClick: () => void;
-		}> = [];
+		const { usedTokens, contextWindow, percent } = computeLiveContextTokens(this.ctx);
+		const usedStr = formatCompactTokens(usedTokens);
+		const winStr = formatCompactTokens(contextWindow);
+		const restPlain = `${usedStr} / ${winStr}`;
+		const slotWidth = Math.max(11, visibleWidth(restPlain));
+		const isCtxHov = this.hoveredId === "context";
 
-		if (wf.mode !== "code") {
-			const modeLabel = wf.mode === "plan" ? "Plan" : "Auto";
-			rightSpecs.push({
-				id: "mode",
-				rendered: renderPill(modeLabel, {
-					hovered: this.hoveredId === "mode",
-					active: true,
-					variant: wf.mode === "plan" ? "warning" : "primary",
-					theme,
-				}),
-				onClick: () => {
-					if (wf.hasPlan()) void showPlanStudio(this.pi, this.ctx);
-					else cycleSessionMode(this.pi, this.ctx);
-				},
-			});
+		let ctxRendered: string;
+		if (isCtxHov) {
+			const barRgb =
+				percent >= 85 ? palette.danger : percent >= 70 ? palette.warning : palette.accentBright;
+			ctxRendered = renderHoverContextBar(
+				percent,
+				slotWidth,
+				barRgb,
+				palette.codeHeaderBg,
+				theme,
+			);
+		} else {
+			const rawStyled = `${theme.fg("text", usedStr)} ${themeFgRgb(theme, palette.codeMetaFg, `/ ${winStr}`)}`;
+			const padLead = " ".repeat(Math.max(0, slotWidth - visibleWidth(rawStyled)));
+			ctxRendered = `${padLead}${rawStyled}`;
 		}
 
-		if (protoMeta && !process.env.VITEST) {
-			const shortPill =
-				variant === "A"
-					? "Proto A · Quiet ↻"
-					: variant === "B"
-						? "Proto B · Two-Tone ↻"
-						: "Proto C · Ribbon ↻";
-			rightSpecs.push({
-				id: "proto",
-				rendered:
-					variant === "A"
-						? this.hoveredId === "proto"
-							? themeFgRgb(theme, palette.accentBright, `[✦ ${shortPill}]`)
-							: themeFgRgb(theme, palette.accent, `✦ ${shortPill}`)
-						: renderPill(shortPill, {
-								hovered: this.hoveredId === "proto",
-								active: true,
-								variant: "primary",
-								theme,
-							}),
-				onClick: () => {
-					setSessionStyleOverride(undefined);
-					cyclePrototypeVariant();
-				},
-			});
-		}
-
-		rightSpecs.push({
-			id: "stats",
-			rendered:
-				variant === "A"
-					? this.hoveredId === "stats"
-						? themeFgRgb(theme, palette.accentBright, "Stats")
-						: theme.fg("muted", "Stats")
-					: renderPill("Stats", {
-							hovered: this.hoveredId === "stats",
-							active: false,
-							variant: "neutral",
-							theme,
-						}),
-			onClick: () => void openResponseMetricsModal(this.ctx),
-		});
-
-		rightSpecs.push({
-			id: "palette",
-			rendered:
-				variant === "A"
-					? this.hoveredId === "palette"
-						? themeFgRgb(theme, palette.accentBright, "Palette ⌃K")
-						: theme.fg("muted", "Palette ⌃K")
-					: renderPill("⌃K Palette", {
-							hovered: this.hoveredId === "palette",
-							active: false,
-							variant: "neutral",
-							theme,
-						}),
-			onClick: () => void showCommandPalette(this.pi, this.ctx),
-		});
-
-		const joinGap = variant === "A" ? ` ${sep} ` : " ";
-		const joinWidth = visibleWidth(joinGap);
-
-		/* Fit right-side interactive items gracefully to available width */
-		const fittedSpecs = [...rightSpecs];
-		while (
-			fittedSpecs.length > 1 &&
-			visibleWidth(left) +
-				4 +
-				fittedSpecs.reduce((acc, s, idx) => acc + visibleWidth(s.rendered) + (idx > 0 ? joinWidth : 0), 0) >
-				width
-		) {
-			fittedSpecs.shift();
-		}
-
-		const rightContent = fittedSpecs.map((s) => s.rendered).join(joinGap);
-		const trailingPad = "  ";
-		const rightTotalW = visibleWidth(rightContent) + trailingPad.length;
-		const maxLeftW = Math.max(8, width - rightTotalW - 2);
+		const rightTotalW = visibleWidth(ctxRendered) + outerPad;
+		const maxLeftW = Math.max(8, width - outerPad - rightTotalW - 2);
 		const clippedLeft =
-			visibleWidth(left) > maxLeftW ? truncateToWidth(left, maxLeftW, "…") : left;
-		const middleSpaces = Math.max(1, width - visibleWidth(clippedLeft) - rightTotalW);
+			visibleWidth(leftContent) > maxLeftW
+				? truncateToWidth(leftContent, maxLeftW, "…")
+				: leftContent;
+		const leftW = visibleWidth(clippedLeft);
+		const middleSpaces = Math.max(2, width - outerPad - leftW - rightTotalW);
 
-		let cursorX = visibleWidth(clippedLeft) + middleSpaces;
-		for (let i = 0; i < fittedSpecs.length; i++) {
-			const spec = fittedSpecs[i]!;
-			const w = visibleWidth(spec.rendered);
-			this.hits.push({
-				id: spec.id,
-				xStart: cursorX,
-				xEnd: cursorX + Math.max(0, w - 1),
-				y: 0,
-				onClick: spec.onClick,
-			});
-			cursorX += w + joinWidth;
+		this.hits.push({
+			id: "workspace",
+			xStart: outerPad,
+			xEnd: outerPad + Math.max(0, leftW - 1),
+			y: 0,
+			onClick: () => {
+				copyToClipboard(this.ctx.cwd);
+				this.ctx.ui.notify(`Copied path: ${tildePath}`, "info");
+			},
+		});
+
+		const ctxX = outerPad + leftW + middleSpaces;
+		const ctxW = visibleWidth(ctxRendered);
+		this.hits.push({
+			id: "context",
+			xStart: ctxX,
+			xEnd: ctxX + Math.max(0, ctxW - 1),
+			y: 0,
+			onClick: () => void showContextMenuModal(this.pi, this.ctx, "context"),
+		});
+
+		const row0 = `${" ".repeat(outerPad)}${clippedLeft}${" ".repeat(middleSpaces)}${ctxRendered}${" ".repeat(outerPad)}`;
+		const paddedRow0 = row0 + " ".repeat(Math.max(0, width - visibleWidth(row0)));
+
+		const termRows = this.ctx.hasUI
+			? (getActiveHostRuntime()?.tui?.terminal?.rows ?? this.lastViewportRows)
+			: this.lastViewportRows;
+		if (termRows >= 16) {
+			return [paddedRow0, " ".repeat(width)];
 		}
-
-		const rawRow = `${clippedLeft}${" ".repeat(middleSpaces)}${rightContent}${trailingPad}`;
-
-		if (variant === "B") {
-			return [paintThemeSurfaceRow(theme, rawRow, width, palette.headerChromeBg)];
-		}
-
-		const paddedRow = rawRow + " ".repeat(Math.max(0, width - visibleWidth(rawRow)));
-		if (variant === "C" && (this.ctx.hasUI ? (getActiveHostRuntime()?.tui?.terminal?.rows ?? this.lastViewportRows) : this.lastViewportRows) >= 20) {
-			const rule = themeFgRgb(theme, palette.borderSubtle, "─".repeat(width));
-			return [paddedRow, rule];
-		}
-
-		return [paddedRow];
+		return [paddedRow0];
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {

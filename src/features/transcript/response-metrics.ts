@@ -29,6 +29,7 @@ import {
 import { createModalCard, openModalCard } from "../../shared/modal-card.ts";
 import { claimHover, copyToClipboard } from "../../shared/runtime-hooks.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
+import { openBoundContextMenuModal } from "../chrome/context-modal.ts";
 import {
 	formatWorkspacePath,
 	resolveExternalToolSummary,
@@ -331,11 +332,12 @@ export class ResponseMetricsRowComponent implements Component {
 			);
 		}
 		const isIntermediateStep = this.data.stopReason === "toolUse";
+		if (isIntermediateStep) return [];
+
 		const computed = computeMetrics(this.data);
 		if (!computed) return [];
 
 		const light = isLightTheme(this.themeRef);
-		/* Оставляем справа 4 колонки под Outline Rail (width - 3 .. width - 2) и скроллбар (width - 1) */
 		const rightClearance = width >= 48 ? 4 : 1;
 		const usableWidth = Math.max(8, width - rightClearance);
 		const padFullWidth = (line: string): string =>
@@ -344,159 +346,25 @@ export class ResponseMetricsRowComponent implements Component {
 		const elapsedMs = isValidMs(this.data.timeSinceUserMs)
 			? this.data.timeSinceUserMs
 			: computed.totalMs;
-		const speedLabel =
-			computed.streamTps !== undefined
-				? `${formatMetricsRate(computed.streamTps)} tok/s`
-				: computed.effectiveTps !== undefined
-					? `eff ${formatMetricsRate(computed.effectiveTps)} tok/s`
-					: undefined;
-		const ttftLabel =
-			computed.ttftMs !== undefined ? `ttft ${formatMetricsDuration(computed.ttftMs)}` : undefined;
 		const totalLabel = formatMetricsDuration(elapsedMs);
-		const fullDateLabel = formatFullDateTime(this.data.completedAt || this.data.timestamp);
+		const leadPad = width >= 48 ? "    " : "  ";
+		const workedText = `Worked for ${totalLabel}`;
+		const styledWorked = this.hovered
+			? light
+				? fgRgb(37, 99, 235, workedText)
+				: fgRgb(192, 202, 245, workedText)
+			: light
+				? fgRgb(120, 134, 156, workedText)
+				: fgRgb(104, 118, 142, workedText);
 
-		const hoverAccent = (s: string) =>
-			light ? fgRgb(37, 99, 235, s) : fgRgb(136, 196, 252, s);
-		const hoverSoft = (s: string) =>
-			light ? fgRgb(59, 114, 228, s) : fgRgb(112, 168, 226, s);
-		const dimFg = (s: string) =>
-			this.hovered
-				? hoverSoft(s)
-				: light
-					? fgRgb(120, 134, 156, s)
-					: fgRgb(104, 118, 142, s);
-		const valFg = (s: string) =>
-			this.hovered
-				? hoverAccent(s)
-				: light
-					? fgRgb(78, 94, 118, s)
-					: fgRgb(136, 152, 178, s);
-		const sep = dimFg(" · ");
-
-		const lines: string[] = [];
-
-		if (variant === "A") {
-			const parts: string[] = [
-				`${dimFg("✓")} ${valFg(`Worked for ${totalLabel}`)}`,
-			];
-			if (ttftLabel) parts.push(dimFg(ttftLabel));
-			if (speedLabel) parts.push(valFg(speedLabel));
-			parts.push(dimFg(fullDateLabel));
-			const row = truncateToWidth(`  ${parts.join(sep)}`, usableWidth, "…");
-			lines.push(padFullWidth(row));
-		} else if (isIntermediateStep) {
-			/* Intermediate tool-call step: calm right-aligned step metrics without final ✓ Worked-for banner */
-			const stepParts: string[] = [];
-			if (ttftLabel) stepParts.push(dimFg(ttftLabel));
-			if (speedLabel) stepParts.push(valFg(speedLabel));
-			stepParts.push(dimFg(`total ${formatMetricsDuration(computed.totalMs)}`));
-			stepParts.push(dimFg(fullDateLabel));
-			const rightBlock = truncateToWidth(stepParts.join(sep), Math.max(8, usableWidth - 2), "…");
-			const pad = " ".repeat(Math.max(2, usableWidth - visibleWidth(rightBlock)));
-			lines.push(padFullWidth(`${pad}${rightBlock}`));
-		} else if (variant === "B") {
-			/* Final turn hybrid A + B: left `✓ Worked for Xs`, center `┄` hairline, right `ttft · tok/s · YYYY-MM-DD · HH:MM:SS`,
-			   with zero character replacement or width shift on hover. */
-			const leftBlock = `  ${dimFg("✓")} ${valFg(`Worked for ${totalLabel}`)}`;
-			const rightParts: string[] = [];
-			if (ttftLabel) rightParts.push(dimFg(ttftLabel));
-			if (speedLabel) rightParts.push(valFg(speedLabel));
-			rightParts.push(dimFg(fullDateLabel));
-			const rightBlock = rightParts.join(sep);
-
-			const leftW = visibleWidth(leftBlock);
-			const rightW = visibleWidth(rightBlock);
-			const gapBudget = usableWidth - leftW - rightW;
-			const ruleColor = (s: string) =>
-				this.hovered
-					? light
-						? fgRgb(147, 197, 253, s)
-						: fgRgb(68, 98, 142, s)
-					: light
-						? fgRgb(214, 224, 238, s)
-						: fgRgb(46, 56, 74, s);
-
-			if (gapBudget >= 6) {
-				const rule = ` ${ruleColor("┄".repeat(gapBudget - 2))} `;
-				const full = truncateToWidth(`${leftBlock}${rule}${rightBlock}`, usableWidth, "…");
-				lines.push(padFullWidth(full));
-			} else if (gapBudget >= 2) {
-				const pad = " ".repeat(gapBudget);
-				const full = truncateToWidth(`${leftBlock}${pad}${rightBlock}`, usableWidth, "…");
-				lines.push(padFullWidth(full));
-			} else {
-				const compact = truncateToWidth(`${leftBlock}${sep}${rightBlock}`, usableWidth, "…");
-				lines.push(padFullWidth(compact));
-			}
-		} else {
-			/* Variant C: two-zone instrument strip with right clearance */
-			const leftMeta: string[] = [dimFg(formatClockTime(this.data.completedAt || this.data.timestamp, true))];
-			if (this.data.model) {
-				const eff = this.data.thinkingLevel ? ` (${this.data.thinkingLevel})` : "";
-				leftMeta.push(valFg(`${this.data.model}${eff}`));
-			}
-			if (isPositiveCount(this.data.outputTokens)) {
-				const r = isPositiveCount(this.data.reasoningTokens)
-					? ` · r ${formatTokenCount(this.data.reasoningTokens)}`
-					: "";
-				leftMeta.push(dimFg(`out ${formatTokenCount(this.data.outputTokens)}${r}`));
-			}
-			const leftStr = `  ${leftMeta.join(sep)}`;
-
-			const pills: string[] = [];
-			if (computed.ttftMs !== undefined) {
-				pills.push(
-					renderPill(`TTFT ${formatMetricsDuration(computed.ttftMs)}`, {
-						theme: this.themeRef,
-						hovered: false,
-					}),
-				);
-			}
-			if (speedLabel) {
-				pills.push(
-					renderPill(speedLabel, {
-						theme: this.themeRef,
-						active: this.hovered,
-						hovered: this.hovered,
-						variant: "primary",
-					}),
-				);
-			}
-			pills.push(
-				renderPill(`Turn ${totalLabel}`, {
-					theme: this.themeRef,
-					hovered: false,
-				}),
-			);
-			pills.push(
-				renderPill("Stats ↗", {
-					theme: this.themeRef,
-					hovered: this.hovered,
-					active: this.hovered,
-					variant: "secondary",
-				}),
-			);
-			const rightStr = pills.join(" ");
-			const rightW = visibleWidth(rightStr);
-			const maxLeft = Math.max(0, usableWidth - rightW - 2);
-			const clippedLeft = maxLeft >= 10 ? truncateToWidth(leftStr, maxLeft, "…") : "";
-			const gap = " ".repeat(Math.max(1, usableWidth - visibleWidth(clippedLeft) - rightW));
-			const combined = truncateToWidth(`${clippedLeft}${gap}${rightStr}`, usableWidth, "…");
-			lines.push(padFullWidth(combined));
-		}
+		const row = truncateToWidth(`${leadPad}${styledWorked}`, usableWidth, "…");
+		const lines: string[] = [padFullWidth(row)];
 
 		if (this.expanded) {
 			const details = buildExpandedDetailParts(this.data, computed);
 			if (details.length > 0) {
-				const detailText = dimFg(details.join(" · "));
-				if (variant === "A") {
-					const dRow = truncateToWidth(`    ${detailText}`, usableWidth, "…");
-					lines.push(padFullWidth(dRow));
-				} else {
-					const clipped = truncateToWidth(detailText, usableWidth, "…");
-					const pad = " ".repeat(Math.max(0, usableWidth - visibleWidth(clipped)));
-					lines.push(padFullWidth(`${pad}${clipped}`));
-				}
+				const detailFg = light ? fgRgb(120, 134, 156, details.join(" · ")) : fgRgb(104, 118, 142, details.join(" · "));
+				lines.push(padFullWidth(truncateToWidth(`${leadPad}${detailFg}`, usableWidth, "…")));
 			}
 		}
 
@@ -504,7 +372,13 @@ export class ResponseMetricsRowComponent implements Component {
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-		if (!isResponseMetricsEnabled() || getPrototypeVariant() === "off") return undefined;
+		if (
+			!isResponseMetricsEnabled() ||
+			getPrototypeVariant() === "off" ||
+			this.data.stopReason === "toolUse"
+		) {
+			return undefined;
+		}
 		if (event.type === "move") {
 			claimHover(this, () => {
 				if (this.hovered) {
@@ -683,6 +557,9 @@ function buildMarkdownSummaryTable(records: readonly TurnMetricsRecord[]): strin
 
 export async function openResponseMetricsModal(ctx: ExtensionContext): Promise<void> {
 	if (!ctx.hasUI || ctx.mode !== "tui") return;
+	if (isPrototypeActive() && (await openBoundContextMenuModal(ctx, "usage"))) {
+		return;
+	}
 
 	await openModalCard<void>(
 		ctx,

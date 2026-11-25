@@ -748,12 +748,13 @@ export function renderDensityCall(options: {
 				hovered && protoOn
 					? ` ${pal.dim(expanded ? "⌄" : "›")}`
 					: "";
-			const leadPrefix = protoOn ? "  " : " ";
+			const leadPrefix = protoOn ? (width >= 48 ? "    " : "  ") : " ";
+			const wrapIndent = protoOn && width >= 48 ? "      " : "    ";
 			const head = `${leadPrefix}${diamond} ${styledVerb}${styledTarget}${meta}${hoverChevron}`;
 			const lines =
 				expanded && protoOn && visibleWidth(head) > usableWidth
-					? wrapTextWithAnsi(head, Math.max(8, usableWidth - 4)).map((chunk, idx) =>
-							idx === 0 ? chunk : `    ${chunk}`,
+					? wrapTextWithAnsi(head, Math.max(8, usableWidth - wrapIndent.length)).map((chunk, idx) =>
+							idx === 0 ? chunk : `${wrapIndent}${chunk}`,
 						)
 					: [truncateToWidth(head, usableWidth, "…")];
 

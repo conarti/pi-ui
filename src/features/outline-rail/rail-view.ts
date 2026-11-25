@@ -216,18 +216,12 @@ export class OutlinePreviewPopup implements Component {
 		if (isPrototypeActive()) {
 			const palette = getThemeSurfacePalette(th);
 			const edge = (s: string) => themeFgRgb(th, palette.borderSubtle, s);
-			const headerLabel = time
-				? ` Turn #${this.ordinal} · ${time} `
-				: ` Turn #${this.ordinal} `;
-			const clippedHdr = truncateToWidth(headerLabel, Math.max(1, inner - 2), "…");
-			const rightDashes = Math.max(0, inner - 1 - visibleWidth(clippedHdr));
-
 			const out: string[] = [
 				paintThemeSurfaceRow(
 					th,
-					`${edge("╭─")}${themeFgRgb(th, palette.accentBright, clippedHdr)}${edge("─".repeat(rightDashes))}${edge("╮")}`,
+					`${edge("╭")}${edge("─".repeat(inner))}${edge("╮")}`,
 					safeWidth,
-					palette.popupHeaderBg,
+					palette.popupSurfaceBg,
 				),
 			];
 
@@ -289,7 +283,7 @@ export class OutlineRailComponent implements Component {
 	private syncScheduled = false;
 
 	get railPlacement(): "beside-scrollbar" | "over-scrollbar" {
-		return getPrototypeVariant() === "A" ? "over-scrollbar" : "beside-scrollbar";
+		return isPrototypeActive() ? "over-scrollbar" : "beside-scrollbar";
 	}
 
 	constructor(
@@ -440,7 +434,7 @@ export class OutlineRailComponent implements Component {
 			turns.length,
 			vp,
 			minTop,
-			variant === "C",
+			false,
 		);
 		this.geometry = geo;
 		if (!geo) {
@@ -514,23 +508,11 @@ export class OutlineRailComponent implements Component {
 					isHovered ? "━━" : isActive ? "──" : "─",
 					isHovered || isActive ? "primary" : "dim",
 				);
-			} else if (variant === "C") {
-				paint(
-					geo.ticksY + i,
-					isHovered ? "✦" : isActive ? "✦" : "•",
-					isHovered ? "hover" : isActive ? "accent" : "dim",
-				);
-			} else if (variant === "A") {
-				paint(
-					geo.ticksY + i,
-					isHovered ? "══" : isActive ? "━━" : "╸",
-					isHovered ? "hover" : isActive ? "accent" : "dim",
-				);
 			} else {
 				paint(
 					geo.ticksY + i,
-					isHovered ? "══" : isActive ? "━━" : "──",
-					isHovered ? "hover" : isActive ? "accent" : "dim",
+					isHovered ? "━━" : isActive ? "━━" : "─",
+					isHovered ? "hover" : isActive ? "primary" : "dim",
 				);
 			}
 		}

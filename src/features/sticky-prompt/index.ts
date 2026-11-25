@@ -276,17 +276,15 @@ export class StickyPromptBar implements Component {
 			return [];
 		}
 
-		const variant = getPrototypeVariant();
 		const isExpanded = this.expanded.has(this.active.id);
 		const vpHeight = scroll.viewportHeight ?? 0;
-		const collapsedLimit = variant === "A" ? 2 : COLLAPSED_MAX_CONTENT_LINES;
 		const maxContentLines = isExpanded
 			? vpHeight > 0
 				? Math.max(1, vpHeight - 3)
 				: undefined
-			: vpHeight > 0 && vpHeight < collapsedLimit + 2
+			: vpHeight > 0 && vpHeight < COLLAPSED_MAX_CONTENT_LINES + 2
 				? Math.max(1, vpHeight - 2)
-				: collapsedLimit;
+				: COLLAPSED_MAX_CONTENT_LINES;
 
 		const rendered = renderUserPromptCardLines(
 			this.active.prompt,
@@ -295,13 +293,10 @@ export class StickyPromptBar implements Component {
 			{
 				formattedTime: this.config.showTimestamp ? this.active.formattedTime : "",
 				hovered: this.hovered,
-				copied: this.copyState.copied,
-				showCopyBadge: variant === "B",
+				showCopyBadge: false,
 				maxContentLines,
 				isExpandedSticky: isExpanded,
 				turnOrdinal: this.active.ordinal,
-				bottomHairline: variant === "A",
-				compactRibbon: variant === "C" && !isExpanded,
 				surface: "sticky",
 				messageId: this.active.id,
 				timestamp: this.active.timestamp,
@@ -311,8 +306,22 @@ export class StickyPromptBar implements Component {
 		this.copyHit = rendered.copyHit;
 		this.pillHits = rendered.pillHits;
 		this.lastTruncated = rendered.truncated;
-		this.lastRenderedHeight = rendered.lines.length;
-		return rendered.lines;
+
+		/* Grok subtle centered ▲ indicator on the row below Sticky Prompt when scrolled past the prompt card */
+		const outLines = [...rendered.lines];
+		if (
+			isPrototypeActive() &&
+			(scroll.scrollTop ?? 0) > this.active.start + Math.max(1, this.active.height) &&
+			cardWidth >= 24
+		) {
+			const th = this.shell.theme();
+			const centerPad = Math.max(0, Math.floor((cardWidth - 1) / 2));
+			const trailPad = Math.max(0, cardWidth - centerPad - 1);
+			outLines.push(`${" ".repeat(centerPad)}${th.fg("dim", "▲")}${" ".repeat(trailPad)}`);
+		}
+
+		this.lastRenderedHeight = outLines.length;
+		return outLines;
 	}
 }
 

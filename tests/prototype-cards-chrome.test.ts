@@ -46,7 +46,7 @@ const SAMPLE_CODE_REPLY = [
 	buildTallProse(20),
 ].join("\n");
 
-describe("prototype #34: pinned Header, User Prompt + Skill Chips, two-tone Markdown code, Sticky Prompt, and Outline Rail", () => {
+describe("prototype #34: pinned Header, Context modal, User Prompt + Skill Chips, Markdown code, Sticky Prompt, and Outline Rail", () => {
 	let harness: InteractiveHarness | undefined;
 
 	afterEach(async () => {
@@ -68,7 +68,7 @@ describe("prototype #34: pinned Header, User Prompt + Skill Chips, two-tone Mark
 		expect(parsed.previewText.startsWith("/wayfinder · Inspect")).toBe(true);
 	});
 
-	it("pins Header at row 0 outside ScrollView while Sticky Prompt pins right below it across A / B / C", async () => {
+	it("pins Header at row 0 with hover-morphing Context indicator + 3-tab Context modal, Sticky Prompt at row 2, and Shortcuts Bar", async () => {
 		const t1 = Date.UTC(2026, 10, 25, 13, 52, 0);
 		const t2 = t1 + 60_000;
 		harness = await createInteractiveHarness({
@@ -85,48 +85,52 @@ describe("prototype #34: pinned Header, User Prompt + Skill Chips, two-tone Mark
 
 		setPrototypeVariant("B");
 		const runtime = getActiveHostRuntime()!;
-		runtime.scroll!.scrollTo(3, { disableFollow: true });
+		runtime.scroll!.scrollTo(8, { disableFollow: true });
 		harness.renderFrame();
 
-		const screenB = harness.screen();
-		expect(screenB.rowText(0)).toContain("✦ pi-ui");
-		expect(screenB.rowText(0)).toContain("⌃K Palette");
+		const screen = harness.screen();
+		/* Row 0: workspace path on left + used / limit context indicator on right; Row 1: pure canvas air */
+		expect(screen.rowText(0)).toMatch(/(?:~\/|\/)/u);
+		expect(screen.rowText(0)).toMatch(/\d+(?:\.\d+)?k?\s*\/\s*\d+k/u);
+		expect(screen.rowText(0)).not.toContain("[Dashboard]");
+		expect(screen.rowText(1).trim()).toBe("");
 
-		/* Sticky Prompt sits right below Header (starting at row 1) with Skill Chip badge instead of raw <skill> */
-		const topBandTextB = [
-			screenB.rowText(1),
-			screenB.rowText(2),
-			screenB.rowText(3),
-			screenB.rowText(4),
-		].join("\n");
-		expect(topBandTextB).toContain("skill:wayfinder");
-		expect(topBandTextB).not.toContain("<skill name=");
-		expect(topBandTextB).toContain("Inspect https://github.com/conarti/pi-ui/issues/29");
+		/* Sticky Prompt sits at row 2 with /wayfinder chip (absorbs host [skill] box + raw XML) and centered ▲ below */
+		const topBand = Array.from({ length: 8 }, (_, r) => screen.rowText(r + 2)).join("\n");
+		expect(topBand).toContain("/wayfinder");
+		expect(topBand).not.toContain("<skill name=");
+		expect(topBand).not.toContain("[skill]");
+		expect(topBand).toContain("Inspect https://github.com/conarti/pi-ui/issues/29");
+		expect(topBand).toContain("▲");
 
-		/* Variant C renders a 2-row Header (row 0 content + row 1 hairline) and a 1-row condensed Sticky ribbon at row 2 */
-		setPrototypeVariant("C");
-		runtime.scroll!.invalidate();
-		harness.renderFrame();
+		/* Composer bottom border & Shortcuts Bar at bottom of screen */
+		const bottomBand = Array.from({ length: 5 }, (_, r) => screen.rowText(23 + r)).join("\n");
+		expect(bottomBand).toContain("always-approve");
+		expect(bottomBand).toContain("Shift+Tab:mode");
 
-		const screenC = harness.screen();
-		expect(screenC.rowText(0)).toContain("✦ pi-ui");
-		expect(screenC.rowText(1)).toContain("────────");
-		expect(screenC.rowText(2)).toContain("/wayfinder");
-		expect(screenC.rowText(2)).toContain("▾");
+		/* Hovering top-right context indicator morphs it in-place to a percentage progress bar */
+		await harness.mouseMove(105, 0);
+		expect(harness.screen().rowText(0)).toMatch(/\d+\.\d+%/u);
 
-		/* Variant A renders a 1-row flush canvas Header and over-scrollbar integrated edge rail */
-		setPrototypeVariant("A");
-		runtime.scroll!.invalidate();
-		harness.renderFrame();
+		/* Minimal centered ▼ replaces stock Jump-to-latest banner when scrolled up */
+		const fullScrolled = Array.from({ length: 28 }, (_, r) => harness!.screen().rowText(r)).join("\n");
+		expect(fullScrolled).not.toContain("Jump to latest message");
+		expect(fullScrolled).toContain("▼");
 
-		const screenA = harness.screen();
-		expect(screenA.rowText(0)).toContain("✦ pi-ui");
-		expect(screenA.rowText(1)).toContain("✦ /wayfinder");
-		const rail = runtime.viewportSlots!.rightRail as OutlineRailComponent;
-		expect(rail.railPlacement).toBe("over-scrollbar");
+		/* Clicking top-right context indicator opens the 3-tab Context usage / Session usage / Session info modal */
+		await harness.mouseClick(105, 0);
+
+		const modalDump = Array.from({ length: 28 }, (_, r) => harness!.screen().rowText(r)).join("\n");
+		expect(modalDump).toContain("Context usage");
+		expect(modalDump).toContain("Session usage");
+		expect(modalDump).toContain("Session info");
+		expect(modalDump).toContain("[x]");
+
+		/* Close modal with Escape */
+		await harness.sendInput("\x1b");
 	});
 
-	it("renders two-tone Markdown code blocks without ▎ selection glyphs and shows clean Outline Rail Hover Popup", async () => {
+	it("renders two-tone post-block Markdown code blocks without ▎ selection glyphs and minimal Outline Rail Hover Popup", async () => {
 		const t1 = Date.UTC(2026, 10, 25, 14, 10, 0);
 		const t2 = t1 + 60_000;
 		harness = await createInteractiveHarness({
@@ -146,25 +150,27 @@ describe("prototype #34: pinned Header, User Prompt + Skill Chips, two-tone Mark
 		runtime.scroll!.scrollTo(0, { disableFollow: true });
 		harness.renderFrame();
 
-		const fullPlainB = Array.from({ length: 30 }, (_, r) => harness!.screen().rowText(r)).join("\n");
-		expect(fullPlainB).toContain("npm run check");
-		expect(fullPlainB).toContain("RIGHT_PLUMB_GUARD");
+		const fullPlain = Array.from({ length: 30 }, (_, r) => harness!.screen().rowText(r)).join("\n");
+		expect(fullPlain).toContain("npm run check");
+		expect(fullPlain).toContain("RIGHT_PLUMB_GUARD");
+		expect(fullPlain).toContain("[Copy]");
 		/* Code lines must not prefix ▎ before code statements */
-		expect(fullPlainB).not.toContain("▎ export const RIGHT_PLUMB_GUARD");
-		expect(fullPlainB).not.toContain("▎ npm run check");
+		expect(fullPlain).not.toContain("▎ export const RIGHT_PLUMB_GUARD");
+		expect(fullPlain).not.toContain("▎ npm run check");
 
-		/* Hovering the first tick on Outline Rail opens the opaque Turn #1 Hover Popup with /wayfinder preview */
+		/* Outline Rail uses over-scrollbar placement in the 2-col right canvas gutter */
 		const rail = runtime.viewportSlots!.rightRail as OutlineRailComponent;
+		expect(rail.railPlacement).toBe("over-scrollbar");
 		const geo = rail.geometry!;
 		expect(geo).toBeDefined();
-		const railScreenX = 110 - 3;
-		const tickScreenY = 1 + geo.ticksY;
+		const railScreenX = 110 - 2;
+		const tickScreenY = 2 + geo.ticksY;
 		harness.terminal.sendInput(formatSgrMouse(35, railScreenX, tickScreenY, false));
 		harness.renderFrame();
 
 		const hoverDump = Array.from({ length: 30 }, (_, r) => harness!.screen().rowText(r)).join("\n");
-		expect(hoverDump).toContain("Turn #1");
 		expect(hoverDump).toContain("/wayfinder · Inspect");
 		expect(hoverDump).not.toContain("<skill");
+		expect(hoverDump).not.toContain("Turn #1");
 	});
 });

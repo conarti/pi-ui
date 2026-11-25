@@ -99,15 +99,10 @@ export function createOutlineRailSlot(
 
 		const bodyLines = wrapPreviewLines(previewSource, maxText);
 		const timeText = turn.formattedTime ?? "";
-		const headerTitle = protoOn
-			? timeText
-				? `Turn #${turn.ordinal} · ${timeText}`
-				: `Turn #${turn.ordinal}`
-			: "";
 
 		const contentW = Math.max(
-			Math.min(12, maxText),
-			visibleWidth(protoOn ? headerTitle : timeText),
+			Math.min(protoOn ? 8 : 12, maxText),
+			...(protoOn ? [] : [visibleWidth(timeText)]),
 			...bodyLines.map(visibleWidth),
 		);
 		const cardW = Math.min(maxCardW, contentW + 4);
@@ -115,13 +110,15 @@ export function createOutlineRailSlot(
 			? (bodyLines.length || 1) + 2
 			: (bodyLines.length || 1) + 2 + (timeText ? 1 : 0);
 
-		const topGuard = protoOn ? 1 : 0;
+		const topGuard = protoOn ? 2 : 0;
 		const maxRow = Math.max(topGuard, Math.min(termRows - cardH, topGuard + viewportRows - cardH));
 		popup.ordinal = turn.ordinal;
 		popup.time = timeText;
 		popup.preview = previewSource;
 		popupOptions.width = cardW;
-		popupOptions.col = Math.max(1, termCols - RAIL_WIDTH - 1 - cardW - 1);
+		popupOptions.col = protoOn
+			? Math.max(1, termCols - RAIL_WIDTH - cardW - 1)
+			: Math.max(1, termCols - RAIL_WIDTH - 1 - cardW - 1);
 		popupOptions.row = Math.max(topGuard, Math.min(screenY - Math.floor(cardH / 2), maxRow));
 		popupVisible = true;
 		if (!popupHandle) {

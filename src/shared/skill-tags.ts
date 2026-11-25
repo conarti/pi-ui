@@ -131,30 +131,19 @@ export function extractSkillInvocations(rawText: string): ExtractedSkillPrompt {
 
 export function renderStyledSkillChip(
 	skillName: string,
-	variant: "A" | "B" | "C" | "off",
+	_variant: "A" | "B" | "C" | "off",
 	theme: Theme,
 	options?: { active?: boolean },
 ): { styled: string; plainLabel: string } {
 	const palette = getThemeSurfacePalette(theme);
 	const light = palette.isLight;
-
-	let plainLabel: string;
-	if (variant === "B") {
-		plainLabel = `⚡ skill:${skillName}`;
-	} else if (variant === "C") {
-		plainLabel = `/${skillName}`;
-	} else {
-		plainLabel = `✦ /${skillName}`;
-	}
-
+	const plainLabel = `/${skillName}`;
 	const bg = options?.active
-		? mixRgb(palette.userCardBg, palette.accent, light ? 0.28 : 0.34)
-		: variant === "C"
-			? mixRgb(palette.userCardBg, palette.accent, light ? 0.12 : 0.18)
-			: mixRgb(palette.userCardBg, palette.accent, light ? 0.18 : 0.26);
+		? mixRgb(palette.userCardBg, palette.accent, light ? 0.24 : 0.3)
+		: mixRgb(palette.userCardBg, palette.accent, light ? 0.12 : 0.18);
 	const fg = light
-		? mixRgb([15, 23, 42], palette.accent, 0.78)
-		: mixRgb([230, 242, 255], palette.accentBright, 0.55);
+		? mixRgb([15, 23, 42], palette.accent, 0.72)
+		: mixRgb([224, 236, 252], palette.accentBright, 0.45);
 
 	return {
 		plainLabel,

@@ -345,12 +345,16 @@ function installViewportChromeHooks(): void {
 		"compositeScrollToEndIndicator",
 		"viewport.passthroughEndIndicator",
 		(self, args, original) => {
-			const base = original.apply(self, args) as string[];
 			const compositor = getCompositorMap().get(self);
-			if (!compositor) return base;
+			if (!compositor) return original.apply(self, args) as string[];
+			const rawScreen = args[0] as string[];
 			const layout = args[1] as { root?: any } | undefined;
 			const width = Number(args[2] ?? self.terminal?.columns ?? 80);
-			return compositor.compositeFrame(base, layout, width);
+			const minimalBottomArrow = compositor.slots.rightRail?.railPlacement === "over-scrollbar";
+			const base = minimalBottomArrow
+				? rawScreen
+				: (original.apply(self, args) as string[]);
+			return compositor.compositeFrame(base, layout, width, minimalBottomArrow);
 		},
 		["pi.grok-ui.hook.chat.timelineComposite"],
 	);

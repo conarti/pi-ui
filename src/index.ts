@@ -1,12 +1,19 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerAskUserFeature } from "./features/ask-user/index.ts";
 import { mountComposer, setActiveComposerEditor } from "./features/chrome/composer.ts";
-import { registerComposerWorkingAnimation } from "./features/chrome/working-indicator.ts";
+import {
+	bindContextMenuModalSession,
+	showContextMenuModal,
+} from "./features/chrome/context-modal.ts";
 import {
 	createPinnedSessionHeaderSlot,
 	mountSessionHeader,
-	refreshGitBranchAsync,
 } from "./features/chrome/header.ts";
+import {
+	registerPiFooterSuperseder,
+	syncShortcutsBar,
+} from "./features/chrome/shortcuts-bar.ts";
+import { registerComposerWorkingAnimation } from "./features/chrome/working-indicator.ts";
 import { registerCommandPaletteFeature } from "./features/command-palette/index.ts";
 import { showContextInspector } from "./features/context-inspector/index.ts";
 import { createOutlineRailSlot, registerOutlineCommands } from "./features/outline-rail/index.ts";
@@ -28,6 +35,7 @@ import { registerToolCallsFeature } from "./features/tool-calls/index.ts";
 import { registerPromptChipsFeature } from "./features/prompt-chips/index.ts";
 import { registerPromptSuggestionFeature } from "./features/prompt-suggestion/index.ts";
 import { registerQuotesFeature } from "./features/quotes/index.ts";
+import { isPrototypeActive } from "./features/transcript/prototype-state.ts";
 import { registerTranscriptFeature } from "./features/transcript/index.ts";
 import { registerPrototypeShowcaseFeature } from "./features/transcript/prototype-showcase.ts";
 import { registerResponseMetricsFeature } from "./features/transcript/response-metrics.ts";
@@ -39,9 +47,11 @@ import { TranscriptTurnIndex } from "./shared/turn-index.ts";
 
 export default function conartiPiUi(pi: ExtensionAPI): void {
 	installKeyboardLayoutSupport(pi);
+	registerPiFooterSuperseder();
 
-	// 0. Acquire shared Host Runtime once at session_start before feature listeners bind
+	/* 0. Acquire shared Host Runtime once at session_start before feature listeners bind */
 	pi.on("session_start", async (_event, ctx) => {
+		bindContextMenuModalSession(pi, ctx);
 		await acquireHostRuntime(ctx);
 	});
 
@@ -73,12 +83,12 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 	});
 
 	pi.registerShortcut("alt+m", {
-		description: "Переключить режим (Code / Plan / Auto-Safe)",
+		description: "Cycle Session Mode (always-approve / plan / auto)",
 		handler: async (ctx) => cycleSessionMode(pi, ctx),
 	});
 
 	pi.registerShortcut("ctrl+alt+p", {
-		description: "Plan Mode / открыть Plan Studio",
+		description: "Plan Mode / open Plan Approval",
 		handler: async (ctx) => {
 			const wf = getSessionWorkflow();
 			if (wf.hasPlan()) await showPlanStudio(pi, ctx);
@@ -87,13 +97,17 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("context", {
-		description: "Визуальный инспектор контекста, токенов и буфера компакта",
+		description: "Context usage, session stats, and session info",
 		handler: async (_args, ctx) => {
+			if (isPrototypeActive()) {
+				await showContextMenuModal(pi, ctx, "context");
+				return;
+			}
 			await showContextInspector(pi, ctx);
 		},
 	});
 
-	// 5. Fullscreen viewport shell: StickyPromptBar (top) + native ScrollView scrollbar + OutlineRail (right)
+	/* 6. Fullscreen viewport shell: Pinned Header + StickyPromptBar (top) + OutlineRail (right) */
 	let activeStickyBar: StickyPromptBar | undefined;
 	let disposeShell: (() => void) | undefined;
 	let unsubscribeStickyKey: (() => void) | undefined;
@@ -135,6 +149,7 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 		}
 		mountSessionHeader(pi, ctx);
 		mountComposer(pi, ctx);
+		syncShortcutsBar(pi, ctx);
 		updatePlanWidget(pi, ctx);
 
 		const hostRuntime = await acquireHostRuntime(ctx);

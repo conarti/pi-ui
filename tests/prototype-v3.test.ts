@@ -121,7 +121,7 @@ describe("prototype v3: glimmer sweep, 30s verb stability, step summaries, and h
 		});
 	});
 
-	it("renders hybrid Worked-for + full date-time metrics bar with zero character shift on hover", async () => {
+	it("renders quiet final Worked-for line with zero character shift on hover and hides intermediate toolUse clutter", async () => {
 		harness = await createInteractiveHarness();
 		setPrototypeVariant("B");
 		const mockTheme = {
@@ -157,10 +157,9 @@ describe("prototype v3: glimmer sweep, 30s verb stability, step summaries, and h
 		const hoverPlain = stripTerminalSequences(hoverRaw);
 
 		expect(hoverPlain).toBe(restPlain);
-		expect(restPlain).toContain("✓ Worked for 4.2s");
-		expect(restPlain).toMatch(/\d{4}-\d{2}-\d{2} · \d{2}:\d{2}/u);
+		expect(restPlain.trim()).toBe("Worked for 4.2s");
 
-		/* Intermediate toolUse steps also render their metrics stamp instead of returning empty */
+		/* Intermediate toolUse steps stay completely quiet between tool calls */
 		const stepRow = new ResponseMetricsRowComponent(
 			{
 				version: 1,
@@ -174,15 +173,10 @@ describe("prototype v3: glimmer sweep, 30s verb stability, step summaries, and h
 			mockTheme,
 			() => {},
 		);
-		const stepLines = stepRow.render(100);
-		expect(stepLines.length).toBe(1);
-		const stepPlain = stripTerminalSequences(stepLines[0]!);
-		expect(stepPlain).toContain("ttft 0.5s");
-		expect(stepPlain).toContain("total 1.9s");
-		expect(stepPlain).toMatch(/\d{4}-\d{2}-\d{2} · \d{2}:\d{2}/u);
+		expect(stepRow.render(100)).toEqual([]);
 	});
 
-	it("supports mouse-wheel scrolling inside Variant B streaming Thinking window via SGR wheel input", async () => {
+	it("supports mouse-wheel scrolling inside streaming Thinking window via SGR wheel input", async () => {
 		harness = await createInteractiveHarness();
 		setPrototypeVariant("B");
 		const mockTheme = {
@@ -212,8 +206,15 @@ describe("prototype v3: glimmer sweep, 30s verb stability, step summaries, and h
 		chat.addChild(tb);
 		harness.renderFrame();
 
+		const screen = harness.screen();
+		const tbRow =
+			Array.from({ length: 24 }, (_, r) => r).find((r) =>
+				screen.rowText(r).includes("Thinking"),
+			) ?? 3;
+		expect(tbRow).toBeGreaterThanOrEqual(2);
+
 		/* SGR buttonCode 64 = wheel up over ThinkingBlock */
-		harness.terminal.sendInput(formatSgrMouse(64, 6, 3, false));
+		harness.terminal.sendInput(formatSgrMouse(64, 6, tbRow + 1, false));
 		expect(slot.scrollFromBottom).toBe(2);
 		const scrolledHdr = stripTerminalSequences(tb.render(90)[0]!);
 		expect(scrolledHdr).toContain("⏸ -2 lines");

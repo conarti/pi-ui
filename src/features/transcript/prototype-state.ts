@@ -478,6 +478,12 @@ function resolveDefaultPhaseLabel(phase: WorkingPhase, seed: number): string {
 /**
  * Plain-text fallback for hosts outside Composer's custom shimmer border.
  */
+export function getPrototypeTurnElapsedLabel(now = Date.now()): string {
+	const state = getProtoState();
+	if (state.turnStartedAt === undefined) return "";
+	return formatCompactElapsed(Math.max(0, now - state.turnStartedAt));
+}
+
 export function buildLiveWorkingPresentation(options?: {
 	now?: number;
 	animElapsedMs?: number;

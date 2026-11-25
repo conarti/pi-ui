@@ -291,140 +291,38 @@ export function installMarkdownCardsAndHeadings(): void {
 					return out;
 				}
 
-				/* Prototype Variants A / B / C: clean 2-space body indent (zero ▎ glyph polluting selection) + 4-col right guard */
-				const rightGuard = width >= 56 ? 4 : 0;
+				/* Unified prototype two-tone code block:
+				   recessed codeBodyBg with clean 2-space indent (zero ▎ rail polluting selection)
+				   + calm bottom footer affordance (`lang · [Copy]` or `[Copy]`). */
+				const padX = Number(self.paddingX ?? 0);
+				const rightGuard = width >= 56 ? Math.max(0, 4 - padX) : 0;
 				const cardW = Math.max(12, width - rightGuard);
 				const codeInnerW = Math.max(6, cardW - 4);
 				const bodyLines = renderCodeBodyLines(self, rawCode, lang, codeInnerW);
 				const out: string[] = [];
 
-				if (variant === "A") {
-					/* Variant A: quiet recessed codeBodyBg block + Grok-style bottom affordance row */
-					for (const wLine of bodyLines) {
-						out.push(
-							paintThemeSurfaceRow(
-								activeTheme,
-								`  ${wLine}`,
-								cardW,
-								palette.codeBodyBg,
-							),
-						);
-					}
-					const footer = buildFooterActionRow(activeTheme, palette, cardW, lang, "rest");
-					const actionOffset = out.length;
-					out.push(footer.line);
-					self.__conartiLastCodeMeta = {
-						lang,
-						raw: rawCode,
-						layout: "footer",
-						actionOffset,
-						totalRows: out.length,
-						rightGuard,
-						cardWidth: cardW,
-					} satisfies CachedBlockCodeMeta;
-				} else if (variant === "B") {
-					/* Variant B: smart two-tone card (skips full-width header on short 1-2 line untyped fences) */
-					const isShortUntyped = !lang && bodyLines.length <= 2;
-					if (isShortUntyped) {
-						for (const wLine of bodyLines) {
-							out.push(
-								paintThemeSurfaceRow(
-									activeTheme,
-									`  ${wLine}`,
-									cardW,
-									palette.codeBodyBg,
-								),
-							);
-						}
-						self.__conartiLastCodeMeta = {
-							lang: "",
-							raw: rawCode,
-							layout: "inline-hover",
-							actionOffset: 0,
-							totalRows: out.length,
-							rightGuard,
-							cardWidth: cardW,
-						} satisfies CachedBlockCodeMeta;
-					} else {
-						const hdr = buildSmartHeaderRow(activeTheme, palette, cardW, lang, "rest");
-						out.push(hdr.line);
-						for (const wLine of bodyLines) {
-							out.push(
-								paintThemeSurfaceRow(
-									activeTheme,
-									`  ${wLine}`,
-									cardW,
-									palette.codeBodyBg,
-								),
-							);
-						}
-						self.__conartiLastCodeMeta = {
-							lang,
-							raw: rawCode,
-							layout: "smart-header",
-							actionOffset: 0,
-							totalRows: out.length,
-							rightGuard,
-							cardWidth: cardW,
-						} satisfies CachedBlockCodeMeta;
-					}
-				} else {
-					/* Variant C: floating top-right two-tone corner pill without full-width header stripe */
-					const corner = buildCornerPillBadge(activeTheme, palette, lang, "rest");
-					const pillW = visibleWidth(corner.pill);
-					const firstBodyW = visibleWidth(bodyLines[0] ?? "") + 4;
-					if (firstBodyW + pillW + 2 <= cardW) {
-						const firstContent = `  ${bodyLines[0] ?? ""}`;
-						const gap = " ".repeat(Math.max(1, cardW - visibleWidth(firstContent) - pillW));
-						out.push(
-							paintThemeSurfaceRow(
-								activeTheme,
-								`${firstContent}${gap}${corner.pill}`,
-								cardW,
-								palette.codeBodyBg,
-							),
-						);
-						for (let idx = 1; idx < bodyLines.length; idx++) {
-							out.push(
-								paintThemeSurfaceRow(
-									activeTheme,
-									`  ${bodyLines[idx]!}`,
-									cardW,
-									palette.codeBodyBg,
-								),
-							);
-						}
-					} else {
-						const padLeft = " ".repeat(Math.max(0, cardW - pillW));
-						out.push(
-							paintThemeSurfaceRow(
-								activeTheme,
-								`${padLeft}${corner.pill}`,
-								cardW,
-								palette.codeBodyBg,
-							),
-						);
-						for (const wLine of bodyLines) {
-							out.push(
-								paintThemeSurfaceRow(
-									activeTheme,
-									`  ${wLine}`,
-									cardW,
-									palette.codeBodyBg,
-								),
-							);
-						}
-					}
-					self.__conartiLastCodeMeta = {
-						lang,
-						raw: rawCode,
-						layout: "corner",
-						actionOffset: 0,
-						totalRows: out.length,
-						rightGuard,
-						cardWidth: cardW,
-					} satisfies CachedBlockCodeMeta;
+				for (const wLine of bodyLines) {
+					out.push(
+						paintThemeSurfaceRow(
+							activeTheme,
+							`  ${wLine}`,
+							cardW,
+							palette.codeBodyBg,
+						),
+					);
 				}
+				const footer = buildFooterActionRow(activeTheme, palette, cardW, lang, "rest");
+				const actionOffset = out.length;
+				out.push(footer.line);
+				self.__conartiLastCodeMeta = {
+					lang,
+					raw: rawCode,
+					layout: "footer",
+					actionOffset,
+					totalRows: out.length,
+					rightGuard,
+					cardWidth: cardW,
+				} satisfies CachedBlockCodeMeta;
 
 				if (nextTokenType && nextTokenType !== "space") out.push("");
 				return out;

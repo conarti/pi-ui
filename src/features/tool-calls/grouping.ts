@@ -820,10 +820,10 @@ export class ToolGroupController {
 		}
 
 		const disclosure =
-			protoOn && (hovered || variant === "C")
-				? ` ${pal.dim(expanded ? (variant === "C" ? "▾" : "⌄") : variant === "C" ? "▸" : "›")}`
+			protoOn && hovered
+				? ` ${pal.dim(expanded ? "⌄" : "›")}`
 				: "";
-		const prefix = protoOn ? "  " : " ";
+		const prefix = protoOn ? (width >= 48 ? "    " : "  ") : " ";
 		const rightGuard = protoOn && width >= 48 ? 4 : 0;
 		const usableW = Math.max(8, width - rightGuard);
 

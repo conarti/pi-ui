@@ -31,6 +31,7 @@ import { fgRgb, getActiveGlobalTheme, isLightTheme } from "../../shared/ansi.ts"
 import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
+import { syncShortcutsBar } from "../chrome/shortcuts-bar.ts";
 import { bindComposerWorkingIndicator } from "../chrome/working-indicator.ts";
 import { densityPalette } from "../tool-calls/density.ts";
 import {
@@ -167,18 +168,18 @@ class DemoToolStepsMock implements Component {
 		const meta = ` ${pal.dim("(280ms)")}`;
 		const disclosure = this.hovered ? ` ${pal.dim(this.expanded ? "⌄" : "›")}` : "";
 		const out = [
-			fit(`  ${glyph} ${pal.title(summary, "success", this.expanded, this.hovered)}${meta}${disclosure}`),
+			fit(`    ${glyph} ${pal.title(summary, "success", this.expanded, this.hovered)}${meta}${disclosure}`),
 		];
 		if (this.expanded) {
 			const subGlyph = pal.diamond("success", false, false);
-			const guide = pal.rail("  │");
+			const guide = pal.rail("    │");
 			out.push(fit(`${guide} ${subGlyph} ${pal.title("Read", "success", false)} ${pal.target("src/features/transcript/user-prompt.ts", false)}`));
 			out.push(fit(`${guide} ${subGlyph} ${pal.title("Read", "success", false)} ${pal.target("src/features/transcript/markdown-cards.ts", false)}`));
 			out.push(fit(`${guide} ${subGlyph} ${pal.title("Read", "success", false)} ${pal.target("src/shared/fullscreen-layout.ts", false)}`));
 		}
 		out.push(
 			fit(
-				`  ${pal.diamond("success", false, false)} ${pal.title("Update viewport chrome & Skill Chip cards", "success", false)} ${pal.theme.fg("toolDiffAdded", "+42")} ${pal.theme.fg("toolDiffRemoved", "-9")} ${pal.dim("(410ms)")}`,
+				`    ${pal.diamond("success", false, false)} ${pal.title("Update viewport chrome & Skill Chip cards", "success", false)} ${pal.theme.fg("toolDiffAdded", "+42")} ${pal.theme.fg("toolDiffRemoved", "-9")} ${pal.dim("(410ms)")}`,
 			),
 		);
 		return out;
@@ -234,11 +235,11 @@ class DemoInlineImageRow implements Component {
 		const pal = densityPalette(theme);
 		const glyph = pal.diamond("success", true, false);
 		const header = truncateToWidth(
-			`  ${glyph} ${pal.title("Read", "success", true)} ${pal.target("assets/polaris-card.png", true)} ${pal.dim("(image/png · 180×64)")}`,
+			`    ${glyph} ${pal.title("Read", "success", true)} ${pal.target("assets/polaris-card.png", true)} ${pal.dim("(image/png · 180×64)")}`,
 			Math.max(1, width - 4),
 			"…",
 		);
-		const imgLines = this.img.render(Math.max(8, width - 6)).map((ln) => `    ${ln}`);
+		const imgLines = this.img.render(Math.max(8, width - 8)).map((ln) => `      ${ln}`);
 		return [header, ...imgLines];
 	}
 }
@@ -321,8 +322,8 @@ class LiveDemoShowcaseContainer extends Container {
 			"demo-turn-2",
 			new Date(this.startedAt - 3_000).toISOString(),
 		);
-		this.mdReply1 = new Markdown(DEMO_MARKDOWN_RESPONSE_1, 2, 0, mdTheme);
-		this.mdReply2 = new Markdown(DEMO_MARKDOWN_RESPONSE_2, 2, 0, mdTheme);
+		this.mdReply1 = new Markdown(DEMO_MARKDOWN_RESPONSE_1, 4, 0, mdTheme);
+		this.mdReply2 = new Markdown(DEMO_MARKDOWN_RESPONSE_2, 4, 0, mdTheme);
 
 		activateAnimationSurface(DEMO_ANIM_SURFACE_KEY, () => {
 			requestRender();
@@ -377,8 +378,8 @@ class LiveDemoShowcaseContainer extends Container {
 		this.addChild({
 			invalidate() {},
 			render: (w: number) => {
-				const tag = `✦ PROTOTYPE #34 DEMO (${meta?.shortLabel ?? "off"}) · Alt+V or click Header [Proto ↻] · scroll to test Sticky + Rail · /proto clear`;
-				const line = truncateToWidth(`  ${bannerFg(tag)}`, Math.max(1, w - 4), "…");
+				const tag = "◆ PROTOTYPE #34 DEMO · scroll to test Sticky Prompt + Outline Rail · /proto clear";
+				const line = truncateToWidth(`    ${bannerFg(tag)}`, Math.max(1, w - 4), "…");
 				return [line + " ".repeat(Math.max(0, w - visibleWidth(line)))];
 			},
 		});
@@ -495,6 +496,7 @@ export function refreshLiveTranscriptForPrototype(ctx: ExtensionContext): void {
 			}
 		}
 	}
+	runtime?.tui?.invalidate?.();
 	runtime?.scroll?.invalidate?.();
 	const slots = runtime?.viewportSlots;
 	slots?.topSlot?.invalidate?.();
@@ -546,6 +548,7 @@ export function registerPrototypeShowcaseFeature(pi: ExtensionAPI): void {
 		unsubscribeProto?.();
 		unsubscribeProto = subscribePrototypeChanges(() => {
 			if (activeCtx) {
+				syncShortcutsBar(pi, activeCtx);
 				refreshLiveTranscriptForPrototype(activeCtx);
 			}
 		});
@@ -578,10 +581,10 @@ export function registerPrototypeShowcaseFeature(pi: ExtensionAPI): void {
 		},
 	});
 
-	const subcommands = ["a", "b", "c", "next", "demo", "clear", "stats", "translate", "off"] as const;
+	const subcommands = ["on", "off", "demo", "clear", "stats", "translate"] as const;
 
 	pi.registerCommand("proto", {
-		description: "Control live cards/chrome prototype: /proto [A|B|C|demo|clear|stats|translate|off]",
+		description: "Control unified prototype UI: /proto [on|off|demo|clear|stats|translate]",
 		getArgumentCompletions: (prefix) => {
 			const typed = prefix.trim().toLowerCase();
 			const matches = subcommands
@@ -593,20 +596,11 @@ export function registerPrototypeShowcaseFeature(pi: ExtensionAPI): void {
 			activeCtx = ctx;
 			const cmd = args.trim().toLowerCase();
 
-			if (!cmd || cmd === "next") {
-				const next = cyclePrototypeVariant();
-				const meta = next !== "off" ? PROTOTYPE_VARIANTS[next] : undefined;
-				if (meta) {
-					ctx.ui.notify(`PROTO ${meta.shortLabel} - ${meta.summary}`, "info");
-				}
-				return;
-			}
-
-			if (cmd === "a" || cmd === "b" || cmd === "c") {
-				const upper = cmd.toUpperCase() as Exclude<PrototypeVariant, "off">;
-				setPrototypeVariant(upper);
-				const meta = PROTOTYPE_VARIANTS[upper];
-				ctx.ui.notify(`PROTO ${meta.shortLabel} - ${meta.summary}`, "info");
+			if (!cmd || cmd === "on" || cmd === "a" || cmd === "b" || cmd === "c" || cmd === "next") {
+				const target: Exclude<PrototypeVariant, "off"> =
+					cmd === "a" ? "A" : cmd === "c" ? "C" : "B";
+				setPrototypeVariant(target);
+				ctx.ui.notify("Unified prototype UI enabled.", "info");
 				return;
 			}
 
@@ -620,7 +614,7 @@ export function registerPrototypeShowcaseFeature(pi: ExtensionAPI): void {
 			if (cmd === "demo" || cmd === "sample") {
 				mountDemo(ctx);
 				ctx.ui.notify(
-					"Mounted multi-turn #34 showcase at bottom of transcript (Skill Chip, 2-tone Code, Sticky + Outline Rail)!",
+					"Mounted multi-turn #34 showcase at bottom of transcript (Skill Chip, 2-tone Code, Sticky + Outline Rail).",
 					"info",
 				);
 				return;
@@ -650,7 +644,7 @@ export function registerPrototypeShowcaseFeature(pi: ExtensionAPI): void {
 			}
 
 			ctx.ui.notify(
-				"Usage: /proto [A|B|C|demo|clear|stats|translate|off] (or Alt+V / click Header Proto pill).",
+				"Usage: /proto [on|off|demo|clear|stats|translate].",
 				"info",
 			);
 		},

@@ -83,6 +83,10 @@ interface CompositedFrameGeometry {
 	readonly railRect?: LayoutRect & {
 		readonly originY: number;
 	};
+	readonly bottomArrowHit?: {
+		readonly x: number;
+		readonly y: number;
+	};
 }
 
 interface RawSgrMouse {
@@ -486,7 +490,12 @@ export class ViewportChromeCompositor {
 		};
 	}
 
-	compositeFrame(screen: string[], layout: { root?: LayoutBoxNode } | undefined, totalWidth: number): string[] {
+	compositeFrame(
+		screen: string[],
+		layout: { root?: LayoutBoxNode } | undefined,
+		totalWidth: number,
+		minimalBottomArrow = false,
+	): string[] {
 		if (this.disposed) {
 			this.lastGeometry = undefined;
 			return screen;
@@ -508,8 +517,9 @@ export class ViewportChromeCompositor {
 				boxRect.width >= railMargin + 1,
 		);
 
-		/* In over-scrollbar mode (Variant A), hide native scrollbar while rail is active so only one edge scale renders */
-		if (overScrollbar && railVisible) {
+		/* In over-scrollbar mode, hide native block scrollbar so cards keep stable 2-col outer margins
+		   and Outline Rail owns the right 2-col canvas gutter cleanly */
+		if (overScrollbar) {
 			if (this.scroll.scrollbar !== "hidden") {
 				this.scroll.setScrollbar("hidden");
 				this.scrollbarHiddenByRail = true;
@@ -669,11 +679,40 @@ export class ViewportChromeCompositor {
 			this.slots.rightRail?.clearHover?.();
 		}
 
+		let bottomArrowHit: CompositedFrameGeometry["bottomArrowHit"];
+		if (minimalBottomArrow && boxRect.height >= 4 && boxRect.width >= 24) {
+			const contentH = Number((this.scroll as unknown as { contentHeight?: number }).contentHeight ?? 0);
+			const notAtBottom =
+				contentH > boxRect.height && (this.scroll.scrollTop ?? 0) < contentH - boxRect.height;
+			if (notAtBottom) {
+				const bottomRow = boxRect.y + boxRect.height - 1;
+				if (bottomRow >= 0 && bottomRow < (result ?? screen).length) {
+					if (!result) result = [...screen];
+					const baseRow = result[bottomRow] ?? "";
+					const isImgRow = baseRow.includes("\x1b_G") || baseRow.includes("\x1b]1337;File=");
+					if (!isImgRow) {
+						const arrowCol = boxRect.x + Math.floor((boxRect.width - 1) / 2);
+						const bgAtArrow = extractActiveBgSgrAtColumn(baseRow, arrowCol);
+						const arrowGlyph = `${bgAtArrow || "\x1b[49m"}\x1b[38;2;104;118;142m▼\x1b[39m`;
+						result[bottomRow] = compositeTuiLine(
+							baseRow,
+							arrowGlyph,
+							arrowCol,
+							1,
+							totalWidth,
+						);
+						bottomArrowHit = { x: arrowCol, y: bottomRow };
+					}
+				}
+			}
+		}
+
 		this.lastGeometry = {
 			boxRect,
 			scrollbarCol,
 			stickyRect,
 			railRect,
+			bottomArrowHit,
 		};
 
 		return result ?? screen;
@@ -929,7 +968,20 @@ export class ViewportChromeCompositor {
 			return false;
 		}
 
-		const { railRect, stickyRect } = this.lastGeometry;
+		const { railRect, stickyRect, bottomArrowHit } = this.lastGeometry;
+		if (
+			bottomArrowHit &&
+			Math.abs(raw.x - bottomArrowHit.x) <= 1 &&
+			raw.y === bottomArrowHit.y
+		) {
+			if (type === "press") return true;
+			if (type === "release") {
+				this.scroll.scrollToEnd?.();
+				self.requestRender?.();
+				return true;
+			}
+			return false;
+		}
 		const overScrollbar = this.slots.rightRail?.railPlacement === "over-scrollbar";
 		const onScrollbar =
 			!overScrollbar &&

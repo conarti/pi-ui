@@ -394,7 +394,7 @@ export class ThinkingBlock implements Component {
 		light: boolean,
 		activeTheme: Theme,
 	): string[] {
-		const outerPad = width >= 48 ? 2 : 1;
+		const outerPad = width >= 48 ? 4 : 2;
 		const rightClearance = width >= 48 ? 4 : 1;
 		const margin = " ".repeat(outerPad);
 		const usableWidth = Math.max(12, width - outerPad - rightClearance);
@@ -593,15 +593,16 @@ export class ThinkingBlock implements Component {
 		const label = formatThoughtLabel(this.durationMs);
 
 		if (!this.isExpanded) {
-			const collapsedSpine = isHovered
+			const collapsedDiamond = isHovered
 				? light
-					? fgRgb(37, 99, 235, "❙")
-					: fgRgb(97, 175, 239, "❙")
+					? fgRgb(37, 99, 235, "◆")
+					: fgRgb(136, 196, 252, "◆")
 				: light
-					? fgRgb(148, 163, 184, "❙")
-					: fgRgb(78, 92, 114, "❙");
+					? fgRgb(124, 138, 160, "◆")
+					: fgRgb(104, 118, 142, "◆");
+			const hoverCue = isHovered ? dimHint(" ›") : "";
 			const line = truncateToWidth(
-				`${margin}${collapsedSpine} ${headerMuted(`› ${label}`)}${seamBadge}`,
+				`${margin}${collapsedDiamond} ${headerMuted(label)}${seamBadge}${hoverCue}`,
 				width - rightClearance,
 				"…",
 			);
@@ -609,13 +610,15 @@ export class ThinkingBlock implements Component {
 		}
 
 		const openSpine = light ? fgRgb(148, 163, 184, "│") : fgRgb(76, 92, 118, "│");
-		const topSpine = isHovered
+		const openDiamond = isHovered
 			? light
-				? fgRgb(37, 99, 235, variant === "B" ? "┃" : "│")
-				: fgRgb(97, 175, 239, variant === "B" ? "┃" : "│")
-			: openSpine;
+				? fgRgb(37, 99, 235, "◆")
+				: fgRgb(136, 196, 252, "◆")
+			: light
+				? fgRgb(124, 138, 160, "◆")
+				: fgRgb(104, 118, 142, "◆");
 		const hdr = truncateToWidth(
-			`${margin}${topSpine} ${headerMuted(`⌄ ${label}`)}${seamBadge}`,
+			`${margin}${openDiamond} ${headerMuted(label)}${seamBadge} ${dimHint("⌄")}`,
 			width - rightClearance,
 			"…",
 		);
@@ -824,11 +827,15 @@ export function installAssistantTranscriptBlocks(): void {
 			self.contentContainer.clear();
 			const previousSlots: Array<{ kind: string; markdown: Markdown }> = self.markdownSlots ?? [];
 			self.markdownSlots = [];
-			const chatPad = Math.max(2, self.outputPad ?? 1);
+			const protoNow = isPrototypeActive();
+			const chatPad = protoNow ? 4 : Math.max(2, self.outputPad ?? 1);
 
 			const markdownBlock = (kind: string, text: string, create: () => Markdown) => {
 				const slot = previousSlots[self.markdownSlots.length];
-				const markdown = slot?.kind === kind ? slot.markdown : create();
+				const markdown =
+					slot?.kind === kind && (slot.markdown as unknown as { paddingX?: number }).paddingX === chatPad
+						? slot.markdown
+						: create();
 				markdown.setText(text);
 				self.markdownSlots.push({ kind, markdown });
 				return markdown;
@@ -1004,20 +1011,37 @@ export function installAssistantTranscriptBlocks(): void {
 			if (message?.stopReason === "length") {
 				self.contentContainer.addChild(new Spacer(1));
 				self.contentContainer.addChild(
-					new Text(themeRef.fg("error", "Ответ обрезан по лимиту токенов."), chatPad, 0),
+					new Text(
+						themeRef.fg(
+							"error",
+							protoNow
+								? "Response truncated at token limit."
+								: "Ответ обрезан по лимиту токенов.",
+						),
+						chatPad,
+						0,
+					),
 				);
 			} else if (!hasToolCalls) {
 				if (message?.stopReason === "aborted") {
 					const abortMsg =
 						message.errorMessage && message.errorMessage !== "Request was aborted"
 							? message.errorMessage
-							: "Остановлено";
+							: protoNow
+								? "Stopped"
+								: "Остановлено";
 					self.contentContainer.addChild(new Spacer(1));
 					self.contentContainer.addChild(new Text(themeRef.fg("muted", `⏹ ${abortMsg}`), chatPad, 0));
 				} else if (message?.stopReason === "error") {
 					const errMsg = message.errorMessage || "Unknown error";
 					self.contentContainer.addChild(new Spacer(1));
-					self.contentContainer.addChild(new Text(themeRef.fg("error", `Ошибка: ${errMsg}`), chatPad, 0));
+					self.contentContainer.addChild(
+						new Text(
+							themeRef.fg("error", protoNow ? `Error: ${errMsg}` : `Ошибка: ${errMsg}`),
+							chatPad,
+							0,
+						),
+					);
 				}
 			}
 		},

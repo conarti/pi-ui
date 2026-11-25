@@ -527,7 +527,7 @@ export function renderUserPromptCardLines(
 	const bodyRgb: RgbTuple = light ? [24, 33, 47] : [224, 232, 245];
 	const dimRgb: RgbTuple = palette.codeMetaFg;
 
-	/* 1. Extract <skill name="..."> blocks into clickable thematic Skill Chips */
+	/* 1. Extract <skill name="..."> blocks into calm clickable /skill chips */
 	const skillExtraction = extractSkillInvocations(cleanRaw);
 	const skillDescriptors: PromptPillDescriptor[] = [];
 	const styledSkills: string[] = [];
@@ -566,92 +566,28 @@ export function renderUserPromptCardLines(
 
 	let combinedText: string;
 	if (styledSkills.length > 0 && formattedUserBody) {
-		if (variant === "B" && !options.compactRibbon) {
-			combinedText = `${styledSkills.join(" ")}\n${formattedUserBody}`;
-		} else {
-			combinedText = `${styledSkills.join(" ")} ${formattedUserBody}`;
-		}
+		combinedText = `${styledSkills.join(" ")} ${formattedUserBody}`;
 	} else if (styledSkills.length > 0) {
 		combinedText = styledSkills.join(" ");
 	} else {
 		combinedText = formattedUserBody;
 	}
 
-	/* 4-column right plumb line aligns HH:MM & Copy clear of Outline Rail (width-3..width-2) + scrollbar (width-1) */
-	const rightGuard = width >= 48 ? 4 : width >= 32 ? 2 : 1;
-	const rightPad = " ".repeat(rightGuard);
+	/* Grok outer canvas margin: 2 spaces left and 2 spaces right so the card aligns 1:1 with Composer ╭───╮
+	   and leaves the 2-column right canvas gutter clean for Outline Rail */
+	const outerPad = width >= 40 ? 2 : 0;
+	const outerMargin = " ".repeat(outerPad);
+	const cardWidth = Math.max(12, width - outerPad * 2);
 
-	const hasLeftBar = variant === "B";
-	const edgeBar = hasLeftBar ? themeFgRgb(theme, chevronRgb, "▎") : "";
-	const padBar = hasLeftBar ? themeFgRgb(theme, palette.borderSubtle, "▎") : "";
-
-	const ordinalPrefix =
-		options.surface === "sticky" && variant === "B" && options.turnOrdinal !== undefined
-			? `${themeFgRgb(theme, dimRgb, `#${options.turnOrdinal}`)} `
-			: "";
-
-	const firstPrefix = hasLeftBar
-		? ` ${edgeBar} ${ordinalPrefix}${themeFgRgb(theme, chevronRgb, "› ")}`
-		: `  ${ordinalPrefix}${themeFgRgb(theme, chevronRgb, "› ")}`;
+	const innerPad = cardWidth >= 28 ? "  " : " ";
+	const firstPrefix = `${innerPad}${themeFgRgb(theme, chevronRgb, "› ")}`;
 	const prefixWidth = visibleWidth(firstPrefix);
-	const nextPrefix = hasLeftBar
-		? ` ${edgeBar}${" ".repeat(Math.max(1, prefixWidth - 2))}`
-		: " ".repeat(prefixWidth);
+	const nextPrefix = " ".repeat(prefixWidth);
 
-	/* Fixed meta gutter reserves room so hover Copy never shifts text wrapping by even 1 column */
-	const metaGutterWidth =
-		width >= 56
-			? variant === "A"
-				? 14 + rightGuard
-				: 10 + rightGuard
-			: width >= 34
-				? 7 + rightGuard
-				: 0;
-	const textAvail = Math.max(6, width - prefixWidth - metaGutterWidth);
+	const timeGutterWidth = cardWidth >= 32 ? 9 : cardWidth >= 22 ? 7 : 0;
+	const textAvail = Math.max(6, cardWidth - prefixWidth - timeGutterWidth);
 
 	const taggedText = tagFormattedPillsWithOsc8(combinedText, allPills);
-
-	/* Variant C collapsed Sticky Prompt: ultra-slim 1-line condensed ribbon */
-	if (options.compactRibbon) {
-		const singleLogical = taggedText.replace(/\n+/g, "  ").trim();
-		const fullWrapped = wrapTextWithAnsi(singleLogical, textAvail);
-		const totalContentLines = Math.max(1, fullWrapped.length);
-		const truncated = totalContentLines > 1;
-		const hiddenLineCount = Math.max(0, totalContentLines - 1);
-
-		let firstLine = fullWrapped[0] ?? "";
-		if (truncated) {
-			const foldTag = ` · +${hiddenLineCount} ▾`;
-			const maxSlice = Math.max(4, textAvail - visibleWidth(foldTag));
-			const baseClip =
-				visibleWidth(firstLine) > maxSlice
-					? truncateToWidth(firstLine, maxSlice, "…")
-					: firstLine;
-			firstLine = `${baseClip}${themeFgRgb(theme, chevronRgb, foldTag)}`;
-		}
-
-		const { cleanedRow, hits } = extractAndStripPillHits(firstLine, 0, prefixWidth, allPills);
-		const styledBody = styleBodyPreservingPills(cleanedRow, bodyRgb);
-		const timeStr = options.formattedTime && metaGutterWidth > 0 ? options.formattedTime : "";
-		const rightStyled = timeStr ? `${themeFgRgb(theme, dimRgb, timeStr)}${rightPad}` : "";
-		const gap = " ".repeat(
-			Math.max(0, width - prefixWidth - visibleWidth(styledBody) - visibleWidth(rightStyled)),
-		);
-		const ribbonRow = paintThemeSurfaceRow(
-			theme,
-			`${firstPrefix}${styledBody}${gap}${rightStyled}`,
-			width,
-			surfaceRgb,
-		);
-		return {
-			lines: [ribbonRow],
-			totalContentLines,
-			hiddenLineCount,
-			truncated,
-			pillHits: hits,
-		};
-	}
-
 	const wrappedRows: string[] = [];
 	for (const logical of taggedText.split("\n")) {
 		const chunks = wrapTextWithAnsi(logical, textAvail);
@@ -671,7 +607,7 @@ export function renderUserPromptCardLines(
 		if (lastIdx >= 0) {
 			const foldHint =
 				options.surface === "sticky"
-					? ` · +${hidden} ${hidden === 1 ? "line" : "lines"} ▾`
+					? ` · +${hidden} ${hidden === 1 ? "line" : "lines"}`
 					: "…";
 			const hintW = visibleWidth(foldHint);
 			const trimmedLast = visibleRows[lastIdx]!.replace(/\s+$/, "");
@@ -686,48 +622,23 @@ export function renderUserPromptCardLines(
 				visibleRows[lastIdx] = `${truncateToWidth(trimmedLast, Math.max(1, textAvail - hintW), "")}${styledHint}`;
 			}
 		}
-	} else if (options.surface === "sticky" && options.isExpandedSticky && visibleRows.length > 0) {
-		const collapseHint = "  ▴ Collapse";
-		const lastIdx = visibleRows.length - 1;
-		const trimmedLast = visibleRows[lastIdx]!.replace(/\s+$/, "");
-		if (visibleWidth(trimmedLast) + visibleWidth(collapseHint) <= textAvail) {
-			visibleRows[lastIdx] = `${trimmedLast}${themeFgRgb(theme, chevronRgb, collapseHint)}`;
-		}
 	}
 
 	const hiddenLineCount = Math.max(0, totalContentLines - visibleRows.length);
+	const paintCardRow = (inner: string): string =>
+		`${outerMargin}${paintThemeSurfaceRow(theme, inner, cardWidth, surfaceRgb)}${outerMargin}`;
 
-	/* Vertical padding: A & B keep pure-air vpad=1; C uses compact vpad=0 on 1-2 line prompts */
-	const useVpad =
-		variant === "C"
-			? visibleRows.length >= 3 && options.surface === "transcript"
-			: options.surface === "sticky" && variant === "A"
-				? false
-				: true;
-
-	const lines: string[] = [];
-	const topPadRows = useVpad ? 1 : 0;
-	if (topPadRows > 0) {
-		lines.push(
-			paintThemeSurfaceRow(
-				theme,
-				hasLeftBar ? ` ${padBar}` : "",
-				width,
-				surfaceRgb,
-			),
-		);
-	}
-
-	let copyHit: PromptCardHitBox | undefined;
+	/* Grok vpad = 1: pure empty card row top and bottom (never text or flashing Copy buttons) */
+	const lines: string[] = [paintCardRow("")];
 	const pillHits: PromptPillHitTarget[] = [];
 
 	for (let i = 0; i < visibleRows.length; i++) {
-		const rowY = topPadRows + i;
+		const rowY = 1 + i;
 		const prefix = i === 0 ? firstPrefix : nextPrefix;
 		const { cleanedRow, hits } = extractAndStripPillHits(
 			visibleRows[i]!,
 			rowY,
-			prefixWidth,
+			outerPad + prefixWidth,
 			allPills,
 		);
 		if (hits.length > 0) {
@@ -735,91 +646,22 @@ export function renderUserPromptCardLines(
 		}
 		const styledBody = styleBodyPreservingPills(cleanedRow, bodyRgb);
 
-		let rightStyled = "";
-		if (i === 0 && metaGutterWidth > 0) {
-			const timeStr = options.formattedTime ?? "";
-			const showCopy =
-				Boolean(options.showCopyBadge) && Boolean(options.hovered || options.copied) && width >= 36;
-
-			if (showCopy) {
-				if (variant === "A") {
-					const copyText = options.copied ? "✓ Copied" : "Copy";
-					const styledCopy = options.copied
-						? themeFgRgb(theme, palette.success, copyText)
-						: themeFgRgb(theme, chevronRgb, copyText);
-					const timeSuffix =
-						timeStr && width >= 56
-							? `${themeFgRgb(theme, dimRgb, " · ")}${themeFgRgb(theme, dimRgb, timeStr)}`
-							: "";
-					rightStyled = `${styledCopy}${timeSuffix}${rightPad}`;
-					const totalRightW = visibleWidth(rightStyled);
-					const copyStart = width - totalRightW;
-					copyHit = {
-						y: rowY,
-						xStart: Math.max(0, copyStart - 1),
-						xEnd: Math.min(width - 1, copyStart + visibleWidth(copyText)),
-					};
-				} else {
-					const copyText = options.copied
-						? "✓ Copied"
-						: variant === "B"
-							? "[Copy]"
-							: "Copy";
-					const styledCopy = options.copied
-						? themeFgRgb(theme, palette.success, copyText)
-						: themeFgRgb(theme, chevronRgb, copyText);
-					rightStyled = `${styledCopy}${rightPad}`;
-					const copyStart = width - visibleWidth(rightStyled);
-					copyHit = {
-						y: rowY,
-						xStart: Math.max(0, copyStart - 1),
-						xEnd: Math.min(width - 1, copyStart + visibleWidth(copyText)),
-					};
-				}
-			} else if (timeStr) {
-				rightStyled = `${themeFgRgb(theme, dimRgb, timeStr)}${rightPad}`;
-			}
-		}
-
+		const timeStr = i === 0 && options.formattedTime && timeGutterWidth > 0 ? options.formattedTime : "";
+		const rightStyled = timeStr ? `${themeFgRgb(theme, dimRgb, timeStr)}${innerPad}` : "";
 		const gap = " ".repeat(
-			Math.max(0, width - prefixWidth - visibleWidth(styledBody) - visibleWidth(rightStyled)),
+			Math.max(0, cardWidth - prefixWidth - visibleWidth(styledBody) - visibleWidth(rightStyled)),
 		);
-		lines.push(
-			paintThemeSurfaceRow(
-				theme,
-				`${prefix}${styledBody}${gap}${rightStyled}`,
-				width,
-				surfaceRgb,
-			),
-		);
+		lines.push(paintCardRow(`${prefix}${styledBody}${gap}${rightStyled}`));
 	}
 
-	if (options.bottomHairline) {
-		lines.push(
-			paintThemeSurfaceRow(
-				theme,
-				themeFgRgb(theme, palette.borderSubtle, "─".repeat(width)),
-				width,
-				surfaceRgb,
-			),
-		);
-	} else if (useVpad) {
-		lines.push(
-			paintThemeSurfaceRow(
-				theme,
-				hasLeftBar ? ` ${padBar}` : "",
-				width,
-				surfaceRgb,
-			),
-		);
-	}
+	lines.push(paintCardRow(""));
 
 	return {
 		lines,
 		totalContentLines,
 		hiddenLineCount,
 		truncated,
-		copyHit,
+		copyHit: undefined,
 		pillHits,
 	};
 }
