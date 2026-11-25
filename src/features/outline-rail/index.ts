@@ -78,7 +78,11 @@ export function createOutlineRailSlot(
 		const termCols = shell.tui.terminal?.columns ?? 80;
 		const termRows = shell.tui.terminal?.rows ?? 30;
 		const viewportRows = shell.scroll.viewportHeight || termRows;
-		const maxText = Math.max(16, Math.min(40, Math.floor((termCols - RAIL_WIDTH - 2) * 0.48)));
+		const maxCardW = Math.max(10, termCols - RAIL_WIDTH - 5);
+		const maxText = Math.max(
+			6,
+			Math.min(40, maxCardW - 4, Math.floor((termCols - RAIL_WIDTH - 2) * 0.55)),
+		);
 
 		const entries = ctx.sessionManager?.getEntries?.() ?? ctx.sessionManager?.getBranch?.();
 		const reconstructed = reconstructTurnPromptText(turn.prompt, {
@@ -90,11 +94,11 @@ export function createOutlineRailSlot(
 		const bodyLines = wrapPreviewLines(previewSource, maxText);
 		const timeText = turn.formattedTime ?? "";
 		const contentW = Math.max(
-			10,
+			Math.min(10, maxText),
 			visibleWidth(timeText),
 			...bodyLines.map(visibleWidth),
 		);
-		const cardW = Math.min(Math.max(14, termCols - RAIL_WIDTH - 5), contentW + 4);
+		const cardW = Math.min(maxCardW, contentW + 4);
 		const cardH = (bodyLines.length || 1) + 2 + (timeText ? 1 : 0);
 
 		const maxRow = Math.max(0, Math.min(termRows - cardH, viewportRows - cardH));

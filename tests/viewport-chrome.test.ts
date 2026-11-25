@@ -774,4 +774,45 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 		expect(shortExpanded.rowText(3)).not.toContain("…");
 		expect(shortExpanded.rowText(4)).toContain("Hidden line 4");
 	});
+
+	it("renders Outline Rail, Hover Popup, and Sticky Prompt together in narrow 46-column split panes", async () => {
+		const t1 = new Date(2026, 3, 19, 10, 15).getTime();
+		const t2 = new Date(2026, 3, 19, 10, 42).getTime();
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 46,
+			height: 35,
+			initialEntries: [
+				makeUserEntry("u1", null, "First split-pane prompt alpha", t1),
+				makeAssistantEntry("a1", "u1", buildLines("reply1", 24), t1 + 1000),
+				makeUserEntry("u2", "a1", "Second split-pane prompt beta", t2),
+				makeAssistantEntry("a2", "u2", buildLines("reply2", 24), t2 + 1000),
+			],
+		});
+
+		await harness.mouseWheel("up", 20, 10, 5);
+		const scrolled = harness.screen();
+		expect(scrolled.sliceText(1, 0, 43)).toContain("First split-pane prompt");
+
+		const railSlices = Array.from({ length: scrolled.height }, (_, r) =>
+			scrolled.sliceText(r, 43, 45),
+		);
+		const upRow = railSlices.findIndex((s) => s === " ▲");
+		const downRow = railSlices.findIndex((s) => s === " ▼");
+		expect(upRow).toBeGreaterThanOrEqual(0);
+		expect(downRow).toBeGreaterThan(upRow);
+		expect(railSlices.slice(upRow + 1, downRow)).toEqual([" ─", "──"]);
+
+		const rail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
+		await harness.mouseMove(44, upRow + 1);
+		const hovered = harness.screen();
+		expect(hovered.sliceText(upRow, 43, 45)).toBe(" ▲");
+		expect(hovered.sliceText(upRow + 1, 43, 45)).toBe("━━");
+		expect(hovered.sliceText(downRow, 43, 45)).toBe(" ▼");
+		expect(hovered.text()).toContain("10:15");
+		expect(hovered.text()).toContain("First split-pane");
+
+		await harness.mouseClick(44, upRow + 1);
+		expect(getActiveHostRuntime()!.scroll!.scrollTop).toBe(rail.offsetOf(0));
+	});
 });

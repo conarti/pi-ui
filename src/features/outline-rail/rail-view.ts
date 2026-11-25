@@ -14,7 +14,7 @@ import { claimHover } from "../../shared/runtime-hooks.ts";
 import { sanitizeTurnText, type IndexedTurn, type TranscriptTurnIndex } from "../../shared/turn-index.ts";
 
 export const RAIL_WIDTH = 2;
-export const MIN_TERMINAL_WIDTH_FOR_RAIL = 64;
+export const MIN_TERMINAL_WIDTH_FOR_RAIL = 24;
 export const MIN_TURNS_FOR_RAIL = 2;
 
 export type RailHit = { kind: "tick"; turn: number } | { kind: "up" } | { kind: "down" };
