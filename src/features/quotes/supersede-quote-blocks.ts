@@ -22,6 +22,10 @@ export function withConartiInternalRegistration<T>(fn: () => T): T {
 	}
 }
 
+export function isConartiInternalRegistrationActive(): boolean {
+	return internalRegistrationDepth > 0;
+}
+
 export function isSupersededQuoteBlocksExtension(ext: unknown): boolean {
 	if (!ext || typeof ext !== "object") return false;
 	const rec = ext as {
