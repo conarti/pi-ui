@@ -22,3 +22,7 @@ Default five-role vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `
 ### Domain docs
 
 Single-context layout (`GLOSSARY.md` at repo root and `docs/adr/`, created lazily). See `docs/agents/domain.md`.
+
+### Prototyping
+
+UI prototypes target Pi's terminal TUI rather than web routes. Before running `/prototype` for UI changes, read `docs/agents/prototyping.md`.
