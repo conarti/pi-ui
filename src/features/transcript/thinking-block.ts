@@ -635,7 +635,7 @@ export class ThinkingBlock implements Component {
 		const light = isLightTheme(activeTheme);
 		const variant = getPrototypeVariant();
 		if (variant !== "off") {
-			return this.renderPrototypeVariant(variant, width, light, activeTheme);
+			return this.renderPrototypeVariant("B", width, light, activeTheme);
 		}
 
 		const outerPad = width >= 48 ? 2 : 1;
@@ -714,8 +714,7 @@ export class ThinkingBlock implements Component {
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		const protoActive = isPrototypeActive();
-		const variant = getPrototypeVariant();
-		const isSingleRow = !this.isExpanded && (!this.isStreamingNow || variant === "A");
+		const isSingleRow = !this.isExpanded && !this.isStreamingNow;
 		const onHeaderRow = isSingleRow || event.y === 0;
 
 		if (event.type === "move") {
@@ -733,11 +732,10 @@ export class ThinkingBlock implements Component {
 			return undefined;
 		}
 
-		/* В Variant B и Variant C колесо мыши над стримящимся компактным окном прокручивает ранние строки мысли */
-		const streamWindowLines = variant === "C" ? STREAMING_BOX_LINES : STREAMING_PAGE_LINES;
+		/* Колесо мыши над 6-строчным окном стриминга прокручивает ранние строки мысли (#33) */
+		const streamWindowLines = STREAMING_PAGE_LINES;
 		if (
 			protoActive &&
-			(variant === "B" || variant === "C") &&
 			this.isStreamingNow &&
 			!this.isExpanded &&
 			this.lastTotalStreamLines > streamWindowLines

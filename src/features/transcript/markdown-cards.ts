@@ -19,15 +19,32 @@ import {
 	hookMethod,
 } from "../../shared/runtime-hooks.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
-import { isPrototypeActive } from "./prototype-state.ts";
+import { getPrototypeVariant, isPrototypeActive } from "./prototype-state.ts";
+
+type CodeActionLayout = "legacy-header" | "footer" | "smart-header" | "inline-hover" | "corner";
+
+interface CachedBlockCodeMeta {
+	readonly lang: string;
+	readonly raw: string;
+	readonly layout: CodeActionLayout;
+	readonly actionOffset: number;
+	readonly totalRows: number;
+	readonly rightGuard: number;
+	readonly cardWidth: number;
+}
 
 interface CodeZone {
-	id: string;
-	lang: string;
-	raw: string;
-	headerRow: number;
-	btnStart: number;
-	btnEnd: number;
+	readonly id: string;
+	readonly lang: string;
+	readonly raw: string;
+	readonly layout: CodeActionLayout;
+	readonly startRow: number;
+	readonly endRow: number;
+	readonly actionRow: number;
+	readonly btnStart: number;
+	readonly btnEnd: number;
+	readonly cardWidth: number;
+	readonly rightGuard: number;
 }
 
 const markdownCopyTimers = createCopyFeedbackTimerRegistry<{
@@ -39,6 +56,136 @@ const markdownCopyTimers = createCopyFeedbackTimerRegistry<{
 
 export function clearMarkdownCopyTimers(): void {
 	markdownCopyTimers.clearAll();
+}
+
+function renderCodeBodyLines(
+	self: any,
+	rawCode: string,
+	lang: string,
+	codeInnerW: number,
+): string[] {
+	let highlighted: string[];
+	if (typeof self.theme?.highlightCode === "function") {
+		const cacheKey = `${lang}\0${rawCode}`;
+		highlighted = self.blockHighlightedCode?.get(cacheKey);
+		if (!highlighted) {
+			highlighted = self.theme.highlightCode(rawCode, lang || undefined);
+			self.blockHighlightedCode?.set(cacheKey, highlighted);
+		}
+	} else {
+		highlighted = rawCode.split("\n").map((l: string) => self.theme.codeBlock(l));
+	}
+
+	const wrappedOut: string[] = [];
+	for (const hlLine of highlighted) {
+		const expandedTabs = hlLine.replace(/\t/g, "  ");
+		const wrapped = wrapTextWithAnsi(expandedTabs, codeInnerW);
+		for (const wLine of wrapped.length > 0 ? wrapped : [""]) {
+			wrappedOut.push(wLine);
+		}
+	}
+	return wrappedOut.length > 0 ? wrappedOut : [""];
+}
+
+function buildFooterActionRow(
+	activeTheme: any,
+	palette: ReturnType<typeof getThemeSurfacePalette>,
+	cardW: number,
+	lang: string,
+	state: "rest" | "hover" | "copied",
+): { line: string; btnWidth: number } {
+	const copyText = state === "copied" ? "✓ Copied" : "Copy";
+	const styledBtn =
+		state === "copied"
+			? themeFgRgb(activeTheme, palette.success, copyText)
+			: state === "hover"
+				? themeBgRgb(
+						activeTheme,
+						palette.codeHeaderActiveBg,
+						themeFgRgb(
+							activeTheme,
+							palette.isLight ? palette.accent : palette.accentBright,
+							` ${copyText} `,
+						),
+					)
+				: themeFgRgb(activeTheme, palette.codeActionMutedFg, `[${copyText}]`);
+	const langPart = lang
+		? `${themeFgRgb(activeTheme, palette.codeMetaFg, lang)}${themeFgRgb(activeTheme, palette.borderSubtle, " · ")}`
+		: "";
+	const rightCluster = `${langPart}${styledBtn} `;
+	const padLeft = " ".repeat(Math.max(0, cardW - visibleWidth(rightCluster)));
+	return {
+		line: paintThemeSurfaceRow(
+			activeTheme,
+			`${padLeft}${rightCluster}`,
+			cardW,
+			palette.codeFooterBg,
+		),
+		btnWidth: visibleWidth(styledBtn) + 2,
+	};
+}
+
+function buildSmartHeaderRow(
+	activeTheme: any,
+	palette: ReturnType<typeof getThemeSurfacePalette>,
+	cardW: number,
+	lang: string,
+	state: "rest" | "hover" | "copied",
+): { line: string; btnWidth: number } {
+	const leftLabel = lang || "snippet";
+	const leftHdr = `  ${themeFgRgb(activeTheme, palette.codeMetaFg, leftLabel)}`;
+	const copyText = state === "copied" ? "✓ Copied" : "Copy";
+	const badge =
+		state === "copied"
+			? themeFgRgb(activeTheme, palette.success, `${copyText}  `)
+			: state === "hover"
+				? `${themeBgRgb(
+						activeTheme,
+						palette.codeHeaderActiveBg,
+						themeFgRgb(
+							activeTheme,
+							palette.isLight ? palette.accent : palette.accentBright,
+							` ${copyText} `,
+						),
+					)} `
+				: themeFgRgb(activeTheme, palette.codeActionMutedFg, `${copyText}  `);
+	const gap = " ".repeat(Math.max(1, cardW - visibleWidth(leftHdr) - visibleWidth(badge)));
+	return {
+		line: paintThemeSurfaceRow(
+			activeTheme,
+			`${leftHdr}${gap}${badge}`,
+			cardW,
+			palette.codeHeaderBg,
+		),
+		btnWidth: visibleWidth(badge) + 2,
+	};
+}
+
+function buildCornerPillBadge(
+	activeTheme: any,
+	palette: ReturnType<typeof getThemeSurfacePalette>,
+	lang: string,
+	state: "rest" | "hover" | "copied",
+): { pill: string; copyHitWidth: number } {
+	const copyText = state === "copied" ? "✓ Copied" : "Copy";
+	const bg = state === "hover" ? palette.codeHeaderActiveBg : palette.codeHeaderBg;
+	const copyStyled =
+		state === "copied"
+			? themeFgRgb(activeTheme, palette.success, copyText)
+			: state === "hover"
+				? themeFgRgb(
+						activeTheme,
+						palette.isLight ? palette.accent : palette.accentBright,
+						copyText,
+					)
+				: themeFgRgb(activeTheme, palette.codeMetaActiveFg, copyText);
+	const inner = lang
+		? ` ${themeFgRgb(activeTheme, palette.codeMetaFg, lang)}${themeFgRgb(activeTheme, palette.borderSubtle, " · ")}${copyStyled} `
+		: ` ${copyStyled} `;
+	return {
+		pill: themeBgRgb(activeTheme, bg, inner),
+		copyHitWidth: visibleWidth(copyText) + 3,
+	};
 }
 
 export function installMarkdownCardsAndHeadings(): void {
@@ -95,46 +242,33 @@ export function installMarkdownCardsAndHeadings(): void {
 				!self.defaultTextStyle?.bgColor &&
 				width >= 16
 			) {
+				const variant = getPrototypeVariant();
 				const lang = String(token.lang || "").trim();
 				const rawCode = String(token.text ?? "");
 				const activeTheme = getActiveGlobalTheme(self?.theme);
 				const palette = getThemeSurfacePalette(activeTheme);
 
-				const cardW = Math.max(12, width);
-				const codeInnerW = Math.max(6, cardW - 4);
+				/* Legacy baseline rendering when prototype is off */
+				if (variant === "off") {
+					const cardW = Math.max(12, width);
+					const codeInnerW = Math.max(6, cardW - 4);
+					const langLabel = lang || "code";
+					const leftHdr = `  ${themeFgRgb(activeTheme, palette.codeMetaFg, langLabel)}`;
+					const copyLabel = themeFgRgb(activeTheme, palette.codeActionMutedFg, "Copy  ");
+					const gapHdr = " ".repeat(
+						Math.max(1, cardW - visibleWidth(leftHdr) - visibleWidth(copyLabel)),
+					);
+					const headerLine = paintThemeSurfaceRow(
+						activeTheme,
+						`${leftHdr}${gapHdr}${copyLabel}`,
+						cardW,
+						palette.codeHeaderBg,
+					);
 
-				const langLabel = lang || "code";
-				const leftHdr = `  ${themeFgRgb(activeTheme, palette.codeMetaFg, langLabel)}`;
-				const copyLabel = themeFgRgb(activeTheme, palette.codeActionMutedFg, "Copy  ");
-				const gapHdr = " ".repeat(
-					Math.max(1, cardW - visibleWidth(leftHdr) - visibleWidth(copyLabel)),
-				);
-				const headerLine = paintThemeSurfaceRow(
-					activeTheme,
-					`${leftHdr}${gapHdr}${copyLabel}`,
-					cardW,
-					palette.codeHeaderBg,
-				);
-
-				const out: string[] = [headerLine];
-
-				let highlighted: string[];
-				if (typeof self.theme?.highlightCode === "function") {
-					const cacheKey = `${lang}\0${rawCode}`;
-					highlighted = self.blockHighlightedCode?.get(cacheKey);
-					if (!highlighted) {
-						highlighted = self.theme.highlightCode(rawCode, lang || undefined);
-						self.blockHighlightedCode?.set(cacheKey, highlighted);
-					}
-				} else {
-					highlighted = rawCode.split("\n").map((l: string) => self.theme.codeBlock(l));
-				}
-
-				const rail = themeFgRgb(activeTheme, palette.codeRailFg, "▎");
-				for (const hlLine of highlighted) {
-					const expandedTabs = hlLine.replace(/\t/g, "  ");
-					const wrapped = wrapTextWithAnsi(expandedTabs, codeInnerW);
-					for (const wLine of wrapped.length > 0 ? wrapped : [""]) {
+					const out: string[] = [headerLine];
+					const bodyLines = renderCodeBodyLines(self, rawCode, lang, codeInnerW);
+					const rail = themeFgRgb(activeTheme, palette.codeRailFg, "▎");
+					for (const wLine of bodyLines) {
 						out.push(
 							paintThemeSurfaceRow(
 								activeTheme,
@@ -144,6 +278,152 @@ export function installMarkdownCardsAndHeadings(): void {
 							),
 						);
 					}
+					self.__conartiLastCodeMeta = {
+						lang: langLabel,
+						raw: rawCode,
+						layout: "legacy-header",
+						actionOffset: 0,
+						totalRows: out.length,
+						rightGuard: 0,
+						cardWidth: cardW,
+					} satisfies CachedBlockCodeMeta;
+					if (nextTokenType && nextTokenType !== "space") out.push("");
+					return out;
+				}
+
+				/* Prototype Variants A / B / C: clean 2-space body indent (zero ▎ glyph polluting selection) + 4-col right guard */
+				const rightGuard = width >= 56 ? 4 : 0;
+				const cardW = Math.max(12, width - rightGuard);
+				const codeInnerW = Math.max(6, cardW - 4);
+				const bodyLines = renderCodeBodyLines(self, rawCode, lang, codeInnerW);
+				const out: string[] = [];
+
+				if (variant === "A") {
+					/* Variant A: quiet recessed codeBodyBg block + Grok-style bottom affordance row */
+					for (const wLine of bodyLines) {
+						out.push(
+							paintThemeSurfaceRow(
+								activeTheme,
+								`  ${wLine}`,
+								cardW,
+								palette.codeBodyBg,
+							),
+						);
+					}
+					const footer = buildFooterActionRow(activeTheme, palette, cardW, lang, "rest");
+					const actionOffset = out.length;
+					out.push(footer.line);
+					self.__conartiLastCodeMeta = {
+						lang,
+						raw: rawCode,
+						layout: "footer",
+						actionOffset,
+						totalRows: out.length,
+						rightGuard,
+						cardWidth: cardW,
+					} satisfies CachedBlockCodeMeta;
+				} else if (variant === "B") {
+					/* Variant B: smart two-tone card (skips full-width header on short 1-2 line untyped fences) */
+					const isShortUntyped = !lang && bodyLines.length <= 2;
+					if (isShortUntyped) {
+						for (const wLine of bodyLines) {
+							out.push(
+								paintThemeSurfaceRow(
+									activeTheme,
+									`  ${wLine}`,
+									cardW,
+									palette.codeBodyBg,
+								),
+							);
+						}
+						self.__conartiLastCodeMeta = {
+							lang: "",
+							raw: rawCode,
+							layout: "inline-hover",
+							actionOffset: 0,
+							totalRows: out.length,
+							rightGuard,
+							cardWidth: cardW,
+						} satisfies CachedBlockCodeMeta;
+					} else {
+						const hdr = buildSmartHeaderRow(activeTheme, palette, cardW, lang, "rest");
+						out.push(hdr.line);
+						for (const wLine of bodyLines) {
+							out.push(
+								paintThemeSurfaceRow(
+									activeTheme,
+									`  ${wLine}`,
+									cardW,
+									palette.codeBodyBg,
+								),
+							);
+						}
+						self.__conartiLastCodeMeta = {
+							lang,
+							raw: rawCode,
+							layout: "smart-header",
+							actionOffset: 0,
+							totalRows: out.length,
+							rightGuard,
+							cardWidth: cardW,
+						} satisfies CachedBlockCodeMeta;
+					}
+				} else {
+					/* Variant C: floating top-right two-tone corner pill without full-width header stripe */
+					const corner = buildCornerPillBadge(activeTheme, palette, lang, "rest");
+					const pillW = visibleWidth(corner.pill);
+					const firstBodyW = visibleWidth(bodyLines[0] ?? "") + 4;
+					if (firstBodyW + pillW + 2 <= cardW) {
+						const firstContent = `  ${bodyLines[0] ?? ""}`;
+						const gap = " ".repeat(Math.max(1, cardW - visibleWidth(firstContent) - pillW));
+						out.push(
+							paintThemeSurfaceRow(
+								activeTheme,
+								`${firstContent}${gap}${corner.pill}`,
+								cardW,
+								palette.codeBodyBg,
+							),
+						);
+						for (let idx = 1; idx < bodyLines.length; idx++) {
+							out.push(
+								paintThemeSurfaceRow(
+									activeTheme,
+									`  ${bodyLines[idx]!}`,
+									cardW,
+									palette.codeBodyBg,
+								),
+							);
+						}
+					} else {
+						const padLeft = " ".repeat(Math.max(0, cardW - pillW));
+						out.push(
+							paintThemeSurfaceRow(
+								activeTheme,
+								`${padLeft}${corner.pill}`,
+								cardW,
+								palette.codeBodyBg,
+							),
+						);
+						for (const wLine of bodyLines) {
+							out.push(
+								paintThemeSurfaceRow(
+									activeTheme,
+									`  ${wLine}`,
+									cardW,
+									palette.codeBodyBg,
+								),
+							);
+						}
+					}
+					self.__conartiLastCodeMeta = {
+						lang,
+						raw: rawCode,
+						layout: "corner",
+						actionOffset: 0,
+						totalRows: out.length,
+						rightGuard,
+						cardWidth: cardW,
+					} satisfies CachedBlockCodeMeta;
 				}
 
 				if (nextTokenType && nextTokenType !== "space") out.push("");
@@ -161,20 +441,20 @@ export function installMarkdownCardsAndHeadings(): void {
 		"transcript.renderBlock",
 		(self, args, original) => {
 			const [block, token] = args as [any, any];
+			self.__conartiLastCodeMeta = undefined;
 			const res = original.apply(self, args);
 			if (
 				!self.__conartiThinkingMarkdown &&
 				!self.__conartiSkipReplyCopy &&
 				token?.type === "code" &&
-				!self.defaultTextStyle?.bgColor
+				!self.defaultTextStyle?.bgColor &&
+				self.__conartiLastCodeMeta
 			) {
-				block.__conartiCode = {
-					lang: String(token.lang || "").trim() || "code",
-					raw: String(token.text ?? ""),
-				};
+				block.__conartiCode = self.__conartiLastCodeMeta;
 			} else {
 				block.__conartiCode = undefined;
 			}
+			self.__conartiLastCodeMeta = undefined;
 			return res;
 		},
 		["pi.grok-ui.hook.chat.renderBlock"],
@@ -198,28 +478,41 @@ export function installMarkdownCardsAndHeadings(): void {
 				return baseLines;
 			}
 
+			const activeTheme = getActiveGlobalTheme(self?.theme);
+			const palette = getThemeSurfacePalette(activeTheme);
+			const padX: number = self.paddingX ?? 0;
+
 			const tokenBundle = self.cachedTokens?.deref?.();
 			const blockMap: Map<string, any> | undefined = self.blocks?.deref?.();
 			if (tokenBundle?.tokens && blockMap) {
 				const zones: CodeZone[] = [];
 				let rowCursor: number = self.paddingY ?? 0;
-				const padX: number = self.paddingX ?? 0;
-				const contentWidth = Math.max(1, width - padX * 2);
 
 				for (let i = 0; i < tokenBundle.tokens.length; i++) {
 					const tok = tokenBundle.tokens[i];
 					const blk = blockMap.get(tok.raw);
 					if (!blk?.lines) continue;
-					if (blk.__conartiCode) {
-						const btnEnd = padX + contentWidth;
-						const btnStart = Math.max(padX, btnEnd - 11);
+					const meta = blk.__conartiCode as CachedBlockCodeMeta | undefined;
+					if (meta) {
+						const actionRow = rowCursor + meta.actionOffset;
+						const btnEnd = padX + meta.cardWidth;
+						const btnWidth =
+							meta.layout === "corner"
+								? buildCornerPillBadge(activeTheme, palette, meta.lang, "rest").copyHitWidth
+								: 11;
+						const btnStart = Math.max(padX, btnEnd - btnWidth);
 						zones.push({
 							id: `code-${i}`,
-							lang: blk.__conartiCode.lang,
-							raw: blk.__conartiCode.raw,
-							headerRow: rowCursor,
+							lang: meta.lang,
+							raw: meta.raw,
+							layout: meta.layout,
+							startRow: rowCursor,
+							endRow: rowCursor + Math.max(0, meta.totalRows - 1),
+							actionRow,
 							btnStart,
 							btnEnd,
+							cardWidth: meta.cardWidth,
+							rightGuard: meta.rightGuard,
 						});
 					}
 					rowCursor += blk.lines.length;
@@ -233,41 +526,75 @@ export function installMarkdownCardsAndHeadings(): void {
 
 			const zones: CodeZone[] = self.__conartiCodeZones ?? [];
 			const out = [...baseLines];
-			const padX: number = self.paddingX ?? 0;
-			const contentWidth = Math.max(1, width - padX * 2);
 			const leftMargin = " ".repeat(padX);
-			const rightMargin = " ".repeat(padX);
-			const activeTheme = getActiveGlobalTheme(self?.theme);
-			const palette = getThemeSurfacePalette(activeTheme);
 			const copyAccentFg = palette.isLight ? palette.accent : palette.accentBright;
 
 			for (const z of zones) {
 				const isCopied = copiedZone === z.id;
 				const isHovered = hoveredZone === z.id;
 				if (!isCopied && !isHovered) continue;
-				if (z.headerRow < 0 || z.headerRow >= out.length) continue;
+				if (z.actionRow < 0 || z.actionRow >= out.length) continue;
+				const state: "hover" | "copied" = isCopied ? "copied" : "hover";
 
-				const leftHdr = `  ${themeFgRgb(activeTheme, palette.codeMetaActiveFg, z.lang)}`;
-				const badge = isCopied
-					? themeFgRgb(activeTheme, palette.success, "✓ Copied  ")
-					: themeFgRgb(activeTheme, copyAccentFg, "Copy  ");
-				const gap = " ".repeat(
-					Math.max(1, contentWidth - visibleWidth(leftHdr) - visibleWidth(badge)),
-				);
-				const hdrCard = paintThemeSurfaceRow(
-					activeTheme,
-					`${leftHdr}${gap}${badge}`,
-					contentWidth,
-					palette.codeHeaderActiveBg,
-				);
-				const full = leftMargin + hdrCard + rightMargin;
-				out[z.headerRow] = full + " ".repeat(Math.max(0, width - visibleWidth(full)));
+				if (z.layout === "legacy-header") {
+					const leftHdr = `  ${themeFgRgb(activeTheme, palette.codeMetaActiveFg, z.lang || "code")}`;
+					const badge = isCopied
+						? themeFgRgb(activeTheme, palette.success, "✓ Copied  ")
+						: themeFgRgb(activeTheme, copyAccentFg, "Copy  ");
+					const gap = " ".repeat(
+						Math.max(1, z.cardWidth - visibleWidth(leftHdr) - visibleWidth(badge)),
+					);
+					const hdrCard = paintThemeSurfaceRow(
+						activeTheme,
+						`${leftHdr}${gap}${badge}`,
+						z.cardWidth,
+						palette.codeHeaderActiveBg,
+					);
+					const full = leftMargin + hdrCard;
+					out[z.actionRow] = full + " ".repeat(Math.max(0, width - visibleWidth(full)));
+				} else if (z.layout === "footer") {
+					const footer = buildFooterActionRow(activeTheme, palette, z.cardWidth, z.lang, state);
+					const full = leftMargin + footer.line;
+					out[z.actionRow] = full + " ".repeat(Math.max(0, width - visibleWidth(full)));
+				} else if (z.layout === "smart-header") {
+					const hdr = buildSmartHeaderRow(activeTheme, palette, z.cardWidth, z.lang, state);
+					const full = leftMargin + hdr.line;
+					out[z.actionRow] = full + " ".repeat(Math.max(0, width - visibleWidth(full)));
+				} else if (z.layout === "inline-hover") {
+					const copyText = isCopied ? " ✓ Copied " : " Copy ";
+					const pill = isCopied
+						? themeBgRgb(
+								activeTheme,
+								palette.badgeCopiedBg,
+								themeFgRgb(activeTheme, palette.success, copyText),
+							)
+						: themeBgRgb(
+								activeTheme,
+								palette.codeHeaderActiveBg,
+								themeFgRgb(activeTheme, copyAccentFg, copyText),
+							);
+					const pillW = visibleWidth(pill);
+					const targetCol = Math.max(padX + 4, padX + z.cardWidth - pillW - 1);
+					const baseRow = out[z.actionRow] ?? "";
+					const leftSlice = sliceByColumn(baseRow, 0, targetCol, true);
+					const trailing = paintThemeSurfaceRow(activeTheme, " ", 1, palette.codeBodyBg);
+					const patched = `${leftSlice}${pill}${trailing}`;
+					out[z.actionRow] = patched + " ".repeat(Math.max(0, width - visibleWidth(patched)));
+				} else if (z.layout === "corner") {
+					const corner = buildCornerPillBadge(activeTheme, palette, z.lang, state);
+					const pillW = visibleWidth(corner.pill);
+					const targetCol = Math.max(padX, padX + z.cardWidth - pillW);
+					const baseRow = out[z.actionRow] ?? "";
+					const leftSlice = sliceByColumn(baseRow, 0, targetCol, true);
+					const patched = `${leftSlice}${corner.pill}`;
+					out[z.actionRow] = patched + " ".repeat(Math.max(0, width - visibleWidth(patched)));
+				}
 			}
 
 			if (
 				!isPrototypeActive() &&
 				(hoveredZone === "reply" || copiedZone === "reply") &&
-				!zones.some((z) => z.headerRow === 0)
+				!zones.some((z) => z.actionRow === 0)
 			) {
 				const row0 = out[0] ?? "";
 				const badge =
@@ -312,22 +639,24 @@ export function installMarkdownCardsAndHeadings(): void {
 			}
 
 			const zones: CodeZone[] = self.__conartiCodeZones ?? [];
+			const protoActive = isPrototypeActive();
 
 			if (event.type === "move") {
 				let nextZone: string | null = null;
 				for (const z of zones) {
-					const nextCodeStart =
-						zones.find((other) => other.headerRow > z.headerRow)?.headerRow ?? Infinity;
-					if (event.y >= z.headerRow && event.y < nextCodeStart) {
-						const rawLinesCount = z.raw.split("\n").length + 2;
-						if (event.y <= z.headerRow + rawLinesCount + 4) {
+					if (protoActive && z.layout !== "inline-hover") {
+						/* Highlight only when hovering the action row/button so prose/code scanning stays calm */
+						if (event.y === z.actionRow && event.x >= z.btnStart - 2 && event.x <= z.btnEnd) {
 							nextZone = z.id;
 							break;
 						}
+					} else if (event.y >= z.startRow && event.y <= z.endRow) {
+						nextZone = z.id;
+						break;
 					}
 				}
 				if (
-					!isPrototypeActive() &&
+					!protoActive &&
 					!nextZone &&
 					event.y === 0 &&
 					String(self.text ?? "").trim().length > 0
@@ -352,11 +681,15 @@ export function installMarkdownCardsAndHeadings(): void {
 			}
 
 			const hitCode = zones.find(
-				(z) => event.y === z.headerRow && event.x >= z.btnStart && event.x <= z.btnEnd,
+				(z) => event.y === z.actionRow && event.x >= z.btnStart && event.x <= z.btnEnd,
 			);
 			const replyBtn = self.__conartiReplyBtn as { xStart: number; xEnd: number } | undefined;
 			const hitReply = Boolean(
-				event.y === 0 && replyBtn && event.x >= replyBtn.xStart && event.x <= replyBtn.xEnd,
+				!protoActive &&
+					event.y === 0 &&
+					replyBtn &&
+					event.x >= replyBtn.xStart &&
+					event.x <= replyBtn.xEnd,
 			);
 
 			if (event.type === "press" && event.button === "left" && (hitCode || hitReply)) {

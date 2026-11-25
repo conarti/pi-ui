@@ -847,7 +847,7 @@ export async function acquireHostRuntime(
 		const slots = registeredSlotBuilder(shellCtx);
 		currentViewportSlots = slots;
 
-		const compositor = new ViewportChromeCompositor(tui, scroll, slots);
+		const compositor = new ViewportChromeCompositor(tui, scroll, slots, layoutHost.layoutRoot);
 		activeCompositor = compositor;
 		mountedRenderer = renderer;
 		getCompositorMap().set(renderer, compositor);

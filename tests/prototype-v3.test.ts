@@ -48,7 +48,7 @@ describe("prototype v3: glimmer sweep, 30s verb stability, step summaries, and h
 		const label1 = stripTerminalSequences(frame1).split(" · ")[0];
 		const label2 = stripTerminalSequences(frame2).split(" · ")[0];
 		expect(label1).toBe(label2);
-		expect(label1?.startsWith("▍▎ ")).toBe(true);
+		expect(label1?.startsWith("✦ ")).toBe(true);
 	});
 
 	it("debounces rapid contextual tool/heading updates so labels do not flicker", () => {

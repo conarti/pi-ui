@@ -1,19 +1,22 @@
 /**
- * PROTOTYPE (throwaway branch: prototype/thinking-and-tool-calls)
- * Live switcher (/proto A|B|C|demo|clear|stats|translate|off and Alt+V) plus in-memory
- * animated transcript showcase (streaming Thinking page -> Tool Calls + native Image -> Metrics).
+ * PROTOTYPE (throwaway branch: prototype/cards-markdown-sticky-rail)
+ * Live switcher (/proto A|B|C|demo|clear|stats|translate|off and Alt+V) plus interactive
+ * multi-turn showcase exercising Pinned Header, User Prompt + <skill> badges, two-tone
+ * Markdown code blocks, Sticky Prompt, Outline Rail + Hover Popup, Thinking, and Metrics.
  */
 import { deflateSync } from "node:zlib";
 import {
 	AssistantMessageComponent,
+	getMarkdownTheme,
+	UserMessageComponent,
 	type ExtensionAPI,
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
 	Container,
 	Image,
+	Markdown,
 	Spacer,
-	Text,
 	truncateToWidth,
 	visibleWidth,
 	type Component,
@@ -33,7 +36,6 @@ import { densityPalette } from "../tool-calls/density.ts";
 import {
 	cyclePrototypeVariant,
 	getActiveVariantMeta,
-	getPrototypeVariant,
 	isPrototypeActive,
 	isTranslateSeamPreviewEnabled,
 	PROTOTYPE_VARIANTS,
@@ -149,7 +151,7 @@ export function getDemoPrismPngBase64(): string {
 	return cachedDemoPngBase64;
 }
 
-class DemoToolGroupMock implements Component {
+class DemoToolStepsMock implements Component {
 	private expanded = false;
 	private hovered = false;
 
@@ -158,74 +160,49 @@ class DemoToolGroupMock implements Component {
 	render(width: number): string[] {
 		const theme = getActiveGlobalTheme();
 		const pal = densityPalette(theme);
-		const variant = getPrototypeVariant();
 		const rightGuard = width >= 48 ? 4 : 0;
 		const fit = (s: string) => truncateToWidth(s, Math.max(1, width - rightGuard), "…");
 		const glyph = pal.diamond("success", this.expanded, this.hovered);
-
-		if (variant === "C") {
-			const lines: string[] = [];
-			const expChevron = pal.dim(this.expanded ? "▾" : "▸");
-			lines.push(
-				fit(
-					`  ${glyph} ${pal.title("Explored: 3 files, 1 search", "success", this.expanded, this.hovered)} ${pal.dim("(340ms)")} ${expChevron}`,
-				),
-			);
-			lines.push(
-				fit(
-					`  ${glyph} ${pal.title("Edited: 2 files", "success", this.expanded, this.hovered)} ${pal.theme.fg("toolDiffAdded", "+18")} ${pal.theme.fg("toolDiffRemoved", "-4")} ${pal.dim("(520ms)")} ${expChevron}`,
-				),
-			);
-			lines.push(
-				fit(
-					`  ${glyph} ${pal.title("Ran: 1 cmd", "success", this.expanded, this.hovered)} ${pal.dim("(910ms)")} ${expChevron}`,
-				),
-			);
-			if (this.expanded) {
-				lines.push(fit(`  ${pal.rail("│")} ${pal.dim("Edited src/features/transcript/thinking-block.ts (+12 -3)")}`));
-				lines.push(fit(`  ${pal.rail("│")} ${pal.dim("Edited src/features/tool-calls/grouping.ts (+6 -1)")}`));
-				lines.push(fit(`  ${pal.rail("│")} ${pal.dim("Ran npm run typecheck (0 lines · 910ms)")}`));
-			}
-			return lines;
-		}
-
-		const summary = "Edited 2 files, ran 1 command, explored 3 files";
-		const diff = ` ${pal.theme.fg("toolDiffAdded", "+18")} ${pal.theme.fg("toolDiffRemoved", "-4")}`;
-		const thoughtNote = variant === "A" ? "1 thought · " : "";
-		const meta = ` ${pal.dim(`(${thoughtNote}1.8s)`)}`;
+		const summary = "Explored 4 files, 2 searches";
+		const meta = ` ${pal.dim("(280ms)")}`;
 		const disclosure = this.hovered ? ` ${pal.dim(this.expanded ? "⌄" : "›")}` : "";
 		const out = [
-			fit(`  ${glyph} ${pal.title(summary, "success", this.expanded, this.hovered)}${diff}${meta}${disclosure}`),
+			fit(`  ${glyph} ${pal.title(summary, "success", this.expanded, this.hovered)}${meta}${disclosure}`),
 		];
 		if (this.expanded) {
 			const subGlyph = pal.diamond("success", false, false);
 			const guide = pal.rail("  │");
-			out.push(fit(`${guide} ${subGlyph} ${pal.title("Inspect repo state and tool-summary source", "success", false)} ${pal.dim("(340ms) · bash 1 · read 3")}`));
-			out.push(fit(`${guide} ${subGlyph} ${pal.title("Edited", "success", false)} ${pal.target("src/features/transcript/thinking-block.ts", false)} ${pal.dim("(+12 -3 · 280ms)")}`));
-			out.push(fit(`${guide} ${subGlyph} ${pal.title("Edited", "success", false)} ${pal.target("src/features/tool-calls/grouping.ts", false)} ${pal.dim("(+6 -1 · 240ms)")}`));
-			out.push(fit(`${guide} ${subGlyph} ${pal.title("Verify lint, typecheck, and unit tests", "success", false)} ${pal.target("npm run check", false)} ${pal.dim("(910ms)")}`));
+			out.push(fit(`${guide} ${subGlyph} ${pal.title("Read", "success", false)} ${pal.target("src/features/transcript/user-prompt.ts", false)}`));
+			out.push(fit(`${guide} ${subGlyph} ${pal.title("Read", "success", false)} ${pal.target("src/features/transcript/markdown-cards.ts", false)}`));
+			out.push(fit(`${guide} ${subGlyph} ${pal.title("Read", "success", false)} ${pal.target("src/shared/fullscreen-layout.ts", false)}`));
 		}
+		out.push(
+			fit(
+				`  ${pal.diamond("success", false, false)} ${pal.title("Update viewport chrome & Skill Chip cards", "success", false)} ${pal.theme.fg("toolDiffAdded", "+42")} ${pal.theme.fg("toolDiffRemoved", "-9")} ${pal.dim("(410ms)")}`,
+			),
+		);
 		return out;
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		if (event.type === "move") {
+			const onHeader = event.y === 0;
 			claimHover(this, () => {
 				if (this.hovered) {
 					this.hovered = false;
 					requestRender();
 				}
 			});
-			if (!this.hovered) {
-				this.hovered = true;
+			if (this.hovered !== onHeader) {
+				this.hovered = onHeader;
 				return { handled: true, render: true };
 			}
 			return undefined;
 		}
-		if (event.type === "press" && event.button === "left") {
+		if (event.type === "press" && event.button === "left" && event.y === 0) {
 			return { handled: true, render: false };
 		}
-		if (event.type === "click" && event.button === "left") {
+		if (event.type === "click" && event.button === "left" && event.y === 0) {
 			this.expanded = !this.expanded;
 			return { handled: true, render: true };
 		}
@@ -234,46 +211,80 @@ class DemoToolGroupMock implements Component {
 }
 
 class DemoInlineImageRow implements Component {
-	private readonly imageComponent: Image;
+	private readonly img: Image;
 
 	constructor() {
 		const theme = getActiveGlobalTheme();
-		const pal = densityPalette(theme);
-		this.imageComponent = new Image(
+		this.img = new Image(
 			getDemoPrismPngBase64(),
 			"image/png",
-			{ fallbackColor: (s) => pal.dim(s) },
-			{ maxWidthCells: 44, filename: "prism-card.png" },
-			{ widthPx: 180, heightPx: 64 },
+			{
+				fallbackColor: (s: string) => theme.fg("muted", s),
+			},
+			{ maxWidthCells: 28 },
 		);
 	}
 
 	invalidate(): void {
-		this.imageComponent.invalidate();
+		this.img.invalidate();
 	}
 
 	render(width: number): string[] {
 		const theme = getActiveGlobalTheme();
 		const pal = densityPalette(theme);
-		const glyph = pal.diamond("success", false, false);
-		const rightGuard = width >= 48 ? 4 : 0;
+		const glyph = pal.diamond("success", true, false);
 		const header = truncateToWidth(
-			`  ${glyph} ${pal.title("Read", "success", false)} ${pal.target("assets/prism-card.png", false)} ${pal.dim("(image/png · 180×64 · 14ms)")}`,
-			Math.max(1, width - rightGuard),
+			`  ${glyph} ${pal.title("Read", "success", true)} ${pal.target("assets/polaris-card.png", true)} ${pal.dim("(image/png · 180×64)")}`,
+			Math.max(1, width - 4),
 			"…",
 		);
-		const imgLines = this.imageComponent.render(Math.max(12, width - 6));
-		const indentedImg = imgLines.map((l, idx) => (idx === 0 && l ? `  ${l}` : l));
-		return [header, ...indentedImg];
+		const imgLines = this.img.render(Math.max(8, width - 6)).map((ln) => `    ${ln}`);
+		return [header, ...imgLines];
 	}
 }
 
-const DEMO_THINKING_CHUNKS: readonly string[] = [
-	"**Inspecting streaming Thinking readability**\nLet's check why a 3-line sliding tail feels frantic during fast token generation: every single word-wrap shifts all 3 rows upward several times per second.",
-	"Instead of shifting every line on every wrap, Variant B fills a 6-line page calmly from top to bottom and only advances by 3 lines when the page fills up.",
-	"Clicking the `Thinking…` header (or pressing `Ctrl+T`) right while tokens are streaming immediately unfolds the full reasoning from line 1 and keeps it open after completion.",
-	"**Checking viewport alignment & Outline Rail**\nAll transcript surfaces (`User Prompt`, `Thinking`, `Tool Calls`, and `Assistant` prose) now align cleanly along column 2, while right-aligned metrics reserve 4 columns so `Outline Rail` never overlaps text.",
-	"**Verifying inline Image pass-through**\nTool calls returning `{ type: \"image\" }` bypass collapsed `ToolGroupComponent` folding so `@earendil-works/pi-tui` renders the native `Image` inline right beneath `Read assets/prism-card.png`.",
+const DEMO_SKILL_PROMPT_1 = `<skill name="wayfinder" location="/Users/macbook/Projects/pi-ui/.agents/skills/wayfinder/SKILL.md">
+References are relative to /Users/macbook/Projects/pi-ui/.agents/skills/wayfinder.
+
+Wayfinding charts a shared map on the issue tracker and resolves decision tickets one at a time.
+- Prototype tickets build 3 structurally distinct variants inside live InteractiveMode.
+- Never fold losing variants or /proto switchers into main; capture on prototype/<name>.
+</skill>
+
+Align Header, User Prompt cards, <skill> badges, two-tone Markdown code blocks, Sticky Prompt, and Outline Rail across 3 live TUI variants so we can test scrolling, hover, and copy side by side:
+1. Click the /wayfinder badge above to inspect SKILL.md in a Hover Popup.
+2. Scroll up & down to watch Sticky Prompt pin smoothly right below the fixed Header.
+3. Hover the right Outline Rail ticks to inspect opaque Turn #N · HH:MM previews.`;
+
+const DEMO_SHORT_PROMPT_2 = `Looks clean! Also verify a 1-line untyped command fence next to a typed TypeScript block.`;
+
+const DEMO_MARKDOWN_RESPONSE_1 = [
+	"### Viewport & Two-Tone Code Comparison",
+	"",
+	"Run the standards and typecheck suite with a short untyped command fence:",
+	"",
+	"```",
+	"npm run check",
+	"```",
+	"",
+	"And compare a typed multi-line TypeScript snippet (notice zero `▎` rail characters when selecting lines with the mouse):",
+	"",
+	"```ts",
+	"export function mountPinnedHeader(shell: FullscreenShellContext): StickyOverlayRender {",
+	"  const palette = getThemeSurfacePalette(shell.theme());",
+	"  return renderStickyCard(palette.userCardBg, { rightGuardCols: 4 });",
+	"}",
+	"```",
+].join("\n");
+
+const DEMO_MARKDOWN_RESPONSE_2 = [
+	"Both short untyped snippets and typed multi-line blocks align on the **4-column right plumb line** so `Outline Rail` and the scrollbar never collide with `Copy` or timestamps.",
+].join("\n");
+
+const DEMO_THINKING_CHUNKS = [
+	"**Checking Header & Sticky Prompt junction**\nMounting `SessionHeaderView` as entry `0` of `fullscreenLayoutRoot` keeps row `0` permanently pinned while `ScrollView` starts cleanly at `y = 1` (or `y = 2` in Variant C).",
+	"**Checking Skill Chip & Clean Copy**\nRaw `<skill name=\"wayfinder\">...</skill>` blocks collapse into a clickable skill badge in `User Prompt`, `Sticky Prompt`, and `Outline Rail` previews while `Copy` writes `/skill:wayfinder ...` cleanly.",
+	"**Checking Two-Tone Code Blocks**\nVariant A places `[Copy]` quietly below the block; Variant B skips the top header on 1-2 line untyped commands; Variant C floats a compact `ts · Copy` corner pill.",
 ];
 
 class LiveDemoShowcaseContainer extends Container {
@@ -283,24 +294,47 @@ class LiveDemoShowcaseContainer extends Container {
 	private thinkingExpanded = false;
 	private readonly startedAt = Date.now();
 	private readonly hoverSlot: ThinkingInteractionSlot = { hovered: false, scrollFromBottom: 0 };
-	private readonly groupMock = new DemoToolGroupMock();
+	private readonly stepsMock = new DemoToolStepsMock();
 	private readonly imageRow = new DemoInlineImageRow();
+	private readonly userTurn1: UserMessageComponent;
+	private readonly userTurn2: UserMessageComponent;
+	private readonly mdReply1: Markdown;
+	private readonly mdReply2: Markdown;
 	private timers: Array<ReturnType<typeof setTimeout>> = [];
 
 	constructor(private readonly ctx: ExtensionContext) {
 		super();
+		const mdTheme = getMarkdownTheme();
+		this.userTurn1 = new UserMessageComponent(
+			DEMO_SKILL_PROMPT_1,
+			mdTheme,
+			2,
+			[],
+			"demo-turn-1",
+			new Date(this.startedAt - 12_000).toISOString(),
+		);
+		this.userTurn2 = new UserMessageComponent(
+			DEMO_SHORT_PROMPT_2,
+			mdTheme,
+			2,
+			[],
+			"demo-turn-2",
+			new Date(this.startedAt - 3_000).toISOString(),
+		);
+		this.mdReply1 = new Markdown(DEMO_MARKDOWN_RESPONSE_1, 2, 0, mdTheme);
+		this.mdReply2 = new Markdown(DEMO_MARKDOWN_RESPONSE_2, 2, 0, mdTheme);
+
 		activateAnimationSurface(DEMO_ANIM_SURFACE_KEY, () => {
 			requestRender();
 		});
 
-		/* Пошагово подаём куски мысли каждые 900мс, чтобы можно было кликнуть заголовок ПРЯМО ВО ВРЕМЯ СТРИМИНГА */
 		for (let step = 2; step <= DEMO_THINKING_CHUNKS.length; step++) {
 			this.timers.push(
 				setTimeout(() => {
 					this.chunkCount = step;
 					this.rebuild();
 					requestRender();
-				}, (step - 1) * 900),
+				}, (step - 1) * 700),
 			);
 		}
 
@@ -309,8 +343,9 @@ class LiveDemoShowcaseContainer extends Container {
 				this.settled = true;
 				deactivateAnimationSurface(DEMO_ANIM_SURFACE_KEY);
 				this.rebuild();
+				getActiveHostRuntime()?.scroll?.invalidate?.();
 				requestRender();
-			}, DEMO_THINKING_CHUNKS.length * 900 + 600),
+			}, DEMO_THINKING_CHUNKS.length * 700 + 450),
 		);
 
 		this.rebuild();
@@ -324,6 +359,10 @@ class LiveDemoShowcaseContainer extends Container {
 
 	override invalidate(): void {
 		super.invalidate();
+		this.userTurn1.invalidate();
+		this.userTurn2.invalidate();
+		this.mdReply1.invalidate();
+		this.mdReply2.invalidate();
 		this.rebuild();
 	}
 
@@ -338,14 +377,16 @@ class LiveDemoShowcaseContainer extends Container {
 		this.addChild({
 			invalidate() {},
 			render: (w: number) => {
-				const tag = `❖ PROTOTYPE DEMO (${meta?.shortLabel ?? "off"}) · click Thinking header while streaming · Alt+V switch · /proto clear`;
+				const tag = `✦ PROTOTYPE #34 DEMO (${meta?.shortLabel ?? "off"}) · Alt+V or click Header [Proto ↻] · scroll to test Sticky + Rail · /proto clear`;
 				const line = truncateToWidth(`  ${bannerFg(tag)}`, Math.max(1, w - 4), "…");
 				return [line + " ".repeat(Math.max(0, w - visibleWidth(line)))];
 			},
 		});
 
-		const activeSampleText = DEMO_THINKING_CHUNKS.slice(0, this.chunkCount).join("\n\n");
+		this.addChild(new Spacer(1));
+		this.addChild(this.userTurn1);
 
+		const activeSampleText = DEMO_THINKING_CHUNKS.slice(0, this.chunkCount).join("\n\n");
 		this.addChild(new Spacer(1));
 		this.addChild(
 			new ThinkingBlock(
@@ -358,7 +399,7 @@ class LiveDemoShowcaseContainer extends Container {
 					requestRender();
 				},
 				theme,
-				4800,
+				2600,
 				undefined,
 				this.hoverSlot,
 				this.startedAt,
@@ -369,29 +410,50 @@ class LiveDemoShowcaseContainer extends Container {
 		if (!this.settled) return;
 
 		this.addChild(new Spacer(1));
-		this.addChild(this.groupMock);
+		this.addChild(this.stepsMock);
+		this.addChild(new Spacer(1));
+		this.addChild(this.mdReply1);
+
+		const stepMetrics: ResponseMetricsData = {
+			version: 1,
+			timestamp: this.startedAt,
+			firstContentAt: this.startedAt + 420,
+			firstTextAt: this.startedAt + 1900,
+			completedAt: this.startedAt + 3400,
+			timeSinceUserMs: 3400,
+			outputTokens: 312,
+			reasoningTokens: 118,
+			inputTokens: 14_800,
+			cacheReadTokens: 12_400,
+			model: "gemini-4-carbon",
+			thinkingLevel: "high",
+			stopReason: "stop",
+		};
+		this.addChild(new Spacer(1));
+		this.addChild(
+			new ResponseMetricsRowComponent(stepMetrics, false, theme, () => {
+				void openResponseMetricsModal(this.ctx);
+			}),
+		);
+
+		this.addChild(new Spacer(1));
+		this.addChild(this.userTurn2);
 		this.addChild(new Spacer(1));
 		this.addChild(this.imageRow);
 		this.addChild(new Spacer(1));
-		this.addChild(
-			new Text(
-				"All four surfaces rendered: expandable streaming `Thinking`, `Compact` grouped tool calls, inline native `Image`, and the clickable response metrics row below.",
-				2,
-				0,
-			),
-		);
+		this.addChild(this.mdReply2);
 
-		const sampleMetrics: ResponseMetricsData = {
+		const sampleMetrics2: ResponseMetricsData = {
 			version: 1,
-			timestamp: this.startedAt,
-			firstContentAt: this.startedAt + 580,
-			firstTextAt: this.startedAt + 3900,
-			completedAt: this.startedAt + 4800,
-			timeSinceUserMs: 4800,
-			outputTokens: 486,
-			reasoningTokens: 164,
-			inputTokens: 19_240,
-			cacheReadTokens: 16_800,
+			timestamp: this.startedAt + 4000,
+			firstContentAt: this.startedAt + 4350,
+			firstTextAt: this.startedAt + 4900,
+			completedAt: this.startedAt + 5600,
+			timeSinceUserMs: 1600,
+			outputTokens: 142,
+			reasoningTokens: 44,
+			inputTokens: 15_320,
+			cacheReadTokens: 14_900,
 			model: "gemini-4-carbon",
 			thinkingLevel: "high",
 			stopReason: "stop",
@@ -399,7 +461,7 @@ class LiveDemoShowcaseContainer extends Container {
 
 		this.addChild(new Spacer(1));
 		this.addChild(
-			new ResponseMetricsRowComponent(sampleMetrics, false, theme, () => {
+			new ResponseMetricsRowComponent(sampleMetrics2, false, theme, () => {
 				void openResponseMetricsModal(this.ctx);
 			}),
 		);
@@ -407,13 +469,13 @@ class LiveDemoShowcaseContainer extends Container {
 }
 
 export function refreshLiveTranscriptForPrototype(ctx: ExtensionContext): void {
-	/* Не засоряем нижний статус-бар лишней строкой, чтобы не конфликтовать с pi-footer */
 	if (ctx.mode === "tui" && ctx.hasUI) {
 		ctx.ui.setStatus(LEGACY_PROTO_STATUS_KEY, undefined);
 	}
 	bindComposerWorkingIndicator(ctx);
 
-	const chat = getActiveHostRuntime()?.chatContainer as { children?: unknown[] } | undefined;
+	const runtime = getActiveHostRuntime();
+	const chat = runtime?.chatContainer as { children?: unknown[] } | undefined;
 	if (Array.isArray(chat?.children)) {
 		for (const child of chat.children) {
 			if (!child || typeof child !== "object") continue;
@@ -433,6 +495,11 @@ export function refreshLiveTranscriptForPrototype(ctx: ExtensionContext): void {
 			}
 		}
 	}
+	runtime?.scroll?.invalidate?.();
+	const slots = runtime?.viewportSlots;
+	slots?.topSlot?.invalidate?.();
+	slots?.rightRail?.invalidate?.();
+	slots?.pinnedHeader?.invalidate?.();
 	requestRender();
 }
 
@@ -444,15 +511,18 @@ export function registerPrototypeShowcaseFeature(pi: ExtensionAPI): void {
 	const clearDemo = () => {
 		if (!activeDemo) return;
 		activeDemo.dispose();
-		const chat = getActiveHostRuntime()?.chatContainer as { removeChild?: (c: unknown) => void } | undefined;
+		const runtime = getActiveHostRuntime();
+		const chat = runtime?.chatContainer as { removeChild?: (c: unknown) => void } | undefined;
 		chat?.removeChild?.(activeDemo);
 		activeDemo = undefined;
+		runtime?.scroll?.invalidate?.();
 		requestRender();
 	};
 
 	const mountDemo = (ctx: ExtensionContext) => {
 		clearDemo();
-		const chat = getActiveHostRuntime()?.chatContainer as
+		const runtime = getActiveHostRuntime();
+		const chat = runtime?.chatContainer as
 			| { addChild?: (c: unknown) => void }
 			| undefined;
 		if (!chat || typeof chat.addChild !== "function") {
@@ -464,6 +534,7 @@ export function registerPrototypeShowcaseFeature(pi: ExtensionAPI): void {
 		}
 		activeDemo = new LiveDemoShowcaseContainer(ctx);
 		chat.addChild(activeDemo);
+		runtime?.scroll?.invalidate?.();
 		requestRender();
 	};
 
@@ -496,7 +567,7 @@ export function registerPrototypeShowcaseFeature(pi: ExtensionAPI): void {
 	});
 
 	pi.registerShortcut("alt+v", {
-		description: "Prototype: cycle transcript variant (A / B / C)",
+		description: "Prototype: cycle card/chrome variant (A / B / C)",
 		handler: async (ctx) => {
 			activeCtx = ctx;
 			const next = cyclePrototypeVariant();
@@ -510,7 +581,7 @@ export function registerPrototypeShowcaseFeature(pi: ExtensionAPI): void {
 	const subcommands = ["a", "b", "c", "next", "demo", "clear", "stats", "translate", "off"] as const;
 
 	pi.registerCommand("proto", {
-		description: "Control live transcript prototype: /proto [A|B|C|demo|clear|stats|translate|off]",
+		description: "Control live cards/chrome prototype: /proto [A|B|C|demo|clear|stats|translate|off]",
 		getArgumentCompletions: (prefix) => {
 			const typed = prefix.trim().toLowerCase();
 			const matches = subcommands
@@ -549,7 +620,7 @@ export function registerPrototypeShowcaseFeature(pi: ExtensionAPI): void {
 			if (cmd === "demo" || cmd === "sample") {
 				mountDemo(ctx);
 				ctx.ui.notify(
-					"Started 5s live demo at the bottom of transcript - try clicking Thinking while it streams!",
+					"Mounted multi-turn #34 showcase at bottom of transcript (Skill Chip, 2-tone Code, Sticky + Outline Rail)!",
 					"info",
 				);
 				return;
@@ -557,7 +628,7 @@ export function registerPrototypeShowcaseFeature(pi: ExtensionAPI): void {
 
 			if (cmd === "clear") {
 				clearDemo();
-				ctx.ui.notify("Cleared demo preview from transcript.", "info");
+				ctx.ui.notify("Cleared demo showcase from transcript.", "info");
 				return;
 			}
 
@@ -566,7 +637,7 @@ export function registerPrototypeShowcaseFeature(pi: ExtensionAPI): void {
 				setTranslateSeamPreview(next);
 				ctx.ui.notify(
 					next
-						? "Demo translation seam ON (shown on /proto demo; live translator engine is scheduled in Echelon 3)."
+						? "Demo translation seam ON (shown on /proto demo)."
 						: "Demo translation seam OFF.",
 					"info",
 				);
@@ -579,7 +650,7 @@ export function registerPrototypeShowcaseFeature(pi: ExtensionAPI): void {
 			}
 
 			ctx.ui.notify(
-				"Usage: /proto [A|B|C|demo|clear|stats|translate|off] (or Alt+V / click PROTO pill).",
+				"Usage: /proto [A|B|C|demo|clear|stats|translate|off] (or Alt+V / click Header Proto pill).",
 				"info",
 			);
 		},

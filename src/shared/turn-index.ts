@@ -1,7 +1,13 @@
-import { UserMessageComponent, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	SkillInvocationMessageComponent,
+	UserMessageComponent,
+	type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { Container, stripTerminalSequences, type Component } from "@earendil-works/pi-tui";
+import { isPrototypeActive } from "../features/transcript/prototype-state.ts";
 import { reconstructTurnPromptText } from "../features/prompt-chips/registry.ts";
 import type { FullscreenShellContext } from "./fullscreen-layout.ts";
+import { extractSkillInvocations } from "./skill-tags.ts";
 
 export type StickyDisplayMode = "auto" | "always";
 
@@ -48,8 +54,10 @@ export function sanitizeTurnText(text: string): string {
 }
 
 export function summarizeTurnTitle(prompt: string, ordinal: number): string {
-	const oneLine = prompt.replace(/\s+/g, " ").trim();
-	return oneLine || `Реплика #${ordinal}`;
+	const cleaned = extractSkillInvocations(prompt).previewText;
+	const oneLine = cleaned.replace(/\s+/g, " ").trim();
+	if (oneLine) return oneLine;
+	return isPrototypeActive() ? `Turn #${ordinal}` : `Реплика #${ordinal}`;
 }
 
 export function formatTurnTime(timestamp: number | string | undefined): string {
@@ -143,12 +151,17 @@ export function collectStructuralUserMetrics(doc: Component, width: number): Mou
 
 	const visit = (node: Component | undefined): void => {
 		if (!node) return;
-		if (node instanceof UserMessageComponent) {
+		if (
+			node instanceof UserMessageComponent ||
+			(isPrototypeActive() &&
+				node instanceof SkillInvocationMessageComponent &&
+				!Boolean((node as any).skillBlock?.userMessage))
+		) {
 			const lines = node.render(width);
 			const height = lines.length;
 			if (height > 0) {
 				metrics.push({
-					component: node,
+					component: node as UserMessageComponent,
 					start: cursor,
 					end: cursor + height,
 					height,
@@ -173,7 +186,14 @@ export function collectStructuralUserMetrics(doc: Component, width: number): Mou
 
 function countMountedUserComponents(node: Component | undefined): number {
 	if (!node) return 0;
-	if (node instanceof UserMessageComponent) return 1;
+	if (
+		node instanceof UserMessageComponent ||
+		(isPrototypeActive() &&
+			node instanceof SkillInvocationMessageComponent &&
+			!Boolean((node as any).skillBlock?.userMessage))
+	) {
+		return 1;
+	}
 	if (isWalkableContainer(node)) {
 		let count = 0;
 		for (const child of node.children) {

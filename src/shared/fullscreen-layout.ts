@@ -29,6 +29,11 @@ export interface StickyOverlayRender {
 }
 
 export interface MountedViewportSlots {
+	pinnedHeader?: Component & {
+		isVisible?: (viewport: { width: number; height: number }) => boolean;
+		handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined;
+		dispose?(): void;
+	};
 	topSlot?: Component & {
 		renderStickyOverlay?(width: number, viewportWidth?: number): StickyOverlayRender;
 		handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined;
@@ -36,6 +41,7 @@ export interface MountedViewportSlots {
 	};
 	rightRail?: Component & {
 		basisWidth: number;
+		railPlacement?: "beside-scrollbar" | "over-scrollbar";
 		geometry?: { readonly upY: number; readonly downY: number };
 		isVisible: (viewport: { width: number; height: number }) => boolean;
 		render(width: number, explicitHeight?: number, minTop?: number): string[];
@@ -397,8 +403,10 @@ function isCoveredByScrollToEndIndicator(self: any, screenX: number, screenY: nu
  */
 export class ViewportChromeCompositor {
 	private readonly origGetContentWidth: (width: number) => number;
+	private readonly detachPinnedHeader: (() => void) | undefined;
 	private lastGeometry: CompositedFrameGeometry | undefined;
 	private activePress: { zone: "rail" | "sticky"; x: number; y: number } | undefined;
+	private scrollbarHiddenByRail = false;
 	private disposed = false;
 	applyingSelection = false;
 
@@ -410,8 +418,72 @@ export class ViewportChromeCompositor {
 		private readonly tui: TUI,
 		private readonly scroll: ScrollView,
 		readonly slots: MountedViewportSlots,
+		layoutRoot?: unknown,
 	) {
 		this.origGetContentWidth = scroll.getContentWidth.bind(scroll);
+		this.detachPinnedHeader = this.mountPinnedHeaderIntoLayout(layoutRoot);
+	}
+
+	private mountPinnedHeaderIntoLayout(layoutRoot: unknown): (() => void) | undefined {
+		const header = this.slots.pinnedHeader;
+		if (!header || !layoutRoot || typeof layoutRoot !== "object") return undefined;
+		const stack = layoutRoot as {
+			children?: Component[];
+			entries?: Array<{
+				component: Component;
+				basis?: "auto" | number;
+				grow?: number;
+				shrink?: number;
+				minSize?: number;
+				visible?: (vp: { width: number; height: number }) => boolean;
+			}>;
+			removeChild?: (c: Component) => void;
+		};
+		if (!Array.isArray(stack.children) || !Array.isArray(stack.entries)) return undefined;
+
+		if (!stack.children.includes(header)) {
+			stack.children.unshift(header);
+			stack.entries.unshift({
+				component: header,
+				basis: "auto",
+				grow: 0,
+				shrink: 0,
+				minSize: 0,
+				visible: (vp) => (header.isVisible ? header.isVisible(vp) : vp.height >= 8),
+			});
+		}
+
+		/* Suppress duplicate header + Spacer(1) inside ScrollView.documentContainer when pinnedHeader is visible */
+		const docContainer = this.scroll.children?.[0] as { children?: Component[] } | undefined;
+		const headerContainer = docContainer?.children?.[0] as
+			| (Component & { render: (width: number) => string[] })
+			| undefined;
+		let restoreDocHeader: (() => void) | undefined;
+		if (headerContainer && typeof headerContainer.render === "function") {
+			const origRender = headerContainer.render.bind(headerContainer);
+			headerContainer.render = (width: number): string[] => {
+				const rows = this.tui.terminal?.rows ?? 24;
+				const pinnedActive = header.isVisible
+					? header.isVisible({ width, height: rows })
+					: rows >= 8;
+				return pinnedActive ? [] : [...origRender(width)];
+			};
+			restoreDocHeader = () => {
+				headerContainer.render = origRender;
+			};
+		}
+
+		return () => {
+			restoreDocHeader?.();
+			if (typeof stack.removeChild === "function") {
+				stack.removeChild(header);
+			} else {
+				const cIdx = stack.children?.indexOf(header) ?? -1;
+				if (cIdx !== -1) stack.children?.splice(cIdx, 1);
+				const eIdx = stack.entries?.findIndex((e) => e.component === header) ?? -1;
+				if (eIdx !== -1) stack.entries?.splice(eIdx, 1);
+			}
+		};
 	}
 
 	compositeFrame(screen: string[], layout: { root?: LayoutBoxNode } | undefined, totalWidth: number): string[] {
@@ -428,10 +500,26 @@ export class ViewportChromeCompositor {
 
 		const boxRect = box.rect;
 		const scrollbarCol = boxRect.x + boxRect.width - 1;
+		const railCols = Math.max(1, Math.min(2, this.slots.rightRail?.basisWidth ?? RAIL_COLUMNS));
+		const overScrollbar = this.slots.rightRail?.railPlacement === "over-scrollbar";
+		const railMargin = overScrollbar ? railCols : railCols + 1;
 		const railVisible = Boolean(
 			this.slots.rightRail?.isVisible({ width: boxRect.width, height: boxRect.height }) &&
-				boxRect.width >= RAIL_PLUS_SCROLLBAR_MARGIN + 1,
+				boxRect.width >= railMargin + 1,
 		);
+
+		/* In over-scrollbar mode (Variant A), hide native scrollbar while rail is active so only one edge scale renders */
+		if (overScrollbar && railVisible) {
+			if (this.scroll.scrollbar !== "hidden") {
+				this.scroll.setScrollbar("hidden");
+				this.scrollbarHiddenByRail = true;
+			}
+		} else if (this.scrollbarHiddenByRail) {
+			this.scrollbarHiddenByRail = false;
+			if (this.scroll.scrollbar === "hidden") {
+				this.scroll.setScrollbar("auto");
+			}
+		}
 
 		const stickyLayoutWidth = computeTranscriptContentWidth(
 			boxRect.width,
@@ -450,7 +538,7 @@ export class ViewportChromeCompositor {
 			const stickyRender: StickyOverlayRender = this.slots.topSlot.renderStickyOverlay
 				? this.slots.topSlot.renderStickyOverlay(stickyLayoutWidth, boxRect.width)
 				: (() => {
-						const raw = this.slots.topSlot!.render(stickyLayoutWidth);
+						const raw = [...this.slots.topSlot!.render(stickyLayoutWidth)];
 						return { lines: raw, visibleLines: raw, fullHeight: raw.length, pushOffset: 0 };
 					})();
 
@@ -513,10 +601,10 @@ export class ViewportChromeCompositor {
 
 		let railRect: CompositedFrameGeometry["railRect"];
 		if (railVisible && this.slots.rightRail) {
-			const railStartCol = boxRect.x + boxRect.width - RAIL_PLUS_SCROLLBAR_MARGIN;
+			const railStartCol = boxRect.x + boxRect.width - railMargin;
 			const stickyCoveredRows = stickyRect?.height ?? 0;
 			const railLines = this.slots.rightRail.render(
-				RAIL_COLUMNS,
+				railCols,
 				boxRect.height,
 				stickyCoveredRows,
 			);
@@ -534,19 +622,19 @@ export class ViewportChromeCompositor {
 						const isImgRow = baseRow.includes("\x1b_G") || baseRow.includes("\x1b]1337;File=");
 						const rawRailLine = railLines[i]!;
 						const plainRail = stripTerminalSequences(rawRailLine);
-						const leadingBlank = plainRail.startsWith(" ") && plainRail.length >= 2;
+						const leadingBlank = plainRail.startsWith(" ") && plainRail.length >= 2 && railCols >= 2;
 						const targetCol = leadingBlank ? railStartCol + 1 : railStartCol;
-						const targetWidth = leadingBlank ? RAIL_COLUMNS - 1 : RAIL_COLUMNS;
+						const targetWidth = leadingBlank ? railCols - 1 : railCols;
 						const trimmedRail = leadingBlank
 							? sliceByColumn(rawRailLine, 1, targetWidth, true)
-							: rawRailLine;
+							: sliceByColumn(rawRailLine, 0, targetWidth, true);
 						const applyRailBg = (seg: string, bg: string): string =>
 							bg
 								? `${bg}${seg.replace(/\x1b\[(?:0|49)m/g, (m) => `${m}${bg}`)}`
 								: `\x1b[49m${seg}`;
 						const bgStart = !isImgRow ? extractActiveBgSgrAtColumn(baseRow, targetCol) : "";
 						const bgSecond =
-							!isImgRow && !leadingBlank
+							!isImgRow && !leadingBlank && targetWidth >= 2
 								? extractActiveBgSgrAtColumn(baseRow, targetCol + 1)
 								: bgStart;
 						/* pi-tui extractSegments не сбрасывает хвостовой SGR без символа после него перед beforePad */
@@ -555,7 +643,7 @@ export class ViewportChromeCompositor {
 								? `${baseRow}${bgStart ? `\x1b[0m${bgStart}` : "\x1b[0m"} `
 								: baseRow;
 						const railOverlay =
-							bgStart === bgSecond
+							bgStart === bgSecond || targetWidth < 2
 								? bgStart
 									? applyRailBg(trimmedRail, bgStart)
 									: trimmedRail
@@ -571,7 +659,7 @@ export class ViewportChromeCompositor {
 					railRect = {
 						x: railStartCol,
 						y: boxRect.y + startIdx,
-						width: RAIL_COLUMNS,
+						width: railCols,
 						height: endIdx - startIdx + 1,
 						originY: boxRect.y,
 					};
@@ -842,7 +930,9 @@ export class ViewportChromeCompositor {
 		}
 
 		const { railRect, stickyRect } = this.lastGeometry;
+		const overScrollbar = this.slots.rightRail?.railPlacement === "over-scrollbar";
 		const onScrollbar =
+			!overScrollbar &&
 			raw.x === this.lastGeometry.scrollbarCol &&
 			Boolean(self.getScrollbarTargetAt?.(raw.x, raw.y, true));
 		if (onScrollbar) {
@@ -958,8 +1048,16 @@ export class ViewportChromeCompositor {
 		this.disposed = true;
 		this.activePress = undefined;
 		this.lastGeometry = undefined;
+		if (this.scrollbarHiddenByRail) {
+			this.scrollbarHiddenByRail = false;
+			if (this.scroll.scrollbar === "hidden") {
+				this.scroll.setScrollbar("auto");
+			}
+		}
+		this.detachPinnedHeader?.();
 		(this.scroll as any).getContentWidth = this.origGetContentWidth;
 		this.scroll.invalidate();
+		this.slots.pinnedHeader?.dispose?.();
 		this.slots.topSlot?.dispose?.();
 		this.slots.rightRail?.dispose?.();
 	}

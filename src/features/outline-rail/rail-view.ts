@@ -9,9 +9,15 @@ import {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
+import {
+	getThemeSurfacePalette,
+	paintThemeSurfaceRow,
+	themeFgRgb,
+} from "../../shared/ansi.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import { sanitizeTurnText, type IndexedTurn, type TranscriptTurnIndex } from "../../shared/turn-index.ts";
+import { getPrototypeVariant, isPrototypeActive } from "../transcript/prototype-state.ts";
 
 export const RAIL_WIDTH = 2;
 export const MIN_TERMINAL_WIDTH_FOR_RAIL = 24;
@@ -38,6 +44,7 @@ export interface RailGeometry {
 	downTarget?: number;
 	upY: number;
 	downY: number;
+	showArrows?: boolean;
 }
 
 const hitKey = (h?: RailHit) => (!h ? "" : h.kind === "tick" ? `t${h.turn}` : h.kind);
@@ -86,10 +93,33 @@ export function computeOutlineGeometry(
 	turnCount: number,
 	vp: RailViewport,
 	minTop = 0,
+	arrowsOnOverflowOnly = false,
 ): RailGeometry | undefined {
 	if (turnCount < MIN_TURNS_FOR_RAIL) return undefined;
 	const safeMinTop = Math.max(0, Math.floor(minTop));
 	const availHeight = height - safeMinTop;
+	if (availHeight <= 0) return undefined;
+
+	const needsArrows = !arrowsOnOverflowOnly || turnCount > availHeight;
+	if (!needsArrows) {
+		const totalRows = turnCount;
+		const centeredTop = Math.floor((height - totalRows) / 2);
+		const top = Math.max(safeMinTop, Math.min(height - totalRows, centeredTop));
+		return {
+			height,
+			windowStart: 0,
+			windowEnd: turnCount,
+			ticksY: top,
+			activeFrom: vp.activeFrom,
+			active: vp.active,
+			upTarget: vp.upTarget,
+			downTarget: vp.downTarget,
+			upY: top,
+			downY: top + totalRows - 1,
+			showArrows: false,
+		};
+	}
+
 	const maxTicks = availHeight - 2;
 	if (maxTicks <= 0) return undefined;
 
@@ -122,13 +152,16 @@ export function computeOutlineGeometry(
 		downTarget: vp.downTarget,
 		upY: top,
 		downY: ticksY + (windowEnd - start),
+		showArrows: true,
 	};
 }
 
 export function hitTestRail(geo: RailGeometry, x: number, y: number): RailHit | undefined {
 	if (x < 0 || x >= RAIL_WIDTH || y < 0 || y >= geo.height) return undefined;
-	if (y === geo.upY) return { kind: "up" };
-	if (y === geo.downY) return { kind: "down" };
+	if (geo.showArrows !== false) {
+		if (y === geo.upY) return { kind: "up" };
+		if (y === geo.downY) return { kind: "down" };
+	}
 	if (y >= geo.ticksY) {
 		const rel = y - geo.ticksY;
 		const len = geo.windowEnd - geo.windowStart;
@@ -163,6 +196,7 @@ export function wrapPreviewLines(text: string, width: number, maxLines = 4): str
 }
 
 export class OutlinePreviewPopup implements Component {
+	ordinal = 1;
 	preview = "";
 	time = "";
 
@@ -179,6 +213,49 @@ export class OutlinePreviewPopup implements Component {
 		const body = wrapPreviewLines(this.preview, textW);
 		const lines = body.length ? body : [" "];
 
+		if (isPrototypeActive()) {
+			const palette = getThemeSurfacePalette(th);
+			const edge = (s: string) => themeFgRgb(th, palette.borderSubtle, s);
+			const headerLabel = time
+				? ` Turn #${this.ordinal} · ${time} `
+				: ` Turn #${this.ordinal} `;
+			const clippedHdr = truncateToWidth(headerLabel, Math.max(1, inner - 2), "…");
+			const rightDashes = Math.max(0, inner - 1 - visibleWidth(clippedHdr));
+
+			const out: string[] = [
+				paintThemeSurfaceRow(
+					th,
+					`${edge("╭─")}${themeFgRgb(th, palette.accentBright, clippedHdr)}${edge("─".repeat(rightDashes))}${edge("╮")}`,
+					safeWidth,
+					palette.popupHeaderBg,
+				),
+			];
+
+			for (const line of lines) {
+				const clipped = truncateToWidth(line, textW, "");
+				const pad = " ".repeat(Math.max(0, textW - visibleWidth(clipped)));
+				out.push(
+					paintThemeSurfaceRow(
+						th,
+						`${edge("│")} ${th.fg("text", `${clipped}${pad}`)} ${edge("│")}`,
+						safeWidth,
+						palette.popupSurfaceBg,
+					),
+				);
+			}
+
+			out.push(
+				paintThemeSurfaceRow(
+					th,
+					`${edge("╰")}${edge("─".repeat(inner))}${edge("╯")}`,
+					safeWidth,
+					palette.popupSurfaceBg,
+				),
+			);
+			return out;
+		}
+
+		/* Legacy transparent rendering when prototype is off */
 		const edge = (s: string) => th.fg("borderMuted", s);
 		const fit = (s: string) => {
 			const clipped = truncateToWidth(s, textW, "");
@@ -210,6 +287,10 @@ export class OutlineRailComponent implements Component {
 	private lastHoverTurnId?: string;
 	private lastRenderedHeight = -1;
 	private syncScheduled = false;
+
+	get railPlacement(): "beside-scrollbar" | "over-scrollbar" {
+		return getPrototypeVariant() === "A" ? "over-scrollbar" : "beside-scrollbar";
+	}
 
 	constructor(
 		private readonly tui: TUI,
@@ -338,6 +419,8 @@ export class OutlineRailComponent implements Component {
 		}
 
 		const th = this.getTheme();
+		const palette = getThemeSurfacePalette(th);
+		const variant = getPrototypeVariant();
 		const lines = Array.from({ length: height }, () => " ".repeat(w));
 		const contentHeight = (this.scroll as any).contentHeight ?? 0;
 
@@ -352,7 +435,13 @@ export class OutlineRailComponent implements Component {
 			turns.length,
 			promptHeights,
 		);
-		const geo = computeOutlineGeometry(height, turns.length, vp, minTop);
+		const geo = computeOutlineGeometry(
+			height,
+			turns.length,
+			vp,
+			minTop,
+			variant === "C",
+		);
 		this.geometry = geo;
 		if (!geo) {
 			this.clearHover(true);
@@ -370,10 +459,14 @@ export class OutlineRailComponent implements Component {
 			}
 		}
 
-		const paint = (y: number, glyph: string, tone: "dim" | "muted" | "primary") => {
+		const paint = (y: number, glyph: string, tone: "dim" | "muted" | "primary" | "accent" | "hover") => {
 			if (y < 0 || y >= height) return;
 			const padded = padRailCell(glyph);
-			if (tone === "primary") {
+			if (tone === "hover") {
+				lines[y] = themeFgRgb(th, palette.accentBright, padded);
+			} else if (tone === "accent") {
+				lines[y] = themeFgRgb(th, palette.accent, padded);
+			} else if (tone === "primary") {
 				lines[y] = th.fg("text", padded);
 			} else if (tone === "muted") {
 				lines[y] = th.fg("muted", padded);
@@ -382,21 +475,64 @@ export class OutlineRailComponent implements Component {
 			}
 		};
 
-		const upOn = geo.upTarget !== undefined;
-		const downOn = geo.downTarget !== undefined;
-		paint(geo.upY, "▲", this.hovered?.kind === "up" && upOn ? "primary" : upOn ? "muted" : "dim");
-		paint(geo.downY, "▼", this.hovered?.kind === "down" && downOn ? "primary" : downOn ? "muted" : "dim");
+		if (geo.showArrows !== false) {
+			const upOn = geo.upTarget !== undefined;
+			const downOn = geo.downTarget !== undefined;
+			paint(
+				geo.upY,
+				"▲",
+				this.hovered?.kind === "up" && upOn
+					? variant === "off"
+						? "primary"
+						: "hover"
+					: upOn
+						? "muted"
+						: "dim",
+			);
+			paint(
+				geo.downY,
+				"▼",
+				this.hovered?.kind === "down" && downOn
+					? variant === "off"
+						? "primary"
+						: "hover"
+					: downOn
+						? "muted"
+						: "dim",
+			);
+		}
 
 		for (let i = 0; i < geo.windowEnd - geo.windowStart; i++) {
 			const turn = geo.windowStart + i;
 			const isActive =
 				geo.active !== undefined && turn >= (geo.activeFrom ?? geo.active) && turn <= geo.active;
 			const isHovered = this.hovered?.kind === "tick" && this.hovered.turn === turn;
-			paint(
-				geo.ticksY + i,
-				isHovered ? "━━" : isActive ? "──" : "─",
-				isHovered || isActive ? "primary" : "dim",
-			);
+
+			if (variant === "off") {
+				paint(
+					geo.ticksY + i,
+					isHovered ? "━━" : isActive ? "──" : "─",
+					isHovered || isActive ? "primary" : "dim",
+				);
+			} else if (variant === "C") {
+				paint(
+					geo.ticksY + i,
+					isHovered ? "✦" : isActive ? "✦" : "•",
+					isHovered ? "hover" : isActive ? "accent" : "dim",
+				);
+			} else if (variant === "A") {
+				paint(
+					geo.ticksY + i,
+					isHovered ? "══" : isActive ? "━━" : "╸",
+					isHovered ? "hover" : isActive ? "accent" : "dim",
+				);
+			} else {
+				paint(
+					geo.ticksY + i,
+					isHovered ? "══" : isActive ? "━━" : "──",
+					isHovered ? "hover" : isActive ? "accent" : "dim",
+				);
+			}
 		}
 
 		return lines;

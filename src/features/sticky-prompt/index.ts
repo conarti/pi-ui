@@ -11,15 +11,27 @@ import {
 	type FullscreenShellContext,
 	type StickyOverlayRender,
 } from "../../shared/fullscreen-layout.ts";
-import { claimHover } from "../../shared/runtime-hooks.ts";
 import {
+	matchesLayoutChord,
+	registerOptionShortcutChord,
+} from "../../shared/keyboard-layout.ts";
+import {
+	claimHover,
+	copyToClipboard,
+	createCopyFeedbackTimerRegistry,
+} from "../../shared/runtime-hooks.ts";
+import { extractSkillInvocations } from "../../shared/skill-tags.ts";
+import {
+	sanitizeTurnText,
 	selectStickyTurn,
 	type IndexedTurn,
 	type StickyDisplayMode,
 	type TranscriptTurnIndex,
 } from "../../shared/turn-index.ts";
+import { getPrototypeVariant, isPrototypeActive } from "../transcript/prototype-state.ts";
 import {
 	renderUserPromptCardLines,
+	type PromptCardHitBox,
 	type PromptPillHitTarget,
 } from "../transcript/user-prompt.ts";
 
@@ -32,6 +44,13 @@ export interface StickyPromptConfig {
 
 const STICKY_CONFIG_KEY = Symbol.for("conarti.pi-ui.sticky-config.v1");
 const COLLAPSED_MAX_CONTENT_LINES = 3;
+
+const stickyCopyTimers = createCopyFeedbackTimerRegistry<{
+	copied: boolean;
+	__conartiCopyTimer?: unknown;
+}>("conarti.pi-ui.sticky-copy-timers.v1", (target) => {
+	target.copied = false;
+});
 
 export function getStickyConfig(): StickyPromptConfig {
 	const g = globalThis as Record<symbol, StickyPromptConfig | undefined>;
@@ -51,7 +70,10 @@ export class StickyPromptBar implements Component {
 	private active: IndexedTurn | undefined;
 	private expanded = new Set<string>();
 	private hovered = false;
+	private copyState = { copied: false };
+	private copyHit: PromptCardHitBox | undefined;
 	private pillHits: readonly PromptPillHitTarget[] = [];
+	private lastTruncated = false;
 	private disposed = false;
 	lastRenderedHeight = 0;
 	lastVisibleHeight = 0;
@@ -72,7 +94,10 @@ export class StickyPromptBar implements Component {
 		this.active = undefined;
 		this.expanded.clear();
 		this.hovered = false;
+		this.copyState.copied = false;
+		this.copyHit = undefined;
 		this.pillHits = [];
+		this.lastTruncated = false;
 		this.lastRenderedHeight = 0;
 		this.lastVisibleHeight = 0;
 		this.lastPushOffset = 0;
@@ -81,6 +106,7 @@ export class StickyPromptBar implements Component {
 
 	dispose(): void {
 		this.disposed = true;
+		stickyCopyTimers.clearAll();
 		this.reset();
 	}
 
@@ -105,7 +131,10 @@ export class StickyPromptBar implements Component {
 		return mounted.findLast((t) => t.start <= scrollTop) ?? mounted[0];
 	}
 
-	private findAdjacentMountedTurn(fromTurn: IndexedTurn | undefined, direction: "prev" | "next"): IndexedTurn | undefined {
+	private findAdjacentMountedTurn(
+		fromTurn: IndexedTurn | undefined,
+		direction: "prev" | "next",
+	): IndexedTurn | undefined {
 		if (!fromTurn) return undefined;
 		if (direction === "prev") {
 			for (let i = fromTurn.index - 1; i >= 0; i--) {
@@ -152,11 +181,34 @@ export class StickyPromptBar implements Component {
 			return undefined;
 		}
 
+		const matchedCopy =
+			this.copyHit &&
+			event.y === this.copyHit.y &&
+			event.x >= this.copyHit.xStart &&
+			event.x <= this.copyHit.xEnd;
+		if (matchedCopy) {
+			const raw = sanitizeTurnText(this.active.prompt).trim();
+			copyToClipboard(extractSkillInvocations(raw).cleanCopyText);
+			this.copyState.copied = true;
+			this.shell.requestRender();
+			stickyCopyTimers.arm(this.copyState, (target) => {
+				target.copied = false;
+				this.shell.requestRender();
+			});
+			return { handled: true, render: true };
+		}
+
 		const matchedPill = this.pillHits.find(
 			(hit) => event.y === hit.y && event.x >= hit.xStart && event.x < hit.xEnd,
 		);
 		if (matchedPill) {
 			matchedPill.onClick?.(event.screenX, event.screenY);
+			return { handled: true, render: true };
+		}
+
+		/* In prototype mode, short non-truncated prompts jump back to the start of the Turn instead of fake-expanding */
+		if (isPrototypeActive() && !this.lastTruncated && !this.expanded.has(this.active.id)) {
+			this.turnIndex.jumpToTurn(this.active.index, { direction: "prev" });
 			return { handled: true, render: true };
 		}
 
@@ -197,7 +249,9 @@ export class StickyPromptBar implements Component {
 
 	private renderInternal(cardWidth: number, viewportWidth?: number): string[] {
 		this.active = undefined;
+		this.copyHit = undefined;
 		this.pillHits = [];
+		this.lastTruncated = false;
 		if (this.disposed || !this.config.enabled || cardWidth < 16) {
 			this.lastRenderedHeight = 0;
 			return [];
@@ -222,15 +276,17 @@ export class StickyPromptBar implements Component {
 			return [];
 		}
 
+		const variant = getPrototypeVariant();
 		const isExpanded = this.expanded.has(this.active.id);
 		const vpHeight = scroll.viewportHeight ?? 0;
+		const collapsedLimit = variant === "A" ? 2 : COLLAPSED_MAX_CONTENT_LINES;
 		const maxContentLines = isExpanded
 			? vpHeight > 0
 				? Math.max(1, vpHeight - 3)
 				: undefined
-			: vpHeight > 0 && vpHeight < COLLAPSED_MAX_CONTENT_LINES + 2
+			: vpHeight > 0 && vpHeight < collapsedLimit + 2
 				? Math.max(1, vpHeight - 2)
-				: COLLAPSED_MAX_CONTENT_LINES;
+				: collapsedLimit;
 
 		const rendered = renderUserPromptCardLines(
 			this.active.prompt,
@@ -239,15 +295,22 @@ export class StickyPromptBar implements Component {
 			{
 				formattedTime: this.config.showTimestamp ? this.active.formattedTime : "",
 				hovered: this.hovered,
-				showCopyBadge: false,
+				copied: this.copyState.copied,
+				showCopyBadge: variant === "B",
 				maxContentLines,
+				isExpandedSticky: isExpanded,
+				turnOrdinal: this.active.ordinal,
+				bottomHairline: variant === "A",
+				compactRibbon: variant === "C" && !isExpanded,
 				surface: "sticky",
 				messageId: this.active.id,
 				timestamp: this.active.timestamp,
 			},
 		);
 
+		this.copyHit = rendered.copyHit;
 		this.pillHits = rendered.pillHits;
+		this.lastTruncated = rendered.truncated;
 		this.lastRenderedHeight = rendered.lines.length;
 		return rendered.lines;
 	}
@@ -260,11 +323,11 @@ export function registerStickyPromptCommands(
 	const usage = "/sticky [toggle | prev | next | expand | time | auto | always | status]";
 
 	pi.registerCommand("sticky", {
-		description: `Закреплённый сверху активный промпт: ${usage}`,
+		description: `Pinned active user prompt: ${usage}`,
 		handler: async (args, ctx) => {
 			const bar = getBar();
 			if (!bar) {
-				ctx.ui.notify("Sticky prompt доступен в fullscreen TUI", "info");
+				ctx.ui.notify("Sticky Prompt is available in fullscreen TUI mode.", "info");
 				return;
 			}
 			const cfg = bar.config;
@@ -273,7 +336,7 @@ export function registerStickyPromptCommands(
 				case "":
 				case "toggle":
 					cfg.enabled = !cfg.enabled;
-					ctx.ui.notify(`Sticky prompt: ${cfg.enabled ? "включён" : "выключен"}`, "info");
+					ctx.ui.notify(`Sticky Prompt: ${cfg.enabled ? "enabled" : "disabled"}`, "info");
 					break;
 				case "prev":
 				case "up":
@@ -298,7 +361,7 @@ export function registerStickyPromptCommands(
 				case "auto":
 				case "always":
 					cfg.mode = sub;
-					ctx.ui.notify(`Sticky режим: ${cfg.mode}`, "info");
+					ctx.ui.notify(`Sticky mode: ${cfg.mode}`, "info");
 					break;
 				case "status":
 					ctx.ui.notify(
@@ -307,7 +370,7 @@ export function registerStickyPromptCommands(
 					);
 					return;
 				default:
-					ctx.ui.notify(`Использование: ${usage}`, "info");
+					ctx.ui.notify(`Usage: ${usage}`, "info");
 					return;
 			}
 			bar.invalidate();
@@ -320,16 +383,30 @@ export function bindStickyExpandKey(
 	shell: FullscreenShellContext,
 	bar: StickyPromptBar,
 ): () => void {
-	return ctx.ui.onTerminalInput((data) => {
+	const unregisterOptionChord = registerOptionShortcutChord("alt+s");
+	const unsubscribeInput = ctx.ui.onTerminalInput((data) => {
 		if (
 			!isKeyRelease(data) &&
 			!isKeyRepeat(data) &&
 			bar.config.enabled &&
-			bar.getActivePrompt() &&
-			shell.keybindings.matches(data, "app.tools.expand")
+			bar.getActivePrompt()
 		) {
-			bar.toggleExpanded();
+			/* Decouple from Ctrl+O (app.tools.expand) in prototype mode; use Alt+S so tool expand never toggles Sticky Prompt */
+			if (isPrototypeActive()) {
+				if (matchesLayoutChord(data, "alt+s")) {
+					bar.toggleExpanded();
+					return { consume: true };
+				}
+				return undefined;
+			}
+			if (shell.keybindings.matches(data, "app.tools.expand")) {
+				bar.toggleExpanded();
+			}
 		}
 		return undefined;
 	});
+	return () => {
+		unregisterOptionChord();
+		unsubscribeInput();
+	};
 }

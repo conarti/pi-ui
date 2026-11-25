@@ -6,8 +6,10 @@ import {
 	registerTransientHoverDismisser,
 } from "../../shared/host-runtime.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
+import { extractSkillInvocations } from "../../shared/skill-tags.ts";
 import type { IndexedTurn, TranscriptTurnIndex } from "../../shared/turn-index.ts";
 import { reconstructTurnPromptText } from "../prompt-chips/registry.ts";
+import { isPrototypeActive } from "../transcript/prototype-state.ts";
 import {
 	OutlinePreviewPopup,
 	OutlineRailComponent,
@@ -78,11 +80,11 @@ export function createOutlineRailSlot(
 		const termCols = shell.tui.terminal?.columns ?? 80;
 		const termRows = shell.tui.terminal?.rows ?? 30;
 		const viewportRows = shell.scroll.viewportHeight || termRows;
+		const protoOn = isPrototypeActive();
 		const maxCardW = Math.max(10, termCols - RAIL_WIDTH - 5);
-		const maxText = Math.max(
-			6,
-			Math.min(40, maxCardW - 4, Math.floor((termCols - RAIL_WIDTH - 2) * 0.55)),
-		);
+		const maxText = protoOn
+			? Math.max(8, Math.min(46, maxCardW - 4, Math.floor((termCols - RAIL_WIDTH - 2) * 0.58)))
+			: Math.max(6, Math.min(40, maxCardW - 4, Math.floor((termCols - RAIL_WIDTH - 2) * 0.55)));
 
 		const entries = ctx.sessionManager?.getEntries?.() ?? ctx.sessionManager?.getBranch?.();
 		const reconstructed = reconstructTurnPromptText(turn.prompt, {
@@ -90,23 +92,37 @@ export function createOutlineRailSlot(
 			messageId: turn.id,
 			entries,
 		});
-		const previewSource = reconstructed || turn.title || turn.prompt;
+		const rawSource = reconstructed || turn.title || turn.prompt;
+		const previewSource = isPrototypeActive()
+			? extractSkillInvocations(rawSource).previewText
+			: rawSource;
+
 		const bodyLines = wrapPreviewLines(previewSource, maxText);
 		const timeText = turn.formattedTime ?? "";
+		const headerTitle = protoOn
+			? timeText
+				? `Turn #${turn.ordinal} · ${timeText}`
+				: `Turn #${turn.ordinal}`
+			: "";
+
 		const contentW = Math.max(
-			Math.min(10, maxText),
-			visibleWidth(timeText),
+			Math.min(12, maxText),
+			visibleWidth(protoOn ? headerTitle : timeText),
 			...bodyLines.map(visibleWidth),
 		);
 		const cardW = Math.min(maxCardW, contentW + 4);
-		const cardH = (bodyLines.length || 1) + 2 + (timeText ? 1 : 0);
+		const cardH = protoOn
+			? (bodyLines.length || 1) + 2
+			: (bodyLines.length || 1) + 2 + (timeText ? 1 : 0);
 
-		const maxRow = Math.max(0, Math.min(termRows - cardH, viewportRows - cardH));
+		const topGuard = protoOn ? 1 : 0;
+		const maxRow = Math.max(topGuard, Math.min(termRows - cardH, topGuard + viewportRows - cardH));
+		popup.ordinal = turn.ordinal;
 		popup.time = timeText;
 		popup.preview = previewSource;
 		popupOptions.width = cardW;
 		popupOptions.col = Math.max(1, termCols - RAIL_WIDTH - 1 - cardW - 1);
-		popupOptions.row = Math.max(0, Math.min(screenY - Math.floor(cardH / 2), maxRow));
+		popupOptions.row = Math.max(topGuard, Math.min(screenY - Math.floor(cardH / 2), maxRow));
 		popupVisible = true;
 		if (!popupHandle) {
 			popupHandle = shell.tui.showOverlay(popup, popupOptions);
@@ -143,7 +159,7 @@ export function createOutlineRailSlot(
 export function registerOutlineCommands(pi: ExtensionAPI, requestRender: () => void): void {
 	const toggle = (ctx: ExtensionContext) => {
 		if (ctx.mode !== "tui") {
-			ctx.ui.notify("Навигация по репликам доступна в fullscreen TUI", "warning");
+			ctx.ui.notify("Outline Rail is available in fullscreen TUI mode.", "warning");
 			return;
 		}
 		const settings = getOutlineSettings();
@@ -151,18 +167,18 @@ export function registerOutlineCommands(pi: ExtensionAPI, requestRender: () => v
 		getActiveHostRuntime()?.scroll?.invalidate?.();
 		requestRender();
 		ctx.ui.notify(
-			`Панель навигации справа: ${settings.enabled ? "показана" : "скрыта"}`,
+			`Outline Rail: ${settings.enabled ? "shown" : "hidden"}`,
 			"info",
 		);
 	};
 
 	pi.registerShortcut("ctrl+alt+o", {
-		description: "Показать / скрыть правую панель навигации по репликам",
+		description: "Toggle right-side conversation Outline Rail",
 		handler: async (ctx) => toggle(ctx),
 	});
 
 	pi.registerCommand("outline", {
-		description: "Показать / скрыть правую панель навигации по репликам (Ctrl+Alt+O)",
+		description: "Toggle right-side conversation Outline Rail (Ctrl+Alt+O)",
 		handler: async (_args, ctx) => toggle(ctx),
 	});
 }

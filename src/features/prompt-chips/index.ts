@@ -91,8 +91,8 @@ export function styleInlinePromptChip(
 			bg = [219, 234, 250];
 			fg = [30, 64, 175];
 		} else {
-			bg = [212, 234, 244];
-			fg = [14, 116, 144];
+			bg = [219, 234, 254];
+			fg = [37, 99, 235];
 		}
 	} else if (options.active) {
 		bg = [44, 68, 98];
@@ -104,8 +104,8 @@ export function styleInlinePromptChip(
 		bg = [33, 49, 68];
 		fg = [148, 198, 242];
 	} else {
-		bg = [32, 50, 66];
-		fg = [134, 202, 224];
+		bg = [34, 48, 68];
+		fg = [147, 197, 253];
 	}
 
 	return bgRgb(bg, fgRgb(fg, token));

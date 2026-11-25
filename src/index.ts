@@ -2,7 +2,11 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerAskUserFeature } from "./features/ask-user/index.ts";
 import { mountComposer, setActiveComposerEditor } from "./features/chrome/composer.ts";
 import { registerComposerWorkingAnimation } from "./features/chrome/working-indicator.ts";
-import { mountSessionHeader } from "./features/chrome/header.ts";
+import {
+	createPinnedSessionHeaderSlot,
+	mountSessionHeader,
+	refreshGitBranchAsync,
+} from "./features/chrome/header.ts";
 import { registerCommandPaletteFeature } from "./features/command-palette/index.ts";
 import { showContextInspector } from "./features/context-inspector/index.ts";
 import { createOutlineRailSlot, registerOutlineCommands } from "./features/outline-rail/index.ts";
@@ -106,7 +110,9 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 	pi.on("message_start", refreshViewport);
 	pi.on("message_update", refreshViewport);
 	pi.on("message_end", refreshViewport);
-	pi.on("agent_end", refreshViewport);
+	pi.on("agent_end", () => {
+		refreshViewport();
+	});
 	pi.on("session_tree", resetViewport);
 	pi.on("session_compact", resetViewport);
 
@@ -159,8 +165,10 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 			};
 
 			const outlineRail = createOutlineRailSlot(ctx, shell, turnIndex);
+			const pinnedHeader = createPinnedSessionHeaderSlot(pi, ctx);
 
 			return {
+				pinnedHeader,
 				topSlot: stickyBar,
 				rightRail: outlineRail,
 			};
