@@ -111,6 +111,19 @@ describe("Viewport chrome pure geometry and push-offset math", () => {
 		expect(extractActiveBgSgrAtColumn(paletteRow, 6)).toBe("\x1b[48;5;236m");
 		expect(extractActiveBgSgrAtColumn(paletteRow, 16)).toBe("");
 
+		const coloredPlainRow =
+			"\x1b[38;2;224;175;104mHeading\x1b[39m \x1b[38;2;158;206;106mcode\x1b[39m \x1b[38;5;106mmuted\x1b[39m \x1b[58;2;45;102;107m\x1b[4mlink\x1b[24m\x1b[59m \x1b[38:2::36:41:47mtext\x1b[39m";
+		expect(extractActiveBgSgrAtColumn(coloredPlainRow, 6)).toBe("");
+		expect(extractActiveBgSgrAtColumn(coloredPlainRow, 11)).toBe("");
+		expect(extractActiveBgSgrAtColumn(coloredPlainRow, 17)).toBe("");
+		expect(extractActiveBgSgrAtColumn(coloredPlainRow, 22)).toBe("");
+		expect(extractActiveBgSgrAtColumn(coloredPlainRow, 30)).toBe("");
+
+		const codeBodyRow =
+			"\x1b[48;2;27;32;41m\x1b[38;2;64;78;102m▎\x1b[39m \x1b[38;2;86;211;100m\"value\"\x1b[39m      \x1b[49m";
+		expect(extractActiveBgSgrAtColumn(codeBodyRow, 12)).toBe("\x1b[48;2;27;32;41m");
+		expect(extractActiveBgSgrAtColumn(codeBodyRow, 20)).toBe("");
+
 		const vp = computeRailViewport(0, 40, 14, [0, 10, 20], 3);
 		const normalGeo = computeOutlineGeometry(14, 3, vp, 4);
 		expect(normalGeo?.upY).toBe(4);

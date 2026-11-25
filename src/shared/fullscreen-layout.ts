@@ -148,32 +148,61 @@ export function extractActiveBgSgrAtColumn(line: string, targetCol: number): str
 		if (line.charCodeAt(i) === 0x1b) {
 			const next = line[i + 1];
 			if (next === "[") {
-				const csi = /^\x1b\[([0-9;]*)([A-Za-z])/.exec(line.slice(i));
+				const csi = /^\x1b\[([0-9;:?<=>]*)([A-Za-z])/.exec(line.slice(i));
 				if (csi) {
-					if (csi[2] === "m") {
-						const raw = csi[1] ?? "";
-						const codes = raw.length === 0 ? [0] : raw.split(";").map((s) => (s === "" ? 0 : Number(s)));
+					const raw = csi[1] ?? "";
+					if (csi[2] === "m" && !/^[?<=>]/.test(raw)) {
+						const tokens = raw.length === 0 ? ["0"] : raw.split(";");
 						let k = 0;
-						while (k < codes.length) {
-							const c = codes[k] ?? 0;
+						while (k < tokens.length) {
+							const tok = tokens[k] ?? "";
+							if (tok.includes(":")) {
+								const sub = tok.split(":").map((s) => (s === "" ? 0 : Number(s)));
+								const lead = sub[0] ?? 0;
+								if (lead === 0 || lead === 49) {
+									activeBg = "";
+								} else if (lead === 48 && sub[1] === 5 && sub[2] !== undefined) {
+									activeBg = `\x1b[48;5;${sub[2]}m`;
+								} else if (lead === 48 && sub[1] === 2) {
+									const baseIdx = sub.length >= 6 ? 3 : 2;
+									if (
+										sub[baseIdx] !== undefined &&
+										sub[baseIdx + 1] !== undefined &&
+										sub[baseIdx + 2] !== undefined
+									) {
+										activeBg = `\x1b[48;2;${sub[baseIdx]};${sub[baseIdx + 1]};${sub[baseIdx + 2]}m`;
+									}
+								}
+								k += 1;
+								continue;
+							}
+							const c = tok === "" ? 0 : Number(tok);
 							if (c === 0 || c === 49) {
 								activeBg = "";
 								k += 1;
 							} else if ((c >= 40 && c <= 47) || (c >= 100 && c <= 107)) {
 								activeBg = `\x1b[${c}m`;
 								k += 1;
-							} else if (c === 48 && codes[k + 1] === 5 && codes[k + 2] !== undefined) {
-								activeBg = `\x1b[48;5;${codes[k + 2]}m`;
-								k += 3;
-							} else if (
-								c === 48 &&
-								codes[k + 1] === 2 &&
-								codes[k + 2] !== undefined &&
-								codes[k + 3] !== undefined &&
-								codes[k + 4] !== undefined
-							) {
-								activeBg = `\x1b[48;2;${codes[k + 2]};${codes[k + 3]};${codes[k + 4]}m`;
-								k += 5;
+							} else if (c === 38 || c === 48 || c === 58) {
+								const mode = tokens[k + 1] !== undefined ? Number(tokens[k + 1]) : -1;
+								if (mode === 5 && tokens[k + 2] !== undefined) {
+									if (c === 48) {
+										activeBg = `\x1b[48;5;${Number(tokens[k + 2])}m`;
+									}
+									k += 3;
+								} else if (
+									mode === 2 &&
+									tokens[k + 2] !== undefined &&
+									tokens[k + 3] !== undefined &&
+									tokens[k + 4] !== undefined
+								) {
+									if (c === 48) {
+										activeBg = `\x1b[48;2;${Number(tokens[k + 2])};${Number(tokens[k + 3])};${Number(tokens[k + 4])}m`;
+									}
+									k += 5;
+								} else {
+									k += 1;
+								}
 							} else {
 								k += 1;
 							}
@@ -502,6 +531,7 @@ export class ViewportChromeCompositor {
 						const row = boxRect.y + i;
 						if (row < 0 || row >= result.length) continue;
 						const baseRow = result[row] ?? "";
+						const isImgRow = baseRow.includes("\x1b_G") || baseRow.includes("\x1b]1337;File=");
 						const rawRailLine = railLines[i]!;
 						const plainRail = stripTerminalSequences(rawRailLine);
 						const leadingBlank = plainRail.startsWith(" ") && plainRail.length >= 2;
@@ -510,15 +540,28 @@ export class ViewportChromeCompositor {
 						const trimmedRail = leadingBlank
 							? sliceByColumn(rawRailLine, 1, targetWidth, true)
 							: rawRailLine;
-						const bgSgr =
-							!baseRow.includes("\x1b_G") && !baseRow.includes("\x1b]1337;File=")
-								? extractActiveBgSgrAtColumn(baseRow, targetCol)
-								: "";
-						const railOverlay = bgSgr
-							? `${bgSgr}${trimmedRail.replace(/\x1b\[0m/g, `\x1b[0m${bgSgr}`)}`
-							: trimmedRail;
+						const applyRailBg = (seg: string, bg: string): string =>
+							bg
+								? `${bg}${seg.replace(/\x1b\[(?:0|49)m/g, (m) => `${m}${bg}`)}`
+								: `\x1b[49m${seg}`;
+						const bgStart = !isImgRow ? extractActiveBgSgrAtColumn(baseRow, targetCol) : "";
+						const bgSecond =
+							!isImgRow && !leadingBlank
+								? extractActiveBgSgrAtColumn(baseRow, targetCol + 1)
+								: bgStart;
+						/* pi-tui extractSegments не сбрасывает хвостовой SGR без символа после него перед beforePad */
+						const safeBaseRow =
+							!isImgRow && baseRow.includes("\x1b[") && visibleWidth(baseRow) < targetCol
+								? `${baseRow}${bgStart ? `\x1b[0m${bgStart}` : "\x1b[0m"} `
+								: baseRow;
+						const railOverlay =
+							bgStart === bgSecond
+								? bgStart
+									? applyRailBg(trimmedRail, bgStart)
+									: trimmedRail
+								: `${applyRailBg(sliceByColumn(rawRailLine, 0, 1, true), bgStart)}${applyRailBg(sliceByColumn(rawRailLine, 1, 1, true), bgSecond)}`;
 						result[row] = compositeTuiLine(
-							baseRow,
+							safeBaseRow,
 							railOverlay,
 							targetCol,
 							targetWidth,

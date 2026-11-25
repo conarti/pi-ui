@@ -827,4 +827,96 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 		await harness.mouseClick(44, upRow + 1);
 		expect(getActiveHostRuntime()!.scroll!.scrollTop).toBe(rail.offsetOf(0));
 	});
+
+	it("inherits true underlying background under Outline Rail across colored Markdown text, headings, rules, prompts, and code cards", async () => {
+		const t1 = new Date(2026, 3, 19, 11, 0).getTime();
+		const t2 = new Date(2026, 3, 19, 11, 5).getTime();
+		const lightReply = [
+			"Plain assistant prose reaching right edge of split pane cleanly now.",
+			"> Muted blockquote text reaching right edge of split pane cleanly now.",
+			...Array.from({ length: 16 }, (_, i) => `Paragraph line ${i + 1} reaching right edge of split pane.`),
+		].join("\n");
+
+		harness = await createInteractiveHarness({
+			theme: "light",
+			width: 46,
+			height: 24,
+			initialEntries: [
+				makeUserEntry("u1", null, "First light prompt", t1),
+				makeAssistantEntry("a1", "u1", lightReply, t1 + 1000),
+				makeUserEntry("u2", "a1", "Second light prompt", t2),
+				makeAssistantEntry("a2", "u2", lightReply, t2 + 1000),
+			],
+		});
+
+		const lightScroll = getActiveHostRuntime()!.scroll!;
+		const lightRail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
+		lightScroll.scrollTo(2, { disableFollow: true });
+		const lightTextScreen = harness.screen();
+		const lightGeo = lightRail.geometry!;
+		expect(lightGeo).toBeDefined();
+		for (let r = lightGeo.upY; r <= lightGeo.downY; r++) {
+			const leftBg = lightTextScreen.cellAt(r, 4)?.bg;
+			expect(lightTextScreen.cellAt(r, 44)?.bg).toEqual(leftBg);
+			expect(lightTextScreen.cellAt(r, 43)?.bg).toEqual(leftBg);
+		}
+
+		await harness.dispose();
+		const darkRichReply = [
+			"# Heading",
+			"---",
+			"```ts",
+			"const greeting = \"emerald string literal reaching right rail\";",
+			"const second = \"another emerald literal reaching right rail\";",
+			"const third = \"yet another emerald line under outline rail\";",
+			"const fourth = \"fourth emerald line under outline rail\";",
+			"```",
+			...Array.from({ length: 14 }, (_, i) => `Filler line ${i + 1}`),
+		].join("\n");
+
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 46,
+			height: 24,
+			initialEntries: [
+				makeUserEntry("u1", null, "First dark prompt", t1),
+				makeAssistantEntry("a1", "u1", darkRichReply, t1 + 1000),
+				makeUserEntry("u2", "a1", "Second dark prompt", t2),
+				makeAssistantEntry("a2", "u2", darkRichReply, t2 + 1000),
+			],
+		});
+
+		const darkScroll = getActiveHostRuntime()!.scroll!;
+		const darkRail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
+		let sawCodeCardUnderTwoColTick = false;
+		for (let top = 0; top <= 8; top++) {
+			darkScroll.scrollTo(top, { disableFollow: true });
+			const withRail = harness.screen();
+			const geo = darkRail.geometry!;
+			expect(geo).toBeDefined();
+
+			await harness.submitInput("/outline");
+			darkScroll.scrollTo(top, { disableFollow: true });
+			const withoutRail = harness.screen();
+
+			await harness.submitInput("/outline");
+			darkScroll.scrollTo(top, { disableFollow: true });
+
+			for (let r = geo.upY; r <= geo.downY; r++) {
+				expect(withRail.cellAt(r, 43)?.bg).toEqual(withoutRail.cellAt(r, 43)?.bg);
+				expect(withRail.cellAt(r, 44)?.bg).toEqual(withoutRail.cellAt(r, 44)?.bg);
+				if (
+					withRail.sliceText(r, 43, 45) === "──" &&
+					withoutRail.cellAt(r, 43)?.bg.kind === "rgb" &&
+					withoutRail.cellAt(r, 44)?.bg.kind === "default"
+				) {
+					sawCodeCardUnderTwoColTick = true;
+				}
+				if (withRail.rowText(r).trimStart().startsWith("Heading")) {
+					expect(withRail.cellAt(r, 20)?.underline).toBe(false);
+				}
+			}
+		}
+		expect(sawCodeCardUnderTwoColTick).toBe(true);
+	});
 });
