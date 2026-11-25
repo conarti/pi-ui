@@ -298,6 +298,7 @@ export interface InteractiveHarnessOptions {
 	customTools?: ToolDefinition[];
 	models?: FauxModelDefinition[];
 	responses?: FauxResponseStep[];
+	suggestionResponses?: FauxResponseStep[];
 	tokensPerSecond?: number;
 	tokenSize?: { min?: number; max?: number };
 	thinkingLevel?: ThinkingLevel;
@@ -405,12 +406,15 @@ export interface InteractiveHarness {
 	readonly tui: TUI;
 	readonly faux: FauxProviderHandle;
 	readonly calls: readonly RecordedFauxCall[];
+	readonly suggestionCalls: readonly RecordedFauxCall[];
 	readonly cwd: string;
 	readonly agentDir: string;
 	readonly width: number;
 	readonly height: number;
 	setResponses(steps: FauxResponseStep[]): void;
 	appendResponses(steps: FauxResponseStep[]): void;
+	setSuggestionResponses(steps: FauxResponseStep[]): void;
+	appendSuggestionResponses(steps: FauxResponseStep[]): void;
 	setClipboard(next: MutableClipboardState): void;
 	sendInput(data: string): Promise<void>;
 	pressKey(sequence: string): Promise<void>;
@@ -514,53 +518,78 @@ export async function createInteractiveHarness(
 		: SettingsManager.inMemory(baseSettings as never, { projectTrusted });
 
 	const recordedCalls: RecordedFauxCall[] = [];
+	const recordedSuggestionCalls: RecordedFauxCall[] = [];
+	let hasExplicitSuggestionResponses = options?.suggestionResponses !== undefined;
 	const harnessId = ++fauxHarnessSeq;
 	const compatSourceId = `pi-ui-interactive-harness-${harnessId}`;
+	const modelDefs: FauxModelDefinition[] = options?.models ?? [
+		{
+			id: "faux-1",
+			name: "Faux Reasoning",
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 128000,
+			maxTokens: 16384,
+		},
+	];
 
 	const rawFaux = fauxProvider({
 		provider: "faux",
 		api: `faux-api-${harnessId}`,
-		models: options?.models ?? [
-			{
-				id: "faux-1",
-				name: "Faux Reasoning",
-				reasoning: true,
-				input: ["text", "image"],
-				contextWindow: 128000,
-				maxTokens: 16384,
-			},
-		],
+		models: modelDefs,
 		tokensPerSecond: options?.tokensPerSecond,
 		tokenSize: options?.tokenSize,
 	});
 
-	const wrapStep = (step: FauxResponseStep): FauxResponseFactory => {
-		return async (context, streamOptions, state, model) => {
-			const record: RecordedFauxCall = {
-				index: recordedCalls.length,
-				context,
-				messages: [...context.messages],
-				systemPrompt: getCurrentSystemPrompt(context.messages),
-				tools: getCurrentTools(context.messages),
-				options: streamOptions,
-				signal: streamOptions?.signal,
-				model,
-				aborted: Boolean(streamOptions?.signal?.aborted),
+	/* Отдельный поток fauxProvider для фоновых Prompt Suggestion, чтобы не расходовать очередь основных ответов responses */
+	const suggestionFaux = fauxProvider({
+		provider: "faux",
+		api: `faux-api-${harnessId}`,
+		models: modelDefs,
+	});
+
+	const makeStepWrapper = (targetList: RecordedFauxCall[]) => {
+		return (step: FauxResponseStep): FauxResponseFactory => {
+			return async (context, streamOptions, state, model) => {
+				const record: RecordedFauxCall = {
+					index: targetList.length,
+					context,
+					messages: [...context.messages],
+					systemPrompt: getCurrentSystemPrompt(context.messages),
+					tools: getCurrentTools(context.messages),
+					options: streamOptions,
+					signal: streamOptions?.signal,
+					model,
+					aborted: Boolean(streamOptions?.signal?.aborted),
+				};
+				if (streamOptions?.signal && !streamOptions.signal.aborted) {
+					streamOptions.signal.addEventListener(
+						"abort",
+						() => {
+							record.aborted = true;
+						},
+						{ once: true },
+					);
+				}
+				targetList.push(record);
+				return typeof step === "function"
+					? await step(context, streamOptions, state, model)
+					: step;
 			};
-			if (streamOptions?.signal && !streamOptions.signal.aborted) {
-				streamOptions.signal.addEventListener(
-					"abort",
-					() => {
-						record.aborted = true;
-					},
-					{ once: true },
-				);
-			}
-			recordedCalls.push(record);
-			return typeof step === "function"
-				? await step(context, streamOptions, state, model)
-				: step;
 		};
+	};
+
+	const wrapStep = makeStepWrapper(recordedCalls);
+	const wrapSuggestionStep = makeStepWrapper(recordedSuggestionCalls);
+
+	const isPromptSuggestionRequest = (context: { messages?: readonly unknown[] }): boolean => {
+		const trailing = context.messages?.at(-1);
+		if (!trailing || typeof trailing !== "object") return false;
+		const serialized = JSON.stringify(trailing);
+		return (
+			serialized.includes("[Prompt suggestion]") ||
+			serialized.includes("[Suggestion mode]")
+		);
 	};
 
 	const faux: FauxProviderHandle = {
@@ -573,16 +602,59 @@ export async function createInteractiveHarness(
 		},
 	};
 
+	const setSuggestionResponses = (steps: FauxResponseStep[]) => {
+		hasExplicitSuggestionResponses = true;
+		suggestionFaux.setResponses(steps.map(wrapSuggestionStep));
+	};
+
+	const appendSuggestionResponses = (steps: FauxResponseStep[]) => {
+		hasExplicitSuggestionResponses = true;
+		suggestionFaux.appendResponses(steps.map(wrapSuggestionStep));
+	};
+
 	if (options?.responses) {
 		faux.setResponses(options.responses);
 	}
+	if (options?.suggestionResponses) {
+		setSuggestionResponses(options.suggestionResponses);
+	}
+
+	const routedNativeProvider = {
+		...rawFaux.provider,
+		stream: (
+			model: Parameters<typeof rawFaux.provider.stream>[0],
+			context: Parameters<typeof rawFaux.provider.stream>[1],
+			streamOptions?: Parameters<typeof rawFaux.provider.stream>[2],
+		) => {
+			if (isPromptSuggestionRequest(context)) {
+				if (!hasExplicitSuggestionResponses) {
+					suggestionFaux.appendResponses([wrapSuggestionStep(fauxAssistantMessage(""))]);
+				}
+				return suggestionFaux.provider.stream(model, context, streamOptions as never);
+			}
+			return rawFaux.provider.stream(model, context, streamOptions as never);
+		},
+		streamSimple: (
+			model: Parameters<typeof rawFaux.provider.streamSimple>[0],
+			context: Parameters<typeof rawFaux.provider.streamSimple>[1],
+			streamOptions?: Parameters<typeof rawFaux.provider.streamSimple>[2],
+		) => {
+			if (isPromptSuggestionRequest(context)) {
+				if (!hasExplicitSuggestionResponses) {
+					suggestionFaux.appendResponses([wrapSuggestionStep(fauxAssistantMessage(""))]);
+				}
+				return suggestionFaux.provider.streamSimple(model, context, streamOptions);
+			}
+			return rawFaux.provider.streamSimple(model, context, streamOptions);
+		},
+	};
 
 	const credentials = new InMemoryCredentialStore();
 	const modelRuntime = await ModelRuntime.create({
 		credentials,
 		modelsPath: join(agentDir, "models.json"),
 	});
-	modelRuntime.registerNativeProvider(rawFaux.provider);
+	modelRuntime.registerNativeProvider(routedNativeProvider);
 	await modelRuntime.refresh({ allowNetwork: false });
 	const modelRegistry = new ModelRegistry(modelRuntime);
 
@@ -590,9 +662,9 @@ export async function createInteractiveHarness(
 		{
 			api: rawFaux.api,
 			stream: (model, context, streamOptions) =>
-				rawFaux.provider.stream(model, context, streamOptions as never),
+				routedNativeProvider.stream(model, context, streamOptions as never),
 			streamSimple: (model, context, streamOptions) =>
-				rawFaux.provider.streamSimple(model, context, streamOptions),
+				routedNativeProvider.streamSimple(model, context, streamOptions),
 		},
 		compatSourceId,
 	);
@@ -821,6 +893,7 @@ export async function createInteractiveHarness(
 		},
 		faux,
 		calls: recordedCalls,
+		suggestionCalls: recordedSuggestionCalls,
 		cwd,
 		agentDir,
 		get width() {
@@ -835,6 +908,8 @@ export async function createInteractiveHarness(
 		appendResponses(steps: FauxResponseStep[]) {
 			faux.appendResponses(steps);
 		},
+		setSuggestionResponses,
+		appendSuggestionResponses,
 		setClipboard(next: MutableClipboardState) {
 			if ("text" in next) clipboardState.text = next.text;
 			if ("image" in next) clipboardState.image = next.image;
