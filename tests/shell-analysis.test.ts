@@ -5,7 +5,7 @@ import { classifyShellCommand, lookKind } from "../src/features/tool-calls/claud
 import { exploreActions, parseExploreCommand } from "../src/features/tool-calls/codex.ts";
 import { highlightCommand } from "../src/features/tool-calls/codex-rows.ts";
 import { shellSegments, summarizeShellCommand } from "../src/features/tool-calls/invocation.ts";
-import { createDarkTheme } from "./harness/index.ts";
+import { loadPackageThemes } from "./harness/index.ts";
 
 describe("Shell Analysis — parsing, segments, and syntax token spans", () => {
 	it("splits bash pipelines and lists while preserving quoted operators and escapes", () => {
@@ -348,7 +348,6 @@ describe("Tool-call summaries, exploration folding, and shell syntax highlightin
 	});
 
 	it("folds read-only inspection calls in Claude and Codex views while never folding mutating commands", () => {
-		// Safe bash exploration commands fold in both Claude and Codex
 		expect(lookKind("bash", { command: `rg "a > b" src 2>/dev/null | head -n 5` })).toBe("search");
 		expect(lookKind("bash", { command: "cat README.md" })).toBe("read");
 		expect(lookKind("bash", { command: "ls -la src" })).toBe("list");
@@ -362,7 +361,7 @@ describe("Tool-call summaries, exploration folding, and shell syntax highlightin
 			{ kind: "read", name: "README.md" },
 		]);
 
-		// No mutating command may EVER fold into an exploration group
+		/* Мутирующие команды никогда не должны сворачиваться в исследовательскую группу */
 		const mutatingBash = [
 			"cat a.txt > b.txt",
 			"rg foo src >> matches.txt",
@@ -404,8 +403,8 @@ describe("Tool-call summaries, exploration folding, and shell syntax highlightin
 		}
 	});
 
-	it("highlights bash and PowerShell commands losslessly via shared Shell Analysis token spans", () => {
-		const theme = createDarkTheme();
+	it("highlights bash and PowerShell commands losslessly via shared Shell Analysis token spans", async () => {
+		const { dark: theme } = await loadPackageThemes();
 		const bashCmd = `FOO=1 rg --glob '*.ts' "a > b" $HOME | head -n 5 # tail`;
 		const bashHighlighted = highlightCommand(bashCmd, theme, "bash");
 		expect(bashHighlighted).toHaveLength(1);

@@ -1,10 +1,13 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+	isKeyRelease,
+	isKeyRepeat,
 	matchesKey,
 	truncateToWidth,
 	visibleWidth,
 	type Component,
 	type Focusable,
+	type TUI,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
@@ -13,9 +16,12 @@ import {
 	createModalCard,
 	createSingleLineInput,
 	getThemeSurfacePalette,
+	hasBlockingModalOverlay,
 	openModalCard,
 } from "../../shared/modal-card.ts";
+import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
 import { getSessionWorkflow, MODE_META } from "../../shared/session-workflow.ts";
+import { claimHover } from "../../shared/runtime-hooks.ts";
 import { requestRender, runAppAction } from "../../shared/ui-action-bridge.ts";
 import { showContextInspector } from "../context-inspector/index.ts";
 import { getOutlineSettings } from "../outline-rail/index.ts";
@@ -277,6 +283,7 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 		ctx,
 		(_tui, theme, _kb, done) => {
 			const card = createModalCard();
+			const rowHoverOwner = {};
 			const searchInput = createSingleLineInput();
 			let selectedIdx = 0;
 			let scrollOffset = 0;
@@ -416,6 +423,11 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 					const cardOutcome = card.handleMouse(event);
 					if (event.type === "move") {
 						const nextHover = cardOutcome.handled ? null : (rowMap.get(event.y) ?? null);
+						if (nextHover !== null) {
+							claimHover(rowHoverOwner, () => {
+								hoveredIdx = null;
+							});
+						}
 						const rowChanged = nextHover !== hoveredIdx;
 						hoveredIdx = nextHover;
 						return { handled: true, render: cardOutcome.render || rowChanged };
@@ -444,11 +456,46 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 }
 
 export function registerCommandPaletteFeature(pi: ExtensionAPI): void {
+	let unsubscribeInput: (() => void) | undefined;
+
 	pi.registerShortcut("ctrl+k", {
 		description: "Открыть Command Palette (@conarti/pi-ui)",
 		handler: async (ctx) => {
 			await showCommandPalette(pi, ctx);
 		},
+	});
+
+	/* Ctrl+K зарезервирован в Pi под tui.editor.deleteToLineEnd (restrictOverride: true), поэтому перехватываем напрямую на входе TUI */
+	pi.on("session_start", (_event, ctx) => {
+		unsubscribeInput?.();
+		unsubscribeInput = undefined;
+		if (ctx.mode !== "tui" || !ctx.hasUI) return;
+
+		unsubscribeInput = ctx.ui.onTerminalInput((data) => {
+			if (isKeyRelease(data) || isKeyRepeat(data) || !matchesKey(data, "ctrl+k")) {
+				return undefined;
+			}
+			const hostTui = getActiveHostRuntime()?.tui;
+			if (hostTui) {
+				const inspectable = hostTui as TUI & { getTopmostVisibleOverlay?: () => unknown };
+				if (
+					typeof inspectable.getTopmostVisibleOverlay === "function" &&
+					inspectable.getTopmostVisibleOverlay()
+				) {
+					return undefined;
+				}
+				if (hasBlockingModalOverlay(hostTui)) {
+					return { consume: true };
+				}
+			}
+			void showCommandPalette(pi, ctx);
+			return { consume: true };
+		});
+	});
+
+	pi.on("session_shutdown", () => {
+		unsubscribeInput?.();
+		unsubscribeInput = undefined;
 	});
 
 	pi.registerCommand("palette", {

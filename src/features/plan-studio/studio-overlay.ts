@@ -17,6 +17,7 @@ import {
 	type ModalActionPill,
 } from "../../shared/modal-card.ts";
 import { getSessionWorkflow } from "../../shared/session-workflow.ts";
+import { claimHover } from "../../shared/runtime-hooks.ts";
 import { approveAndExecutePlan, revisePlanWithComments, setSessionMode, updatePlanWidget } from "./index.ts";
 
 function stylePlanLine(raw: string, theme: Theme): string {
@@ -55,6 +56,7 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 		ctx,
 		(_tui, theme, _kb, done) => {
 			const card = createModalCard();
+			const rowHoverOwner = {};
 			const commentInput = createSingleLineInput();
 			let cursorIdx = 0;
 			let scrollTop = 0;
@@ -279,6 +281,11 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 					const cardOutcome = card.handleMouse(event);
 					if (event.type === "move") {
 						const lineHit = cardOutcome.handled ? null : (rowToPlanLine.get(event.y) ?? null);
+						if (lineHit !== null) {
+							claimHover(rowHoverOwner, () => {
+								hoveredRowLine = null;
+							});
+						}
 						const rowChanged = lineHit !== hoveredRowLine;
 						hoveredRowLine = lineHit;
 						return { handled: true, render: cardOutcome.render || rowChanged };
@@ -313,15 +320,27 @@ export async function confirmSafeToolCall(
 	toolName: string,
 	summary: string,
 ): Promise<"allow" | "allow-turn" | "block"> {
+	const turnSignal = (ctx as ExtensionContext & { signal?: AbortSignal }).signal;
+	if (turnSignal?.aborted) {
+		return "block";
+	}
 	if (!ctx.hasUI || ctx.mode !== "tui") {
 		const ok = await ctx.ui.confirm(`Auto-Safe: разрешить ${toolName}?`, summary);
 		return ok ? "allow" : "block";
 	}
 
-	const decision = await openModalCard<"allow" | "allow-turn" | "block">(
-		ctx,
-		(_tui, theme, _kb, done) => {
-			const card = createModalCard();
+	let onAbort: (() => void) | undefined;
+	try {
+		const decision = await openModalCard<"allow" | "allow-turn" | "block">(
+			ctx,
+			(_tui, theme, _kb, done) => {
+				if (turnSignal?.aborted) {
+					done("block");
+				} else if (turnSignal) {
+					onAbort = () => done("block");
+					turnSignal.addEventListener("abort", onAbort, { once: true });
+				}
+				const card = createModalCard();
 
 			return {
 				invalidate() {},
@@ -376,5 +395,10 @@ export async function confirmSafeToolCall(
 		{ width: 72, minWidth: 44, anchor: "center", margin: 2 },
 	);
 
-	return decision ?? "block";
+		return decision ?? "block";
+	} finally {
+		if (onAbort && turnSignal) {
+			turnSignal.removeEventListener("abort", onAbort);
+		}
+	}
 }

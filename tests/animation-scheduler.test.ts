@@ -14,7 +14,7 @@ import {
 	subscribeAnimationTicks,
 } from "../src/shared/animation-scheduler.ts";
 import { formatThinkingDuration, formatThoughtLabel } from "../src/features/transcript/thinking-block.ts";
-import { createDarkTheme, createLightTheme } from "./harness/fake-theme.ts";
+import { loadPackageThemes } from "./harness/index.ts";
 
 describe("animation-scheduler (30 fps monotonic clock)", () => {
 	afterEach(() => {
@@ -65,12 +65,11 @@ describe("animation-scheduler (30 fps monotonic clock)", () => {
 		unsubC();
 	});
 
-	it("interpolates a 32-row spatial cosine wave over a 2.4s cycle across adaptive light and dark blue-slate stops without purple accents", () => {
+	it("interpolates a 32-row spatial cosine wave over a 2.4s cycle across adaptive light and dark blue-slate stops without purple accents", async () => {
 		expect(WAVE_ROWS).toBe(32);
 		expect(BREATHING_PERIOD_MS).toBe(2400);
 
-		const darkTheme = createDarkTheme();
-		const lightTheme = createLightTheme();
+		const { dark: darkTheme, light: lightTheme } = await loadPackageThemes();
 
 		expect(sampleBreathingWaveRgb(0, { theme: darkTheme, elapsedMs: 0 })).toEqual([125, 207, 255]);
 		expect(sampleBreathingWaveRgb(8, { theme: darkTheme, elapsedMs: 0 })).toEqual([88, 148, 214]);

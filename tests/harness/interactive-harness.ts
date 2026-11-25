@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
 	contentText,
+	createAssistantMessageEventStream,
 	fauxAssistantMessage,
 	fauxProvider,
 	fauxText,
@@ -23,6 +24,7 @@ import {
 	getCurrentTools,
 	InMemoryCredentialStore,
 	type AssistantMessage,
+	type AssistantMessageEventStream,
 	type FauxContentBlock,
 	type FauxModelDefinition,
 	type FauxProviderHandle,
@@ -44,6 +46,7 @@ import {
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
 	createAgentSessionServices,
+	DefaultResourceLoader,
 	InteractiveMode,
 	ModelRegistry,
 	ModelRuntime,
@@ -54,10 +57,17 @@ import {
 	type CreateAgentSessionRuntimeFactory,
 	type ExtensionFactory,
 	type InteractiveModeOptions,
+	type Theme,
 	type ToolDefinition,
 	type TuiMode,
 } from "@earendil-works/pi-coding-agent";
-import type { ProgramStatus, Terminal, TUI } from "@earendil-works/pi-tui";
+import {
+	resetCapabilitiesCache,
+	setCapabilityOverrides,
+	type ProgramStatus,
+	type Terminal,
+	type TUI,
+} from "@earendil-works/pi-tui";
 import {
 	setHostClipboardProvider,
 	type ClipboardImagePayload,
@@ -68,6 +78,7 @@ import { captureTerminalScreen, type TerminalScreenSnapshot } from "./terminal-s
 export {
 	contentText,
 	createAgentSession,
+	createAssistantMessageEventStream,
 	fauxAssistantMessage,
 	fauxProvider,
 	fauxText,
@@ -77,6 +88,7 @@ export {
 	getCurrentTools,
 	registerFauxProvider,
 	type AssistantMessage,
+	type AssistantMessageEventStream,
 	type FauxContentBlock,
 	type FauxModelDefinition,
 	type FauxProviderHandle,
@@ -91,6 +103,55 @@ const HARNESS_DIR = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(HARNESS_DIR, "../..");
 export const DEFAULT_EXTENSION_ENTRY = resolve(REPO_ROOT, "src/index.ts");
 export const DEFAULT_THEMES_DIR = resolve(REPO_ROOT, "themes");
+
+let cachedTruecolorThemes: Promise<{ dark: Theme; light: Theme }> | undefined;
+
+/**
+ * Загружает реальные пакетные темы (`midnight-cobalt` и `one-blue-light`) через `DefaultResourceLoader` хоста Pi
+ * для чистых юнит-тестов (Seam 2 ADR-0006) без ручных фейков `Theme`.
+ */
+export async function loadPackageThemes(options?: {
+	trueColor?: boolean;
+}): Promise<{ dark: Theme; light: Theme }> {
+	const useTrueColor = options?.trueColor ?? true;
+	if (useTrueColor && cachedTruecolorThemes) {
+		return cachedTruecolorThemes;
+	}
+	const load = async () => {
+		if (!useTrueColor) {
+			setCapabilityOverrides({ trueColor: false });
+		}
+		try {
+			const loader = new DefaultResourceLoader({
+				cwd: REPO_ROOT,
+				agentDir: REPO_ROOT,
+				noExtensions: true,
+				noSkills: true,
+				noPromptTemplates: true,
+				noContextFiles: true,
+				noThemes: true,
+				additionalThemePaths: [DEFAULT_THEMES_DIR],
+			});
+			await loader.reload();
+			const { themes } = loader.getThemes();
+			const dark = themes.find((t) => t.name === "midnight-cobalt");
+			const light = themes.find((t) => t.name === "one-blue-light");
+			if (!dark || !light) {
+				throw new Error("Package themes midnight-cobalt / one-blue-light not found");
+			}
+			return { dark, light };
+		} finally {
+			if (!useTrueColor) {
+				setCapabilityOverrides({});
+			}
+		}
+	};
+	if (useTrueColor) {
+		cachedTruecolorThemes = load();
+		return cachedTruecolorThemes;
+	}
+	return await load();
+}
 
 export interface MouseModifiers {
 	readonly shift?: boolean;
@@ -274,10 +335,17 @@ export interface MutableClipboardState {
 	filePaths?: readonly string[] | null;
 }
 
+export type CustomStreamSimpleHandler = (
+	model: Model<string>,
+	context: TranscriptContext,
+	options?: SimpleStreamOptions,
+) => AssistantMessageEventStream | undefined;
+
 export interface InteractiveHarnessOptions {
 	width?: number;
 	height?: number;
 	kittyProtocolActive?: boolean;
+	trueColor?: boolean;
 	terminalColors?: {
 		foreground?: string;
 		background?: string;
@@ -288,6 +356,8 @@ export interface InteractiveHarnessOptions {
 	agentDir?: string;
 	persistSession?: boolean;
 	persistSettings?: boolean;
+	sessionManager?: SessionManager;
+	setupSession?: (sessionManager: SessionManager) => void | Promise<void>;
 	projectTrusted?: boolean;
 	settings?: Record<string, unknown>;
 	flags?: Record<string, boolean | string>;
@@ -295,9 +365,13 @@ export interface InteractiveHarnessOptions {
 	additionalExtensionPaths?: string[];
 	extensionFactories?: ExtensionFactory[];
 	additionalThemePaths?: string[];
-	customTools?: ToolDefinition[];
+	tools?: string[];
+	excludeTools?: string[];
+	noTools?: "all" | "builtin";
+	customTools?: ToolDefinition<any, any, any>[];
 	models?: FauxModelDefinition[];
 	responses?: FauxResponseStep[];
+	streamSimple?: CustomStreamSimpleHandler;
 	suggestionResponses?: FauxResponseStep[];
 	tokensPerSecond?: number;
 	tokenSize?: { min?: number; max?: number };
@@ -323,6 +397,7 @@ interface InteractiveModeInternals {
 	};
 	themeController?: {
 		dispose?: () => void;
+		setThemeName?: (themeName: string, showError?: boolean) => { success: boolean; error?: string };
 		setThemeSetting?: (setting: string) => void;
 	};
 	handleReloadCommand(): Promise<void>;
@@ -413,6 +488,7 @@ export interface InteractiveHarness {
 	readonly height: number;
 	setResponses(steps: FauxResponseStep[]): void;
 	appendResponses(steps: FauxResponseStep[]): void;
+	setStreamSimple(handler: CustomStreamSimpleHandler | undefined): void;
 	setSuggestionResponses(steps: FauxResponseStep[]): void;
 	appendSuggestionResponses(steps: FauxResponseStep[]): void;
 	setClipboard(next: MutableClipboardState): void;
@@ -424,6 +500,8 @@ export interface InteractiveHarness {
 	prompt(text: string): Promise<void>;
 	reload(): Promise<void>;
 	setTuiMode(mode: TuiMode): Promise<boolean>;
+	setTheme(theme: "dark" | "light" | string): void;
+	flush(): Promise<void>;
 	mouseMove(col: number, row: number, modifiers?: MouseModifiers): Promise<void>;
 	mouseDown(
 		col: number,
@@ -481,8 +559,14 @@ export async function createInteractiveHarness(
 
 	const prevAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 	const prevOfflineEnv = process.env.PI_OFFLINE;
+	const prevTrueColorEnv = process.env.PI_TRUE_COLOR;
 	process.env.PI_CODING_AGENT_DIR = agentDir;
 	process.env.PI_OFFLINE = "1";
+	if (options?.trueColor !== undefined) {
+		process.env.PI_TRUE_COLOR = options.trueColor ? "1" : "0";
+		setCapabilityOverrides({ trueColor: options.trueColor });
+		resetCapabilitiesCache();
+	}
 
 	const resolvedThemeName =
 		options?.theme === "light"
@@ -649,12 +733,56 @@ export async function createInteractiveHarness(
 		},
 	};
 
+	let customStreamSimple: CustomStreamSimpleHandler | undefined = options?.streamSimple;
+
+	const dispatchStreamSimple = (
+		model: Model<string>,
+		context: TranscriptContext,
+		streamOptions?: SimpleStreamOptions,
+	): AssistantMessageEventStream => {
+		if (isPromptSuggestionRequest(context)) {
+			return routedNativeProvider.streamSimple(model, context, streamOptions);
+		}
+		if (customStreamSimple) {
+			const custom = customStreamSimple(model, context, streamOptions);
+			if (custom) {
+				const record: RecordedFauxCall = {
+					index: recordedCalls.length,
+					context,
+					messages: [...context.messages],
+					systemPrompt: getCurrentSystemPrompt(context.messages),
+					tools: getCurrentTools(context.messages),
+					options: streamOptions,
+					signal: streamOptions?.signal,
+					model,
+					aborted: Boolean(streamOptions?.signal?.aborted),
+				};
+				if (streamOptions?.signal && !streamOptions.signal.aborted) {
+					streamOptions.signal.addEventListener(
+						"abort",
+						() => {
+							record.aborted = true;
+						},
+						{ once: true },
+					);
+				}
+				recordedCalls.push(record);
+				return custom;
+			}
+		}
+		return routedNativeProvider.streamSimple(model, context, streamOptions);
+	};
+
 	const credentials = new InMemoryCredentialStore();
 	const modelRuntime = await ModelRuntime.create({
 		credentials,
 		modelsPath: join(agentDir, "models.json"),
 	});
-	modelRuntime.registerNativeProvider(routedNativeProvider);
+	modelRuntime.registerNativeProvider({
+		...routedNativeProvider,
+		streamSimple: (model, context, streamOptions) =>
+			dispatchStreamSimple(model, context as TranscriptContext, streamOptions),
+	});
 	await modelRuntime.refresh({ allowNetwork: false });
 	const modelRegistry = new ModelRegistry(modelRuntime);
 
@@ -664,7 +792,7 @@ export async function createInteractiveHarness(
 			stream: (model, context, streamOptions) =>
 				routedNativeProvider.stream(model, context, streamOptions as never),
 			streamSimple: (model, context, streamOptions) =>
-				routedNativeProvider.streamSimple(model, context, streamOptions),
+				dispatchStreamSimple(model, context as TranscriptContext, streamOptions),
 		},
 		compatSourceId,
 	);
@@ -737,6 +865,9 @@ export async function createInteractiveHarness(
 			sessionStartEvent,
 			model: faux.getModel(),
 			thinkingLevel: options?.thinkingLevel ?? "off",
+			tools: options?.tools,
+			excludeTools: options?.excludeTools,
+			noTools: options?.noTools,
 			customTools: options?.customTools,
 		});
 		return {
@@ -746,9 +877,14 @@ export async function createInteractiveHarness(
 		};
 	};
 
-	const initialSessionManager = options?.persistSession
-		? SessionManager.create(cwd, join(agentDir, "sessions"))
-		: SessionManager.inMemory(cwd);
+	const initialSessionManager =
+		options?.sessionManager ??
+		(options?.persistSession
+			? SessionManager.create(cwd, join(agentDir, "sessions"))
+			: SessionManager.inMemory(cwd));
+	if (options?.setupSession) {
+		await options.setupSession(initialSessionManager);
+	}
 
 	const runtimeHost = await createAgentSessionRuntime(createRuntime, {
 		cwd,
@@ -908,6 +1044,9 @@ export async function createInteractiveHarness(
 		appendResponses(steps: FauxResponseStep[]) {
 			faux.appendResponses(steps);
 		},
+		setStreamSimple(handler: CustomStreamSimpleHandler | undefined) {
+			customStreamSimple = handler;
+		},
 		setSuggestionResponses,
 		appendSuggestionResponses,
 		setClipboard(next: MutableClipboardState) {
@@ -956,6 +1095,21 @@ export async function createInteractiveHarness(
 			await flushMicrotasksAndTicks(2);
 			flushFrame();
 			return switched;
+		},
+		setTheme(nextTheme: "dark" | "light" | string): void {
+			const nextName =
+				nextTheme === "light"
+					? "one-blue-light"
+					: nextTheme === "dark"
+						? "midnight-cobalt"
+						: nextTheme;
+			settingsManager.setTheme(nextName);
+			internals.themeController?.setThemeName?.(nextName, false);
+			flushFrame(true);
+		},
+		async flush(): Promise<void> {
+			await flushMicrotasksAndTicks(4);
+			flushFrame();
 		},
 		async mouseMove(col: number, row: number, modifiers?: MouseModifiers): Promise<void> {
 			const modBits =
@@ -1074,6 +1228,15 @@ export async function createInteractiveHarness(
 
 			unregisterApiProviders(compatSourceId);
 			setHostClipboardProvider(undefined);
+			if (options?.trueColor !== undefined) {
+				if (prevTrueColorEnv === undefined) {
+					delete process.env.PI_TRUE_COLOR;
+				} else {
+					process.env.PI_TRUE_COLOR = prevTrueColorEnv;
+				}
+				setCapabilityOverrides({});
+				resetCapabilitiesCache();
+			}
 
 			if (prevAgentDirEnv === undefined) {
 				delete process.env.PI_CODING_AGENT_DIR;
