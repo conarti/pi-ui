@@ -161,7 +161,6 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		});
 		await harness.flush();
 
-		/* Единый 30 fps таймер обслуживает и волну индикатора композитора ◆, и хребты Thinking (0 таймеров у Loader) */
 		expect(vi.getTimerCount()).toBe(1);
 		expect(harness.screen().text()).toContain("┃ Thinking…");
 		expect(harness.screen().text()).toContain("◆");
@@ -207,7 +206,6 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 
 		expect(vi.getTimerCount()).toBe(0);
 
-		/* В режиме /silent во время активного хода продолжает работать ровно один таймер композитора до завершения */
 		await harness.submitInput("/silent on");
 		const silentTurn = harness.submitInput("Silent background turn");
 		const stream2 = await queue.nextStream();
@@ -271,7 +269,6 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		expect(boldCell?.bold).toBe(true);
 		expect(boldCell?.fg).toEqual({ kind: "rgb", r: 156, g: 174, b: 200 });
 
-		/* Теперь передаём незакрытый кодовый блок: голая строка ```ts исключается из 3-строчного хвоста */
 		const md2 = [
 			"Check **auth.ts** exports",
 			"```ts",
@@ -441,7 +438,6 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 			},
 		});
 
-		/* Раскрываем исторический блок без длительности кликом мыши */
 		const histPos = harness.screen().findText("❙ › Thought");
 		expect(histPos).toBeDefined();
 		await harness.mouseClick(histPos!.col + 2, histPos!.row);
@@ -450,7 +446,6 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		expect(histExpandedText).toContain("│ Restored historical reasoning");
 		expect(histExpandedText).not.toContain("Thought for");
 
-		/* Сворачиваем обратно после продвижения часов за порог двойного клика */
 		vi.advanceTimersByTime(500);
 		const histOpenPos = harness.screen().findText("│ ⌄ Thought");
 		await harness.mouseClick(histOpenPos!.col + 2, histOpenPos!.row);
@@ -489,7 +484,6 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		stream.push({ type: "text_delta", contentIndex: 1, delta: "Token ", partial: pText1 });
 		await harness.flush();
 
-		/* Наводим указатель на свёрнутый Thinking во время стриминга текста и проверяем сохранение hover при следующей дельте */
 		const liveCollapsedPos = harness.screen().findText("❙ › Thought for 3s");
 		expect(liveCollapsedPos).toBeDefined();
 		const spineBeforeHover = findGlyphRgb(harness, "Thought for 3s", "❙");
@@ -513,7 +507,6 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		stream.end(pText2);
 		await turnPromise;
 
-		/* Кликаем по свёрнутой строке для раскрытия полного отформатированного размышления */
 		vi.advanceTimersByTime(500);
 		const clickExpandPos = harness.screen().findText("❙ › Thought for 3s");
 		expect(clickExpandPos).toBeDefined();
@@ -540,7 +533,6 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 			expect(rowText).not.toContain("Copy");
 		}
 
-		/* /silent on скрывает раскрытый Thinking, оставляя финальный ответ; /silent off восстанавливает раскрытое состояние */
 		await harness.submitInput("/silent on");
 		const silentText = harness.screen().text();
 		expect(silentText).toContain("Token verified.");
@@ -572,7 +564,6 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		});
 		vi.runOnlyPendingTimers();
 
-		/* 1. Redacted пустой блок не отображается и не добавляет второго таймера поверх волны композитора */
 		const redactedTurn = harness.submitInput("Redacted reasoning check");
 		const sRedacted = await queue.nextStream();
 		const tsRed = Date.now();
@@ -598,7 +589,6 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		await redactedTurn;
 		expect(vi.getTimerCount()).toBe(0);
 
-		/* 2. Пустой не-redacted старт сразу показывает ┃ Thinking…, а thinking_end фиксирует длительность 3s даже при 5s задержке текста */
 		const lockTurn = harness.submitInput("Early thinking_end lock");
 		const sLock = await queue.nextStream();
 		const tsLock = Date.now() + 100;
@@ -608,7 +598,6 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		await harness.flush();
 		expect(harness.screen().text()).toContain("┃ Thinking…");
 
-		/* Проверка узких ширин и переключения dark -> light прямо во время активного стриминга */
 		const darkSpineRgb = findGlyphRgb(harness, "Thinking…", "┃");
 		expect(darkSpineRgb).toBeDefined();
 		harness.setTheme("light");
@@ -655,7 +644,6 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		await lockTurn;
 		expect(harness.screen().text()).toContain("❙ › Thought for 3s");
 
-		/* 3. 15 посимвольно простримленных ходов сохраняют точную длительность первого хода после /reload */
 		for (let t = 0; t < 15; t += 1) {
 			const turnP = harness.submitInput(`Streamed turn #${t + 1}`);
 			const st = await queue.nextStream();
@@ -745,7 +733,6 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 
 		expect(vi.getTimerCount()).toBe(0);
 
-		/* Ход 1: во время исполнения тула работает ровно один 30 fps таймер без 80ms Loader */
 		const t1 = harness.submitInput("Run gated tool 1");
 		const s1 = await queue.nextStream();
 		const callMsg1 = makeStreamMessage(
@@ -775,7 +762,6 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		await t1;
 		expect(vi.getTimerCount()).toBe(0);
 
-		/* Ход 2 после завершения первого: анимация тула продолжает оживать, а /compact-tools off возвращает индикатор ◆ в композитор */
 		await harness.submitInput("/compact-tools off");
 		const t2 = harness.submitInput("Check restored composer working diamond");
 		const s2 = await queue.nextStream();

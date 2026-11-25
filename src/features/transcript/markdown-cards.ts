@@ -4,10 +4,20 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 	type TuiMouseEvent,
-	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
-import { bgRgb, fgRgb, getActiveGlobalTheme, isLightTheme, paintSurfaceRow } from "../../shared/ansi.ts";
-import { claimHover, copyToClipboard, hookMethod } from "../../shared/runtime-hooks.ts";
+import {
+	getActiveGlobalTheme,
+	getThemeSurfacePalette,
+	paintThemeSurfaceRow,
+	themeBgRgb,
+	themeFgRgb,
+} from "../../shared/ansi.ts";
+import {
+	claimHover,
+	copyToClipboard,
+	createCopyFeedbackTimerRegistry,
+	hookMethod,
+} from "../../shared/runtime-hooks.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
 
 interface CodeZone {
@@ -19,31 +29,15 @@ interface CodeZone {
 	btnEnd: number;
 }
 
-interface ActiveMarkdownCopyTimer {
-	target: any;
-	timer: ReturnType<typeof setTimeout>;
-}
-
-const MARKDOWN_COPY_TIMERS_KEY = Symbol.for("conarti.pi-ui.markdown-copy-timers.v1");
-
-function getMarkdownCopyTimers(): Set<ActiveMarkdownCopyTimer> {
-	const g = globalThis as Record<symbol, Set<ActiveMarkdownCopyTimer> | undefined>;
-	if (!g[MARKDOWN_COPY_TIMERS_KEY]) {
-		g[MARKDOWN_COPY_TIMERS_KEY] = new Set();
-	}
-	return g[MARKDOWN_COPY_TIMERS_KEY]!;
-}
+const markdownCopyTimers = createCopyFeedbackTimerRegistry<{
+	__conartiCopiedZone?: string | null;
+	__conartiCopyTimer?: unknown;
+}>("conarti.pi-ui.markdown-copy-timers.v1", (target) => {
+	target.__conartiCopiedZone = null;
+});
 
 export function clearMarkdownCopyTimers(): void {
-	const timers = getMarkdownCopyTimers();
-	for (const entry of timers) {
-		clearTimeout(entry.timer);
-		if (entry.target) {
-			entry.target.__conartiCopiedZone = null;
-			entry.target.__conartiCopyTimer = undefined;
-		}
-	}
-	timers.clear();
+	markdownCopyTimers.clearAll();
 }
 
 export function installMarkdownCardsAndHeadings(): void {
@@ -62,50 +56,64 @@ export function installMarkdownCardsAndHeadings(): void {
 				typeof self.getStylePrefix === "function"
 			) {
 				const depth: number = token.depth ?? 1;
-				const light = isLightTheme(getActiveGlobalTheme(self?.theme));
+				const activeTheme = getActiveGlobalTheme(self?.theme);
+				const palette = getThemeSurfacePalette(activeTheme);
 				let headingStyleFn: (text: string) => string;
 
 				if (self.__conartiThinkingMarkdown) {
 					headingStyleFn = (text: string) => self.theme.heading(self.theme.bold(text));
 				} else if (depth === 1) {
-					headingStyleFn = (text: string) => self.theme.heading(self.theme.bold(self.theme.underline(text)));
+					headingStyleFn = (text: string) =>
+						self.theme.heading(self.theme.bold(self.theme.underline(text)));
 				} else if (depth === 2) {
 					headingStyleFn = (text: string) => self.theme.heading(self.theme.bold(text));
 				} else if (depth === 3) {
 					headingStyleFn = (text: string) =>
-						light ? fgRgb(29, 78, 216, self.theme.bold(text)) : fgRgb(97, 175, 239, self.theme.bold(text));
+						themeFgRgb(activeTheme, palette.accent, self.theme.bold(text));
 				} else {
 					headingStyleFn = (text: string) =>
-						light ? fgRgb(3, 105, 161, self.theme.bold(text)) : fgRgb(122, 162, 247, self.theme.bold(text));
+						themeFgRgb(activeTheme, palette.headingSubtle, self.theme.bold(text));
 				}
 
 				const headingStyleContext = {
 					applyText: headingStyleFn,
 					stylePrefix: self.getStylePrefix(headingStyleFn),
 				};
-				const headingText: string = self.renderInlineTokens(token.tokens || [], headingStyleContext);
+				const headingText: string = self.renderInlineTokens(
+					token.tokens || [],
+					headingStyleContext,
+				);
 				const out: string[] = [headingText];
 				if (nextTokenType && nextTokenType !== "space") out.push("");
 				return out;
 			}
 
-			if (!self.__conartiThinkingMarkdown && token?.type === "code" && !self.defaultTextStyle?.bgColor && width >= 16) {
+			if (
+				!self.__conartiThinkingMarkdown &&
+				token?.type === "code" &&
+				!self.defaultTextStyle?.bgColor &&
+				width >= 16
+			) {
 				const lang = String(token.lang || "").trim();
 				const rawCode = String(token.text ?? "");
-				const isLight = isLightTheme(getActiveGlobalTheme(self?.theme));
-
-				const hdrBg: [number, number, number] = isLight ? [226, 234, 245] : [35, 42, 54];
-				const bodyBg: [number, number, number] = isLight ? [240, 245, 251] : [27, 32, 41];
-				const railFg: [number, number, number] = isLight ? [148, 163, 184] : [64, 78, 102];
+				const activeTheme = getActiveGlobalTheme(self?.theme);
+				const palette = getThemeSurfacePalette(activeTheme);
 
 				const cardW = Math.max(12, width);
 				const codeInnerW = Math.max(6, cardW - 4);
 
 				const langLabel = lang || "code";
-				const leftHdr = `  ${isLight ? fgRgb(71, 85, 105, langLabel) : fgRgb(127, 142, 166, langLabel)}`;
-				const copyLabel = isLight ? fgRgb(100, 116, 139, "Copy  ") : fgRgb(108, 124, 148, "Copy  ");
-				const gapHdr = " ".repeat(Math.max(1, cardW - visibleWidth(leftHdr) - visibleWidth(copyLabel)));
-				const headerLine = paintSurfaceRow(`${leftHdr}${gapHdr}${copyLabel}`, cardW, hdrBg[0], hdrBg[1], hdrBg[2]);
+				const leftHdr = `  ${themeFgRgb(activeTheme, palette.codeMetaFg, langLabel)}`;
+				const copyLabel = themeFgRgb(activeTheme, palette.codeActionMutedFg, "Copy  ");
+				const gapHdr = " ".repeat(
+					Math.max(1, cardW - visibleWidth(leftHdr) - visibleWidth(copyLabel)),
+				);
+				const headerLine = paintThemeSurfaceRow(
+					activeTheme,
+					`${leftHdr}${gapHdr}${copyLabel}`,
+					cardW,
+					palette.codeHeaderBg,
+				);
 
 				const out: string[] = [headerLine];
 
@@ -121,12 +129,19 @@ export function installMarkdownCardsAndHeadings(): void {
 					highlighted = rawCode.split("\n").map((l: string) => self.theme.codeBlock(l));
 				}
 
-				const rail = fgRgb(railFg[0], railFg[1], railFg[2], "▎");
+				const rail = themeFgRgb(activeTheme, palette.codeRailFg, "▎");
 				for (const hlLine of highlighted) {
 					const expandedTabs = hlLine.replace(/\t/g, "  ");
 					const wrapped = wrapTextWithAnsi(expandedTabs, codeInnerW);
 					for (const wLine of wrapped.length > 0 ? wrapped : [""]) {
-						out.push(paintSurfaceRow(`${rail} ${wLine}`, cardW, bodyBg[0], bodyBg[1], bodyBg[2]));
+						out.push(
+							paintThemeSurfaceRow(
+								activeTheme,
+								`${rail} ${wLine}`,
+								cardW,
+								palette.codeBodyBg,
+							),
+						);
 					}
 				}
 
@@ -221,7 +236,9 @@ export function installMarkdownCardsAndHeadings(): void {
 			const contentWidth = Math.max(1, width - padX * 2);
 			const leftMargin = " ".repeat(padX);
 			const rightMargin = " ".repeat(padX);
-			const isLight = isLightTheme(getActiveGlobalTheme(self?.theme));
+			const activeTheme = getActiveGlobalTheme(self?.theme);
+			const palette = getThemeSurfacePalette(activeTheme);
+			const copyAccentFg = palette.isLight ? palette.accent : palette.accentBright;
 
 			for (const z of zones) {
 				const isCopied = copiedZone === z.id;
@@ -229,31 +246,40 @@ export function installMarkdownCardsAndHeadings(): void {
 				if (!isCopied && !isHovered) continue;
 				if (z.headerRow < 0 || z.headerRow >= out.length) continue;
 
-				const leftHdr = `  ${isLight ? fgRgb(51, 65, 85, z.lang) : fgRgb(145, 165, 194, z.lang)}`;
+				const leftHdr = `  ${themeFgRgb(activeTheme, palette.codeMetaActiveFg, z.lang)}`;
 				const badge = isCopied
-					? isLight
-						? fgRgb(21, 128, 61, "✓ Copied  ")
-						: fgRgb(140, 194, 101, "✓ Copied  ")
-					: isLight
-						? fgRgb(29, 78, 216, "Copy  ")
-						: fgRgb(125, 207, 255, "Copy  ");
-				const gap = " ".repeat(Math.max(1, contentWidth - visibleWidth(leftHdr) - visibleWidth(badge)));
-				const hdrBg: [number, number, number] = isLight ? [214, 226, 242] : [42, 52, 68];
-				const hdrCard = paintSurfaceRow(`${leftHdr}${gap}${badge}`, contentWidth, hdrBg[0], hdrBg[1], hdrBg[2]);
+					? themeFgRgb(activeTheme, palette.success, "✓ Copied  ")
+					: themeFgRgb(activeTheme, copyAccentFg, "Copy  ");
+				const gap = " ".repeat(
+					Math.max(1, contentWidth - visibleWidth(leftHdr) - visibleWidth(badge)),
+				);
+				const hdrCard = paintThemeSurfaceRow(
+					activeTheme,
+					`${leftHdr}${gap}${badge}`,
+					contentWidth,
+					palette.codeHeaderActiveBg,
+				);
 				const full = leftMargin + hdrCard + rightMargin;
 				out[z.headerRow] = full + " ".repeat(Math.max(0, width - visibleWidth(full)));
 			}
 
-			if ((hoveredZone === "reply" || copiedZone === "reply") && !zones.some((z) => z.headerRow === 0)) {
+			if (
+				(hoveredZone === "reply" || copiedZone === "reply") &&
+				!zones.some((z) => z.headerRow === 0)
+			) {
 				const row0 = out[0] ?? "";
 				const badge =
 					copiedZone === "reply"
-						? isLight
-							? bgRgb(220, 242, 228, fgRgb(21, 128, 61, " ✓ Copied "))
-							: bgRgb(32, 54, 42, fgRgb(140, 194, 101, " ✓ Copied "))
-						: isLight
-							? bgRgb(219, 231, 246, fgRgb(29, 78, 216, " Copy "))
-							: bgRgb(38, 49, 68, fgRgb(125, 207, 255, " Copy "));
+						? themeBgRgb(
+								activeTheme,
+								palette.badgeCopiedBg,
+								themeFgRgb(activeTheme, palette.success, " ✓ Copied "),
+							)
+						: themeBgRgb(
+								activeTheme,
+								palette.badgeHoverBg,
+								themeFgRgb(activeTheme, copyAccentFg, " Copy "),
+							);
 				const badgeW = visibleWidth(badge);
 				if (width > badgeW + 12) {
 					const targetCol = width - badgeW - padX;
@@ -275,7 +301,11 @@ export function installMarkdownCardsAndHeadings(): void {
 		"transcript.markdownMouse",
 		(self, args) => {
 			const event = args[0] as TuiMouseEvent;
-			if (self.__conartiSkipReplyCopy || self.__conartiThinkingMarkdown || self.defaultTextStyle?.bgColor) {
+			if (
+				self.__conartiSkipReplyCopy ||
+				self.__conartiThinkingMarkdown ||
+				self.defaultTextStyle?.bgColor
+			) {
 				return undefined;
 			}
 
@@ -284,7 +314,8 @@ export function installMarkdownCardsAndHeadings(): void {
 			if (event.type === "move") {
 				let nextZone: string | null = null;
 				for (const z of zones) {
-					const nextCodeStart = zones.find((other) => other.headerRow > z.headerRow)?.headerRow ?? Infinity;
+					const nextCodeStart =
+						zones.find((other) => other.headerRow > z.headerRow)?.headerRow ?? Infinity;
 					if (event.y >= z.headerRow && event.y < nextCodeStart) {
 						const rawLinesCount = z.raw.split("\n").length + 2;
 						if (event.y <= z.headerRow + rawLinesCount + 4) {
@@ -327,28 +358,13 @@ export function installMarkdownCardsAndHeadings(): void {
 
 			const armCopiedReset = (zoneId: string) => {
 				self.__conartiCopiedZone = zoneId;
-				const timers = getMarkdownCopyTimers();
-				if (self.__conartiCopyTimer) {
-					clearTimeout(self.__conartiCopyTimer.timer);
-					timers.delete(self.__conartiCopyTimer);
-				}
 				requestRender();
-				const entry: ActiveMarkdownCopyTimer = {
-					target: self,
-					timer: setTimeout(() => {
-						timers.delete(entry);
-						if (self.__conartiCopyTimer === entry) {
-							self.__conartiCopyTimer = undefined;
-						}
-						if (self.__conartiCopiedZone === zoneId) {
-							self.__conartiCopiedZone = null;
-							requestRender();
-						}
-					}, 1300),
-				};
-				entry.timer.unref?.();
-				self.__conartiCopyTimer = entry;
-				timers.add(entry);
+				markdownCopyTimers.arm(self, (target) => {
+					if (target.__conartiCopiedZone === zoneId) {
+						target.__conartiCopiedZone = null;
+						requestRender();
+					}
+				});
 			};
 
 			if (event.type === "click" && event.button === "left") {

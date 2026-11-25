@@ -9,6 +9,76 @@ export interface HitBox {
 	onClick: () => void;
 }
 
+export type RgbTuple = readonly [number, number, number];
+
+export type PillVariant = "primary" | "secondary" | "success" | "warning" | "danger" | "neutral";
+
+const CUBE_LEVELS = [0, 95, 135, 175, 215, 255] as const;
+const GRAY_LEVELS = Array.from({ length: 24 }, (_, idx) => 8 + idx * 10);
+
+function nearestChannelIndex(values: readonly number[], target: number): number {
+	let best = 0;
+	for (let i = 1; i < values.length; i += 1) {
+		if (Math.abs(target - values[i]!) < Math.abs(target - values[best]!)) {
+			best = i;
+		}
+	}
+	return best;
+}
+
+export function rgbToAnsi256(r: number, g: number, b: number): number {
+	const ri = nearestChannelIndex(CUBE_LEVELS, r);
+	const gi = nearestChannelIndex(CUBE_LEVELS, g);
+	const bi = nearestChannelIndex(CUBE_LEVELS, b);
+	const cr = CUBE_LEVELS[ri]!;
+	const cg = CUBE_LEVELS[gi]!;
+	const cb = CUBE_LEVELS[bi]!;
+	const lum = Math.round(r * 0.299 + g * 0.587 + b * 0.114);
+	const grayIdx = nearestChannelIndex(GRAY_LEVELS, lum);
+	const gray = GRAY_LEVELS[grayIdx]!;
+	const dist = (tr: number, tg: number, tb: number) =>
+		(r - tr) ** 2 * 0.299 + (g - tg) ** 2 * 0.587 + (b - tb) ** 2 * 0.114;
+	const spread = Math.max(r, g, b) - Math.min(r, g, b);
+	return spread < 10 && dist(gray, gray, gray) < dist(cr, cg, cb)
+		? 232 + grayIdx
+		: 16 + 36 * ri + 6 * gi + bi;
+}
+
+export function getActiveGlobalTheme(fallback?: unknown): Theme {
+	const g = (globalThis as Record<PropertyKey, unknown>)[
+		Symbol.for("@earendil-works/pi-coding-agent:theme")
+	];
+	if (g) return g as Theme;
+	return fallback as Theme;
+}
+
+export function is256ColorTheme(theme?: unknown): boolean {
+	const resolved = (theme ?? getActiveGlobalTheme()) as
+		| { getColorMode?: () => string }
+		| undefined;
+	if (typeof resolved?.getColorMode === "function") {
+		return resolved.getColorMode() === "256color";
+	}
+	return process.env.PI_TRUE_COLOR === "0";
+}
+
+function openAnsiRgb(set: 38 | 48, r: number, g: number, b: number, theme?: unknown): string {
+	const rr = Math.round(r);
+	const gg = Math.round(g);
+	const bb = Math.round(b);
+	return is256ColorTheme(theme)
+		? `\x1b[${set};5;${rgbToAnsi256(rr, gg, bb)}m`
+		: `\x1b[${set};2;${rr};${gg};${bb}m`;
+}
+
+export function themeFgRgb(theme: unknown, rgb: RgbTuple, text: string): string {
+	return `${openAnsiRgb(38, rgb[0], rgb[1], rgb[2], theme)}${text}\x1b[39m`;
+}
+
+export function themeBgRgb(theme: unknown, rgb: RgbTuple, text: string): string {
+	return `${openAnsiRgb(48, rgb[0], rgb[1], rgb[2], theme)}${text}\x1b[49m`;
+}
+
 export function fgRgb(rgb: RgbTuple, text: string): string;
 export function fgRgb(r: number, g: number, b: number, text: string): string;
 export function fgRgb(
@@ -19,9 +89,9 @@ export function fgRgb(
 ): string {
 	if (Array.isArray(rOrRgb)) {
 		const [r, g, bVal] = rOrRgb;
-		return `\x1b[38;2;${r};${g};${bVal}m${gOrText as string}\x1b[39m`;
+		return `${openAnsiRgb(38, r, g, bVal)}${gOrText as string}\x1b[39m`;
 	}
-	return `\x1b[38;2;${rOrRgb as number};${gOrText as number};${b!}m${text!}\x1b[39m`;
+	return `${openAnsiRgb(38, rOrRgb as number, gOrText as number, b!)}${text!}\x1b[39m`;
 }
 
 export function bgRgb(rgb: RgbTuple, text: string): string;
@@ -34,14 +104,18 @@ export function bgRgb(
 ): string {
 	if (Array.isArray(rOrRgb)) {
 		const [r, g, bVal] = rOrRgb;
-		return `\x1b[48;2;${r};${g};${bVal}m${gOrText as string}\x1b[49m`;
+		return `${openAnsiRgb(48, r, g, bVal)}${gOrText as string}\x1b[49m`;
 	}
-	return `\x1b[48;2;${rOrRgb as number};${gOrText as number};${b!}m${text!}\x1b[49m`;
+	return `${openAnsiRgb(48, rOrRgb as number, gOrText as number, b!)}${text!}\x1b[49m`;
 }
 
 export function isLightTheme(theme: unknown): boolean {
 	try {
-		const t = theme as { name?: string; getFgAnsi?: (token: string) => string } | undefined;
+		const t = theme as
+			| { name?: string; appearance?: string; getFgAnsi?: (token: string) => string }
+			| undefined;
+		if (t?.appearance === "light") return true;
+		if (t?.appearance === "dark") return false;
 		const name = String(t?.name ?? "").toLowerCase();
 		if (name.includes("light") || name.includes("day")) return true;
 		const probe = String(t?.getFgAnsi?.("text") ?? "");
@@ -51,30 +125,35 @@ export function isLightTheme(theme: unknown): boolean {
 			return lum < 128;
 		}
 	} catch {
-		// Default to dark palette
+		/* По умолчанию используется тёмная палитра */
 	}
 	return false;
 }
 
-export function getActiveGlobalTheme(fallback?: unknown): Theme {
-	const g = (globalThis as Record<PropertyKey, unknown>)[Symbol.for("@earendil-works/pi-coding-agent:theme")];
-	if (g) return g as Theme;
-	return fallback as Theme;
-}
-
-export function paintSurfaceRow(content: string, targetWidth: number, r: number, g: number, b: number): string {
+export function paintThemeSurfaceRow(
+	theme: unknown,
+	content: string,
+	targetWidth: number,
+	rgb: RgbTuple,
+): string {
 	const clipped = truncateToWidth(content, targetWidth, "…");
 	const pad = " ".repeat(Math.max(0, targetWidth - visibleWidth(clipped)));
-	const bgEsc = `\x1b[48;2;${r};${g};${b}m`;
+	const bgEsc = openAnsiRgb(48, rgb[0], rgb[1], rgb[2], theme);
 	const patched = (clipped + pad)
 		.replace(/\x1b\[0m/g, `\x1b[0m${bgEsc}`)
 		.replace(/\x1b\[49m/g, bgEsc);
 	return `${bgEsc}${patched}\x1b[49m`;
 }
 
-export type RgbTuple = readonly [number, number, number];
-
-export type PillVariant = "primary" | "secondary" | "success" | "warning" | "danger" | "neutral";
+export function paintSurfaceRow(
+	content: string,
+	targetWidth: number,
+	r: number,
+	g: number,
+	b: number,
+): string {
+	return paintThemeSurfaceRow(undefined, content, targetWidth, [r, g, b]);
+}
 
 export interface ThemeSurfacePalette {
 	readonly isLight: boolean;
@@ -88,6 +167,7 @@ export interface ThemeSurfacePalette {
 	readonly border: RgbTuple;
 	readonly accent: RgbTuple;
 	readonly accentBright: RgbTuple;
+	readonly headingSubtle: RgbTuple;
 	readonly selectedText: RgbTuple;
 	readonly inputText: RgbTuple;
 	readonly noteText: RgbTuple;
@@ -96,6 +176,15 @@ export interface ThemeSurfacePalette {
 	readonly danger: RgbTuple;
 	readonly info: RgbTuple;
 	readonly freeBar: RgbTuple;
+	readonly codeHeaderBg: RgbTuple;
+	readonly codeHeaderActiveBg: RgbTuple;
+	readonly codeBodyBg: RgbTuple;
+	readonly codeRailFg: RgbTuple;
+	readonly codeMetaFg: RgbTuple;
+	readonly codeMetaActiveFg: RgbTuple;
+	readonly codeActionMutedFg: RgbTuple;
+	readonly badgeHoverBg: RgbTuple;
+	readonly badgeCopiedBg: RgbTuple;
 }
 
 const DARK_SURFACE_PALETTE: ThemeSurfacePalette = {
@@ -110,6 +199,7 @@ const DARK_SURFACE_PALETTE: ThemeSurfacePalette = {
 	border: [97, 175, 239],
 	accent: [97, 175, 239],
 	accentBright: [125, 207, 255],
+	headingSubtle: [122, 162, 247],
 	selectedText: [235, 244, 255],
 	inputText: [220, 232, 248],
 	noteText: [232, 210, 156],
@@ -118,6 +208,15 @@ const DARK_SURFACE_PALETTE: ThemeSurfacePalette = {
 	danger: [224, 108, 117],
 	info: [86, 182, 194],
 	freeBar: [52, 62, 80],
+	codeHeaderBg: [35, 42, 54],
+	codeHeaderActiveBg: [42, 52, 68],
+	codeBodyBg: [27, 32, 41],
+	codeRailFg: [64, 78, 102],
+	codeMetaFg: [127, 142, 166],
+	codeMetaActiveFg: [145, 165, 194],
+	codeActionMutedFg: [108, 124, 148],
+	badgeHoverBg: [38, 49, 68],
+	badgeCopiedBg: [32, 54, 42],
 };
 
 const LIGHT_SURFACE_PALETTE: ThemeSurfacePalette = {
@@ -132,6 +231,7 @@ const LIGHT_SURFACE_PALETTE: ThemeSurfacePalette = {
 	border: [37, 99, 235],
 	accent: [29, 78, 216],
 	accentBright: [2, 132, 199],
+	headingSubtle: [3, 105, 161],
 	selectedText: [15, 23, 42],
 	inputText: [15, 23, 42],
 	noteText: [120, 53, 15],
@@ -140,6 +240,15 @@ const LIGHT_SURFACE_PALETTE: ThemeSurfacePalette = {
 	danger: [220, 38, 38],
 	info: [15, 118, 110],
 	freeBar: [203, 213, 225],
+	codeHeaderBg: [226, 234, 245],
+	codeHeaderActiveBg: [214, 226, 242],
+	codeBodyBg: [240, 245, 251],
+	codeRailFg: [148, 163, 184],
+	codeMetaFg: [71, 85, 105],
+	codeMetaActiveFg: [51, 65, 85],
+	codeActionMutedFg: [100, 116, 139],
+	badgeHoverBg: [219, 231, 246],
+	badgeCopiedBg: [220, 242, 228],
 };
 
 export function getThemeSurfacePalette(theme: unknown): ThemeSurfacePalette {
@@ -191,15 +300,15 @@ export function renderPill(
 	if (palette.isLight) {
 		if (opts.hovered) {
 			const bg = isNeutral ? palette.pillNeutralHoverBg : mixRgb([244, 248, 254], accent, 0.28);
-			return bgRgb(bg[0], bg[1], bg[2], fgRgb(15, 23, 42, ` ${text} `));
+			return themeBgRgb(opts.theme, bg, themeFgRgb(opts.theme, [15, 23, 42], ` ${text} `));
 		}
 		if (opts.active) {
 			const bg = mixRgb([246, 249, 254], accent, 0.16);
 			const fg = mixRgb([15, 23, 42], accent, 0.72);
-			return bgRgb(bg[0], bg[1], bg[2], fgRgb(fg[0], fg[1], fg[2], ` ${text} `));
+			return themeBgRgb(opts.theme, bg, themeFgRgb(opts.theme, fg, ` ${text} `));
 		}
 		const bg = palette.pillNeutralBg;
-		return bgRgb(bg[0], bg[1], bg[2], opts.theme.fg("muted", ` ${text} `));
+		return themeBgRgb(opts.theme, bg, opts.theme.fg("muted", ` ${text} `));
 	}
 
 	const [r, g, b] = accent;
@@ -207,13 +316,17 @@ export function renderPill(
 		const bg = isNeutral
 			? palette.pillNeutralHoverBg
 			: ([Math.round(r * 0.34), Math.round(g * 0.34), Math.round(b * 0.38)] as const);
-		return bgRgb(bg[0], bg[1], bg[2], fgRgb(235, 244, 255, ` ${text} `));
+		return themeBgRgb(opts.theme, bg, themeFgRgb(opts.theme, [235, 244, 255], ` ${text} `));
 	}
 	if (opts.active) {
-		return bgRgb(Math.round(r * 0.2), Math.round(g * 0.22), Math.round(b * 0.26), fgRgb(r, g, b, ` ${text} `));
+		return themeBgRgb(
+			opts.theme,
+			[Math.round(r * 0.2), Math.round(g * 0.22), Math.round(b * 0.26)],
+			themeFgRgb(opts.theme, [r, g, b], ` ${text} `),
+		);
 	}
 	const bg = palette.pillNeutralBg;
-	return bgRgb(bg[0], bg[1], bg[2], opts.theme.fg("muted", ` ${text} `));
+	return themeBgRgb(opts.theme, bg, opts.theme.fg("muted", ` ${text} `));
 }
 
 export function renderCardFrame(
@@ -227,7 +340,7 @@ export function renderCardFrame(
 ): string[] {
 	const safeWidth = Math.max(20, width);
 	const innerWidth = Math.max(1, safeWidth - 4);
-	const bColor = (s: string) => fgRgb(borderRgb[0], borderRgb[1], borderRgb[2], s);
+	const bColor = (s: string) => themeFgRgb(theme, borderRgb, s);
 	const dimBorder = (s: string) => theme.fg("borderMuted", s);
 
 	const leftTitle = ` ${title} `;

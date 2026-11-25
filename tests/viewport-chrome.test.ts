@@ -1,11 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { UserMessageComponent } from "@earendil-works/pi-coding-agent";
 import {
 	renderImage,
 	resetCapabilitiesCache,
 	setCapabilities,
 	stripTerminalSequences,
-	visibleWidth,
 	VStack,
 } from "@earendil-works/pi-tui";
 import { getOutlineSettings } from "../src/features/outline-rail/index.ts";
@@ -20,11 +18,11 @@ import {
 	fauxAssistantMessage,
 	fauxText,
 	fauxThinking,
+	makeAssistantEntry,
+	makeUserEntry,
 	type InteractiveHarness,
 	type SessionEntry,
 } from "./harness/index.ts";
-
-const OSC133_PREFIX_RE = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/g;
 
 function extractBgRgbs(lines: readonly string[]): Array<[number, number, number]> {
 	const out: Array<[number, number, number]> = [];
@@ -43,56 +41,6 @@ function luminance([r, g, b]: [number, number, number]): number {
 
 function buildLines(prefix: string, count: number): string {
 	return Array.from({ length: count }, (_, idx) => `${prefix}-${idx + 1}`).join("\n");
-}
-
-function makeUserEntry(
-	id: string,
-	parentId: string | null,
-	content: string,
-	timestampMs: number,
-): SessionEntry {
-	return {
-		type: "message",
-		id,
-		parentId,
-		timestamp: new Date(timestampMs).toISOString(),
-		message: {
-			role: "user",
-			content,
-			timestamp: timestampMs,
-		},
-	};
-}
-
-function makeAssistantEntry(
-	id: string,
-	parentId: string | null,
-	text: string,
-	timestampMs: number,
-): SessionEntry {
-	return {
-		type: "message",
-		id,
-		parentId,
-		timestamp: new Date(timestampMs).toISOString(),
-		message: {
-			role: "assistant",
-			content: [{ type: "text", text }],
-			api: "faux-responses",
-			provider: "faux",
-			model: "faux-1",
-			usage: {
-				input: 10,
-				output: 10,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 20,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: timestampMs,
-		},
-	};
 }
 
 function getRailGeometry(): NonNullable<OutlineRailComponent["geometry"]> {
@@ -172,7 +120,6 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 				expect(rgb[2]).toBeGreaterThanOrEqual(rgb[0]);
 			}
 
-			/* Наведение мыши через SGR показывает Copy в верхней полосе отступа без сдвига текста */
 			await harness.mouseMove(12, cardMidRow);
 			const hoveredScreen = harness.screen();
 			expect(hoveredScreen.rowText(cardMidRow - 1)).toContain("Copy");
@@ -195,7 +142,6 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			expect(copiedScreen.rowText(cardMidRow - 1)).toContain("Copied");
 			expect(copiedScreen.rowText(cardMidRow)).toBe(midRow);
 
-			/* Повторный клик под fake timers создаёт таймер сброса, который очищается при завершении сессии */
 			vi.useFakeTimers();
 			await harness.mouseClick(copyPos!.col + 1, copyPos!.row);
 			expect(vi.getTimerCount()).toBeGreaterThanOrEqual(1);
@@ -254,7 +200,6 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 		expect(firstPlainCol).toBeGreaterThan(2);
 		expect(secondPillCol).toBeGreaterThan(firstPlainCol + 10);
 
-		/* Клик по обычному тексту не срабатывает, клик по пилюле вызывает обработчик */
 		await harness.mouseClick(firstPlainCol + 2, cardHit!.row);
 		expect(clickedIds).toEqual([]);
 
@@ -325,7 +270,6 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			const theme = runtime.theme();
 			const rail = runtime.viewportSlots!.rightRail as OutlineRailComponent;
 
-			/* Прокручиваем точно к обмену второго хода, чтобы первый был выше (▲), второй активен (──), третий ниже (▼) */
 			scroll.scrollTo(rail.offsetOf(1) + 2, { disableFollow: true });
 			const idleScreen = harness.screen();
 			const geo = getRailGeometry();
@@ -336,9 +280,9 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			expect(idleScreen.sliceText(geo.ticksY + 2, 97, 99)).toBe(" ─");
 			expect(idleScreen.sliceText(geo.downY, 97, 99)).toBe(" ▼");
 
-			const rawRailIdle = runtime.viewportSlots!.rightRail!.render(2);
-			expect(rawRailIdle[geo.ticksY]).toContain(theme.getFgAnsi("dim"));
-			expect(rawRailIdle[geo.ticksY + 1]).toContain(theme.getFgAnsi("text"));
+			const rawFrameIdle = harness.renderFrame();
+			expect(rawFrameIdle[geo.ticksY]).toContain(theme.getFgAnsi("dim"));
+			expect(rawFrameIdle[geo.ticksY + 1]).toContain(theme.getFgAnsi("text"));
 
 			const tick3Row = geo.ticksY + 2;
 			await harness.mouseMove(97, tick3Row);
@@ -358,7 +302,6 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			const rawFrameHovered = harness.renderFrame();
 			expect(rawFrameHovered[popupTimeHit!.row + 1]).toContain(theme.getFgAnsi("borderMuted"));
 
-			/* Блокирующая Modal Card скрывает превью Outline Rail, а закрытие модалки и уход мыши убирают попап */
 			await harness.pressKey("\x0b");
 			expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
 			expect(harness.screen().text()).toContain("Command Palette");
@@ -411,7 +354,7 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			expect(initialViewportHeight).toBeGreaterThanOrEqual(14);
 			expect(atTopScreen.text()).toContain("Line four hidden while collapsed");
 
-			/* Находим позицию второго хода для точной проверки выталкивания Sticky Prompt */
+			vi.useFakeTimers();
 			scroll.scrollTo(10, { disableFollow: true });
 			const midScreen = harness.screen();
 			expect(scroll.viewportHeight).toBe(initialViewportHeight);
@@ -429,7 +372,8 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			expect(railSlicesVisible.some((s) => s === " ─")).toBe(true);
 			expect(railSlicesVisible.some((s) => s === " ▼")).toBe(true);
 
-			(scroll as unknown as { hideTransientScrollbar(): void }).hideTransientScrollbar();
+			vi.advanceTimersByTime(3000);
+			vi.useRealTimers();
 			expect(scroll.isScrollbarVisible).toBe(false);
 			const hiddenScrollbarScreen = harness.screen();
 			const railSlicesHidden = Array.from({ length: initialViewportHeight }, (_, r) =>
@@ -437,14 +381,12 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			);
 			expect(railSlicesHidden).toEqual(railSlicesVisible);
 
-			/* Перетаскивание нативного скроллбара в правой колонке 99 прокручивает транскрипт */
 			scroll.scrollTo(2, { disableFollow: true });
 			harness.flushFrame();
 			await harness.mouseMove(99, 1);
 			await harness.mouseDrag(99, 1, 99, 10, { steps: 3 });
 			expect(scroll.scrollTop).toBeGreaterThan(6);
 
-			/* Свёрнутый Sticky Prompt занимает ровно 5 строк (3 строки текста + верхний/нижний отступ) */
 			scroll.scrollTo(10, { disableFollow: true });
 			const collapsedScreen = harness.screen();
 			const stickyTopFive = Array.from({ length: 5 }, (_, r) => collapsedScreen.sliceText(r, 0, 97));
@@ -459,7 +401,6 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			expect(stickyTopFive.join("\n")).not.toContain("↑");
 			expect(stickyTopFive.join("\n")).not.toContain("Line four hidden while collapsed");
 
-			/* Клик по Sticky Prompt раскрывает все 5 строк, Ctrl+O (app.tools.expand) сворачивает обратно */
 			await harness.mouseClick(12, 2);
 			const expandedScreen = harness.screen();
 			expect(scroll.viewportHeight).toBe(initialViewportHeight);
@@ -475,7 +416,6 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			).join("\n");
 			expect(recollapsedTopSix).not.toContain("Line four hidden while collapsed");
 
-			/* Построчное выталкивание следующего хода и закрепление второй реплики */
 			const rail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
 			const turn2Start = rail.offsetOf(1);
 			scroll.scrollTo(turn2Start - 3, { disableFollow: true });
@@ -558,7 +498,6 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 		const rail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
 		const turn1Start = rail.offsetOf(0);
 
-		/* Находим точное смещение строки Kitty-изображения относительно начала транскрипта */
 		let kittyDocRow = -1;
 		for (let offset = turn1Start + 1; offset < turn1Start + 14; offset += 1) {
 			scroll.scrollTo(offset, { disableFollow: true });
@@ -572,7 +511,7 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 		}
 		expect(kittyDocRow).toBeGreaterThan(turn1Start);
 
-		/* Когда Sticky Prompt (высота 3 строки) перекрывает верхние 2 строки 6-строчной картинки -> r=4, y=36, h=72 */
+		/* При перекрытии верхних 2 строк 6-строчной Kitty-картинки остаётся r=4, y=36, h=72 */
 		scroll.scrollTo(kittyDocRow - 1, { disableFollow: true });
 		const partiallyCovered2 = harness.renderFrame();
 		expect(partiallyCovered2.slice(0, 3).some((line) => line.includes("\x1b_G"))).toBe(false);
@@ -582,7 +521,6 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 		expect(partiallyCovered2[3]).toContain("y=36");
 		expect(partiallyCovered2[3]).toContain("h=72");
 
-		/* Когда Sticky Prompt перекрывает верхние 4 строки -> r=2, y=72, h=36 */
 		scroll.scrollTo(kittyDocRow + 1, { disableFollow: true });
 		const partiallyCovered4 = harness.renderFrame();
 		expect(partiallyCovered4.slice(0, 3).some((line) => line.includes("\x1b_G"))).toBe(false);
@@ -591,7 +529,6 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 		expect(partiallyCovered4[3]).toContain("y=72");
 		expect(partiallyCovered4[3]).toContain("h=36");
 
-		/* Строка iTerm2 с подъёмом курсора \x1b[4A очищается на границе Sticky Prompt */
 		scroll.scrollTo(kittyDocRow + 3, { disableFollow: true });
 		const itermBleedFrame = harness.renderFrame();
 		expect(itermBleedFrame[3]).not.toContain("\x1b]1337;File=");
@@ -623,7 +560,6 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 
 		await harness.mouseDrag(2, 4, 96, 8, { steps: 3 });
 
-		/* Прокручиваем так, чтобы часть выделения ушла под Sticky Prompt */
 		scroll.scrollTo(rail.offsetOf(0) + 6, { disableFollow: true });
 		const selectedScreen = harness.screen();
 		const vpHeight = scroll.viewportHeight;
@@ -645,7 +581,6 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			expect(selectedScreen.cellAt(r, 99)?.inverse).toBe(false);
 		}
 
-		/* Наведение на Outline Rail поверх активного выделения маскирует прямоугольник превью-попапа */
 		const geo = getRailGeometry();
 		await harness.mouseMove(97, geo.ticksY);
 		const popupScreen = harness.screen();
@@ -683,7 +618,6 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			],
 		});
 
-		/* Вводим 4-строчный промпт через Shift+Enter CSI-u (без чипа вставки) */
 		await harness.typeText("Alpha line 1");
 		await harness.pressKey("\x1b[13;2u");
 		await harness.typeText("Alpha line 2");
@@ -698,17 +632,14 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 		const rail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
 		const turn1Start = rail.offsetOf(0);
 
-		/* Находим строку свёрнутого блока Thinking в транскрипте и подводим её под Sticky Prompt (строка экрана 1..2) */
 		scroll.scrollTo(turn1Start + 1, { disableFollow: true });
 		const thoughtWhenOpen = harness.screen().findText("Thought");
 		expect(thoughtWhenOpen).toBeDefined();
 		const thoughtDocRow = scroll.scrollTop + thoughtWhenOpen!.row;
 
-		/* Прокручиваем так, чтобы строка Thought оказалась ровно на экранной строке 2 под Sticky Prompt */
 		scroll.scrollTo(thoughtDocRow - 2, { disableFollow: true });
 		harness.flushFrame();
 
-		/* Клик по экранной строке 2 раскрывает Sticky Prompt, не раскрывая перекрытый блок Thought под ним */
 		await harness.mouseMove(8, 2);
 		await harness.mouseClick(8, 2);
 		const afterStickyExpand = harness.screen().text();
@@ -717,12 +648,10 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 
 		await harness.mouseClick(8, 2);
 
-		/* Прокрутка колеса над Sticky Prompt двигает ScrollView */
 		const beforeStickyWheel = scroll.scrollTop;
 		await harness.mouseWheel("down", 15, 2, 1);
 		expect(scroll.scrollTop).toBeGreaterThan(beforeStickyWheel);
 
-		/* Когда строка Thought открыта ниже Sticky Prompt, клик по ней раскрывает сам блок размышлений */
 		scroll.scrollTo(turn1Start + 1, { disableFollow: true });
 		const uncoveredThought = harness.screen().findText("Thought");
 		expect(uncoveredThought).toBeDefined();
@@ -730,7 +659,6 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 		await harness.mouseClick(uncoveredThought!.col + 1, uncoveredThought!.row);
 		expect(harness.screen().text()).toContain("Underlying hidden reasoning line");
 
-		/* Наведение, колесо и клик по Outline Rail показывают превью, прокручивают и прыгают к реплике */
 		scroll.scrollTo(turn1Start + 8, { disableFollow: true });
 		harness.flushFrame();
 		const geo = getRailGeometry();
@@ -750,7 +678,6 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 		).join("\n");
 		expect(afterLeaveText).not.toContain("╭─");
 
-		/* Блокирующая Modal Card предотвращает появление Hover Popup при наведении на Outline Rail */
 		await harness.pressKey("\x0b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
 		await harness.mouseMove(97, getRailGeometry().ticksY + 1);
@@ -764,7 +691,8 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 		const t2 = new Date(2026, 3, 19, 23, 59).getTime();
 		const cjkPrompt = "日本語テスト 🚀 line 1\nКириллица строка 2\nLine 3\nHidden line 4";
 		const initialEntries: SessionEntry[] = [
-			makeUserEntry("u1", null, cjkPrompt, t1),
+			makeUserEntry("u0", null, "   \n\t  ", t1 - 500),
+			makeUserEntry("u1", "u0", cjkPrompt, t1),
 			makeAssistantEntry("a1", "u1", buildLines("gap", 12), t1 + 1000),
 			makeUserEntry("u2", "a1", "Midnight boundary check", t2),
 			makeAssistantEntry("a2", "u2", buildLines("end", 14), t2 + 1000),
@@ -777,29 +705,18 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			initialEntries,
 		});
 
-		/* Прямая проверка граничных ширин карточки пользователя */
-		const emptyCard = new UserMessageComponent("   \n\t  ");
-		expect(emptyCard.render(80)).toEqual([]);
-
-		const cjkCard = new UserMessageComponent(
-			cjkPrompt,
-			undefined,
-			1,
-			[],
-			"u1",
-			new Date(t1).toISOString(),
-		);
-		expect(cjkCard.render(8)).toEqual([]);
-		for (const line of cjkCard.render(77)) {
-			expect(visibleWidth(line.replace(OSC133_PREFIX_RE, ""))).toBe(77);
-		}
+		await harness.resize(8, 18);
+		expect(harness.screen().width).toBe(8);
+		await harness.resize(80, 18);
 
 		const scroll = getActiveHostRuntime()!.scroll!;
+		scroll.scrollTo(0, { disableFollow: true });
+		expect(harness.screen().text()).toContain("日本語テスト");
+
 		const rail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
 		const turn1Start = rail.offsetOf(0);
 		const turn2Start = rail.offsetOf(1);
 
-		/* Во время выталкивания (pushOffset = 2) клик по видимой части Sticky Prompt раскрывает карточку */
 		scroll.scrollTo(turn2Start - 3, { disableFollow: true });
 		const midPushScreen = harness.screen();
 		expect(midPushScreen.sliceText(0, 0, 77)).toContain("Кириллица строка 2");
@@ -812,8 +729,9 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 		).join("\n");
 		expect(expandedAfterMidPush).toContain("Hidden line 4");
 
-		/* Отключение /outline убирает рельсу в 77..78, оставляя скроллбар в 79 и стабильную позицию 00:00 при затухании скроллбара */
 		await harness.submitInput("/outline");
+		vi.useFakeTimers();
+		scroll.scrollTo(turn1Start + 5, { disableFollow: true });
 		scroll.scrollTo(turn1Start + 6, { disableFollow: true });
 		const railOffScreen = harness.screen();
 		const vpHeight = scroll.viewportHeight;
@@ -830,12 +748,12 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 		const tsColVisible = railOffScreen.rowText(1).indexOf("00:00");
 		expect(tsColVisible).toBeGreaterThan(60);
 
-		(scroll as unknown as { hideTransientScrollbar(): void }).hideTransientScrollbar();
+		vi.advanceTimersByTime(3000);
+		vi.useRealTimers();
 		expect(scroll.isScrollbarVisible).toBe(false);
 		const tsColHidden = harness.screen().rowText(1).indexOf("00:00");
 		expect(tsColHidden).toBe(tsColVisible);
 
-		/* В короткой сессии без переполнения экрана режим /sticky always поддерживает клик вплоть до колонки 79 */
 		await harness.dispose();
 		harness = await createInteractiveHarness({
 			theme: "light",

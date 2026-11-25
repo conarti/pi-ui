@@ -8,14 +8,16 @@ interface HookRecord {
 }
 
 function isHookRecord(value: unknown): value is HookRecord {
-	return typeof value === "object" && value !== null && typeof (value as HookRecord).behavior === "function";
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		typeof (value as HookRecord).behavior === "function"
+	);
 }
 
 /**
  * Reload-safe prototype method hook: wraps `target[method]` once per process
  * and hot-swaps `behavior` across `/reload` calls without stacking wrappers.
- * Migrates both legacy HookRecord slots (e.g. `pi.grok-ui.hook.*`, `pi-compact-tools.hook.*`)
- * and legacy unwrapped-original function symbols when reloading inside a live Pi process.
  */
 export function hookMethod(
 	target: object,
@@ -33,7 +35,10 @@ export function hookMethod(
 	}
 
 	let original: ((...args: any[]) => any) | undefined;
-	const markers: LegacyHookMarker[] = [Symbol.for(`pi-compact-tools.hook.${name}`), ...legacyMarkers];
+	const markers: LegacyHookMarker[] = [
+		Symbol.for(`pi-compact-tools.hook.${name}`),
+		...legacyMarkers,
+	];
 	for (const marker of markers) {
 		const markerKey = typeof marker === "symbol" ? marker : Symbol.for(marker);
 		if (!Object.hasOwn(holder, markerKey)) continue;
@@ -69,31 +74,30 @@ export function hookMethod(
 	return true;
 }
 
-const ACTIVE_RUNTIME_LOOKUP_KEY = Symbol.for("conarti.pi-ui.host-runtime.v1");
+export interface RuntimeClipboardSink {
+	writeClipboardText(text: string): boolean;
+	writeHostTerminal(sequence: string): boolean;
+}
+
+const CLIPBOARD_SINK_KEY = Symbol.for("conarti.pi-ui.runtime-clipboard-sink.v1");
+
+export function registerRuntimeClipboardSink(sink: RuntimeClipboardSink | undefined): void {
+	(globalThis as Record<symbol, RuntimeClipboardSink | undefined>)[CLIPBOARD_SINK_KEY] = sink;
+}
+
+function getRuntimeClipboardSink(): RuntimeClipboardSink | undefined {
+	return (globalThis as Record<symbol, RuntimeClipboardSink | undefined>)[CLIPBOARD_SINK_KEY];
+}
 
 export function copyToClipboard(text: string): void {
 	if (!text) return;
-	const runtimeSlot = (
-		globalThis as Record<
-			symbol,
-			| {
-					active?: {
-						clipboard?: { writeText?: (value: string) => unknown };
-						tui?: { terminal?: { write?: (data: string) => void } };
-					};
-					clipboard?: { writeText?: (value: string) => unknown };
-			  }
-			| undefined
-		>
-	)[ACTIVE_RUNTIME_LOOKUP_KEY];
-	const customWriter =
-		runtimeSlot?.active?.clipboard?.writeText ?? runtimeSlot?.clipboard?.writeText;
-	if (typeof customWriter === "function") {
-		try {
-			void customWriter(text);
-		} catch {
-			/* Ошибки пользовательского буфера обмена не должны прерывать рендер */
+	const sink = getRuntimeClipboardSink();
+	try {
+		if (sink?.writeClipboardText(text)) {
+			return;
 		}
+	} catch {
+		/* Ошибки пользовательского буфера обмена не должны прерывать рендер */
 		return;
 	}
 	if (process.platform === "darwin") {
@@ -109,16 +113,80 @@ export function copyToClipboard(text: string): void {
 		const b64 = Buffer.from(text, "utf8").toString("base64");
 		if (b64.length <= 100_000) {
 			const osc52 = `\x1b]52;c;${b64}\x07`;
-			const termWrite = runtimeSlot?.active?.tui?.terminal?.write;
-			if (typeof termWrite === "function") {
-				termWrite.call(runtimeSlot?.active?.tui?.terminal, osc52);
-			} else {
+			if (!sink?.writeHostTerminal(osc52)) {
 				process.stdout.write(osc52);
 			}
 		}
 	} catch {
 		/* Игнорируем сбои записи в поток вывода */
 	}
+}
+
+interface CopyFeedbackTimerEntry<TTarget extends object> {
+	readonly target: TTarget;
+	readonly timer: ReturnType<typeof setTimeout>;
+}
+
+export interface CopyFeedbackTimerRegistry<TTarget extends object> {
+	arm(target: TTarget, onExpire: (target: TTarget) => void, delayMs?: number): void;
+	clearAll(): void;
+}
+
+/**
+ * Общий реестр таймеров сброса бейджа «✓ Copied» с автоматическим `unref()` и очисткой при `session_shutdown`.
+ */
+export function createCopyFeedbackTimerRegistry<
+	TTarget extends { __conartiCopyTimer?: unknown },
+>(
+	symbolName: string,
+	resetTarget: (target: TTarget) => void,
+): CopyFeedbackTimerRegistry<TTarget> {
+	const key = Symbol.for(symbolName);
+	const getSet = (): Set<CopyFeedbackTimerEntry<TTarget>> => {
+		const g = globalThis as Record<
+			symbol,
+			Set<CopyFeedbackTimerEntry<TTarget>> | undefined
+		>;
+		if (!g[key]) {
+			g[key] = new Set();
+		}
+		return g[key]!;
+	};
+
+	return {
+		arm(target, onExpire, delayMs = 1300) {
+			const timers = getSet();
+			const prev = target.__conartiCopyTimer as CopyFeedbackTimerEntry<TTarget> | undefined;
+			if (prev) {
+				clearTimeout(prev.timer);
+				timers.delete(prev);
+			}
+			const entry: CopyFeedbackTimerEntry<TTarget> = {
+				target,
+				timer: setTimeout(() => {
+					timers.delete(entry);
+					if (target.__conartiCopyTimer === entry) {
+						target.__conartiCopyTimer = undefined;
+					}
+					onExpire(target);
+				}, delayMs),
+			};
+			entry.timer.unref?.();
+			target.__conartiCopyTimer = entry;
+			timers.add(entry);
+		},
+		clearAll() {
+			const timers = getSet();
+			for (const entry of timers) {
+				clearTimeout(entry.timer);
+				if (entry.target) {
+					resetTarget(entry.target);
+					entry.target.__conartiCopyTimer = undefined;
+				}
+			}
+			timers.clear();
+		},
+	};
 }
 
 interface HoverTracker {

@@ -101,7 +101,6 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 				expect(lum).toBeGreaterThan(170);
 			}
 
-			/* Наведение на кнопку закрытия ✕ в правом верхнем углу карточки подсвечивает глиф */
 			let closeCol = -1;
 			for (let c = bounds.left; c <= bounds.right; c += 1) {
 				if (baseScreen.cellAt(bounds.top, c)?.char === "✕") {
@@ -115,7 +114,6 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 			const closeFgAfter = harness.screen().cellAt(bounds.top, closeCol)?.fg;
 			expect(closeFgAfter).not.toEqual(closeFgBefore);
 
-			/* Наведение на пилюлю Закрыть в футере подсвечивает пилюлю в светлой палитре */
 			const pillPos = baseScreen.findText("Закрыть");
 			expect(pillPos).toBeDefined();
 			const pillBgBefore = baseScreen.cellAt(pillPos!.row, pillPos!.col)?.bg;
@@ -128,7 +126,6 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 			}
 		}
 
-		/* Клик по ✕ на узкой ширине закрывает Context Inspector */
 		await harness.resize(48, 32);
 		const narrowScreen = harness.screen();
 		const narrowBounds = findModalBounds(narrowScreen);
@@ -144,7 +141,7 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		expect(harness.screen().text()).not.toContain("Context Inspector");
 	});
 
-	it("renders Auto-Safe confirmation with light surfaces and accurate close + footer pill hitboxes at narrow width", async () => {
+	it("renders Permission Prompt confirmation with light surfaces and accurate close + footer pill hitboxes at narrow width", async () => {
 		harness = await createInteractiveHarness({
 			theme: "light",
 			width: 50,
@@ -182,7 +179,6 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		await harness.mouseMove(closeCol, bounds.top);
 		expect(harness.screen().cellAt(bounds.top, closeCol)?.fg).not.toEqual(closeBefore);
 
-		/* Пилюля Отклонить переносится на узкой ширине без потери кликабельности и блокирует запись */
 		const denyPos = harness.screen().findText("Отклонить");
 		expect(denyPos).toBeDefined();
 		await harness.mouseClick(denyPos!.col + 2, denyPos!.row);
@@ -200,7 +196,6 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 			height: 32,
 		});
 
-		/* Набираем черновик в композиторе и нажимаем Ctrl+K — черновик не удаляется, открывается палитра */
 		await harness.typeText("keep my draft");
 		await harness.pressKey("\x0b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
@@ -215,7 +210,6 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 			expect(lum).toBeGreaterThan(170);
 		}
 
-		/* Графемно-безопасный Backspace для составного эмодзи и очистка строки по Ctrl+U */
 		await harness.sendInput("a👨‍👩‍👧‍👦");
 		expect(harness.screen().text()).toContain("a👨‍👩‍👧‍👦");
 		await harness.pressKey("\x7f");
@@ -258,7 +252,38 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		expect(harness.screen().text()).toContain("keep my draft");
 	});
 
-	it("renders Plan Studio with light surfaces, grapheme-safe inline comment input, and narrow/wide pill hitboxes", async () => {
+	it("tracks split-chunk and back-to-back bracketed pastes statefully and opens Command Palette on post-paste Ctrl+K", async () => {
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 100,
+			height: 28,
+		});
+
+		await harness.sendInput("\x1b[20");
+		await harness.sendInput("0~alpha");
+		await harness.sendInput("\x0b");
+		await harness.sendInput("beta\x1b[2");
+		await harness.sendInput("01~");
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
+		expect(harness.screen().text()).not.toContain("⌘ Command Palette");
+
+		await harness.sendInput("\x1b[200~ first");
+		await harness.sendInput("!\x1b[201~\x1b[200~ second");
+		await harness.sendInput("\x0b");
+		await harness.sendInput("!\x1b[201~");
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
+		expect(harness.screen().text()).not.toContain("⌘ Command Palette");
+
+		await harness.sendInput("\x1b[200~ tail\x1b[201~\x0b");
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
+		expect(harness.screen().text()).toContain("⌘ Command Palette");
+
+		await harness.pressKey("\x1b");
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
+		expect(harness.screen().text()).toContain("tail");
+	});
+
+	it("renders Plan Approval Modal Card with light surfaces, grapheme-safe inline comment input, and narrow/wide pill hitboxes", async () => {
 		harness = await createInteractiveHarness({
 			theme: "light",
 			width: 110,
@@ -280,7 +305,6 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 			expect(lum).toBeGreaterThan(170);
 		}
 
-		/* Редактирование комментария к первой строке плана: эмодзи-графема, Backspace, Ctrl+U и сохранение по Enter */
 		await harness.pressKey("\r");
 		for (const lum of collectModalBgLuminances(harness.screen())) {
 			expect(lum).toBeGreaterThan(170);
@@ -349,7 +373,6 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		await harness.submitInput("First turn for rail hover");
 		await harness.submitInput("Second turn for rail hover");
 
-		/* Наводим мышь на маркер Outline Rail, чтобы поднять неблокирующий Hover Popup превью */
 		const baseScreen = harness.screen();
 		let tickRow = -1;
 		for (let r = 0; r < baseScreen.height; r += 1) {
@@ -362,12 +385,10 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		await harness.mouseMove(107, tickRow);
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 
-		/* Открытие Command Palette по Ctrl+K поверх видимого Hover Popup проходит успешно */
 		await harness.pressKey("\x0b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
 		expect(harness.screen().text()).toContain("⌘ Command Palette");
 
-		/* Попытка открыть Context Inspector или Plan Studio поверх Command Palette — тихий no-op */
 		getSessionWorkflow().planLines = ["1. Step one"];
 		await harness.pressKey("\x1b[105;7u");
 		await harness.pressKey("\x1b[112;7u");
@@ -375,7 +396,6 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		expect(harness.screen().text()).not.toContain("◐ Context Inspector");
 		expect(harness.screen().text()).not.toContain("╭─ 📋 Plan Studio");
 
-		/* Повторное нажатие Ctrl+K закрывает Command Palette, после чего /context спокойно открывается */
 		await harness.pressKey("\x0b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 
@@ -446,7 +466,6 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 			],
 		});
 
-		/* 1. При открытом Modal Card запуск опросника возвращает точную ошибку блокировки */
 		await openSlashWithoutWaiting(harness, "/context");
 		expect(harness.screen().text()).toContain("Context Inspector");
 		await harness.pressKey("\x1b[117;7u");
@@ -454,13 +473,11 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		await harness.pressKey("\x1b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 
-		/* Создаём ход с многострочным Prompt Chip для проверки подавления обоих типов Hover Popup */
 		await harness.submitInput("Seed first turn");
 		await harness.paste("chip-1\nchip-2\nchip-3\nchip-4", true);
 		const askTurn = harness.submitInput("");
 		await harness.flush();
 
-		/* 2. Опросник смонтирован в нижней док-панели без рамки ╭─ Modal Card и регистрирует блокирующий диалог */
 		const qScreen = harness.screen();
 		const qText = qScreen.text();
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
@@ -469,20 +486,16 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		expect(qText).toContain("✔ Submit");
 		expect(qText).toContain("CREATE TABLE items_1");
 
-		/* Проверяем, что PageDown листает превью внутри опросника (capturesViewportInput = true), а не транскрипт */
 		await harness.pressKey("\x1b[6~");
 		expect(harness.screen().text()).toContain("CREATE TABLE items_18");
 
-		/* Наведение на Outline Rail не создаёт всплывающий Hover Popup поверх активного опросника */
 		await harness.mouseMove(107, 5);
 		expect(harness.screen().text()).not.toContain("Ход 1");
 
-		/* 3. Попытка открыть Command Palette (Ctrl+K) во время работы опросника — тихий no-op */
 		await harness.pressKey("\x0b");
 		expect(harness.screen().text()).not.toContain("⌘ Command Palette");
 		expect(harness.screen().text()).toContain("☐ Storage");
 
-		/* Отменяем опросник по Escape — ход завершается, после чего Ctrl+K снова открывает палитру */
 		await harness.pressKey("\x1b");
 		await askTurn;
 

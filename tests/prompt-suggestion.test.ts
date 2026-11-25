@@ -1,9 +1,29 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { COMPOSER_PLACEHOLDER } from "../src/features/chrome/composer.ts";
+import {
+	isSupersededExternalSuggestionExtension,
+	MAX_PROMPT_SUGGESTION_LENGTH,
+	sanitizePromptSuggestion,
+} from "../src/features/prompt-suggestion/index.ts";
 import { hasBlockingModalOverlay, registerBlockingDialog } from "../src/shared/modal-card.ts";
+import {
+	DEFAULT_PI_UI_USER_CONFIG,
+	getPiUiConfigPath,
+	loadPiUiUserConfig,
+	updatePiUiUserConfig,
+} from "../src/shared/pi-ui-config.ts";
 import {
 	createInteractiveHarness,
 	DEFAULT_EXTENSION_ENTRY,
@@ -83,6 +103,16 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		expect(JSON.parse(readFileSync(configFile, "utf8"))).toMatchObject({
 			promptSuggestions: true,
 		});
+
+		await harness.typeText("/suggestions ");
+		const completionText = harness.screen().text();
+		expect(completionText).toContain("on");
+		expect(completionText).toContain("off");
+		expect(completionText).not.toContain("status");
+		await harness.pressKey("\x15");
+
+		await harness.submitInput("/suggestions status");
+		expect(harness.screen().text()).toContain("Использование: /suggestions [on|off]");
 	});
 
 	it("predicts Prompt Suggestion in background reusing prompt-cache prefix, renders dimmed inside rounded composer frame with narrow truncation, and never keeps working indicator active", async () => {
@@ -368,6 +398,31 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		expect(harness.suggestionCalls).toHaveLength(1);
 	});
 
+	it("skips Prompt Suggestion when a Plan turn ends by opening the Plan Approval Modal Card", async () => {
+		harness = await createInteractiveHarness({
+			width: 96,
+			height: 28,
+			responses: [
+				fauxAssistantMessage("1. Update src/index.ts\n2. Verify tests pass"),
+			],
+			suggestionResponses: [
+				fauxAssistantMessage("ЛИШНИЙ_ЗАПРОС_ВО_ВРЕМЯ_МОДАЛКИ"),
+			],
+		});
+
+		await harness.submitInput("/mode plan");
+		await harness.submitInput("Составь план правок");
+		await waitForCondition(() => hasBlockingModalOverlay(harness!.tui));
+		await new Promise<void>((resolve) => setTimeout(resolve, 30));
+
+		expect(harness.calls).toHaveLength(1);
+		expect(harness.suggestionCalls).toHaveLength(0);
+		expect(harness.screen().text()).not.toContain("ЛИШНИЙ_ЗАПРОС_ВО_ВРЕМЯ_МОДАЛКИ");
+
+		await harness.pressKey("\x1b");
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
+	});
+
 	it("accepts Prompt Suggestion on Tab or Right arrow with Ctrl+Z and tui.editor.undo reversal, clearing the stored suggestion", async () => {
 		harness = await createInteractiveHarness({
 			width: 92,
@@ -513,8 +568,8 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 	});
 
-	it("automatically neutralizes external pi-next-prompt loaded either before or after @conarti/pi-ui without duplicate LLM requests or double editor wrappers", async () => {
-		const pkgRoot = allocateTempDir("pi-ui-ext-next-prompt-");
+	it("automatically neutralizes superseded external Prompt Suggestion extensions loaded either before or after @conarti/pi-ui without duplicate LLM requests or double editor wrappers", async () => {
+		const pkgRoot = allocateTempDir("pi-ui-ext-superseded-");
 		const extDir = join(pkgRoot, "pi-next-prompt", "extensions");
 		mkdirSync(extDir, { recursive: true });
 		const externalEntry = join(extDir, "next-prompt.ts");
@@ -626,6 +681,262 @@ export default function (pi) {
 			await harness.dispose();
 			harness = undefined;
 		}
+	});
+
+	it("neutralizes inline or renamed external Prompt Suggestion extensions with module-scoped PROMPT constants", async () => {
+		const extDir = allocateTempDir("pi-ui-ext-renamed-");
+		const renamedEntry = join(extDir, "custom-inline-extension.ts");
+		writeFileSync(
+			renamedEntry,
+			`
+import { normalizeContext } from "@earendil-works/pi-ai";
+import { convertToLlm, CustomEditor } from "@earendil-works/pi-coding-agent";
+import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+
+const PROMPT = "[Suggestion mode] Predict what the user will type next in this conversation.";
+const MAX_LENGTH = 100;
+
+export default function (pi) {
+	let suggestion = "";
+	let lastRequest = [];
+	let pending;
+	let redraw = () => {};
+
+	pi.on("context_with_system", async (event) => {
+		lastRequest = event.messages;
+	});
+
+	pi.on("agent_end", async (event, ctx) => {
+		const reply = event.messages.at(-1);
+		if (ctx.mode !== "tui" || !ctx.model || reply?.role !== "assistant" || reply.stopReason !== "stop") return;
+		if (ctx.hasPendingMessages()) return;
+		const controller = new AbortController();
+		pending = controller;
+		const level = pi.getThinkingLevel();
+		const model = ctx.model;
+		const ask = { role: "user", content: [{ type: "text", text: PROMPT }], timestamp: Date.now() };
+		void (async () => {
+			const answer = await ctx.modelRegistry
+				.streamSimple(model, normalizeContext({ messages: convertToLlm([...lastRequest, reply, ask]) }), {
+					reasoning: model.reasoning && level !== "off" ? level : undefined,
+					maxTokens: 2000,
+					sessionId: ctx.sessionManager.getSessionId(),
+					signal: controller.signal,
+				})
+				.result();
+			if (controller.signal.aborted || answer.stopReason !== "stop") return;
+			suggestion = "INLINE_EXTERNAL_SUGGESTION";
+			void MAX_LENGTH;
+			redraw();
+		})();
+	});
+
+	pi.on("session_start", async (_event, ctx) => {
+		if (ctx.mode !== "tui") return;
+		const previous = ctx.ui.getEditorComponent();
+		ctx.ui.setEditorComponent((tui, theme, keybindings) => {
+			const editor = previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
+			redraw = () => tui.requestRender();
+			const handleInput = editor.handleInput.bind(editor);
+			editor.handleInput = (data) => {
+				if (suggestion && editor.getText() === "" && (matchesKey(data, Key.tab) || matchesKey(data, Key.right))) {
+					editor.setText("INLINE_HIJACKED");
+					suggestion = "";
+					return;
+				}
+				handleInput(data);
+			};
+			const render = editor.render.bind(editor);
+			editor.render = (width) => {
+				const lines = [...render(width)];
+				const blank = suggestion && editor.getText() === "" ? lines[1]?.match(/ {3,}$/)?.[0] : undefined;
+				if (blank) {
+					const ghost = truncateToWidth(suggestion, blank.length - 2, "…");
+					lines[1] = lines[1].slice(0, -blank.length) + ctx.ui.theme.fg("dim", ghost) + " ".repeat(blank.length - visibleWidth(ghost));
+				}
+				return lines;
+			};
+			return editor;
+		});
+	});
+}
+`,
+			"utf8",
+		);
+
+		for (const order of ["before", "after"] as const) {
+			const extensionPaths =
+				order === "before"
+					? [renamedEntry, DEFAULT_EXTENSION_ENTRY]
+					: [DEFAULT_EXTENSION_ENTRY, renamedEntry];
+
+			harness = await createInteractiveHarness({
+				width: 92,
+				height: 26,
+				loadDefaultExtension: false,
+				additionalExtensionPaths: extensionPaths,
+				responses: [fauxAssistantMessage(`Ответ переименованного (${order})`)],
+				suggestionResponses: [
+					fauxAssistantMessage(`Чистая подсказка (${order})`),
+					fauxAssistantMessage("ДУБЛЬ_ОТ_ВНЕШНЕГО"),
+				],
+			});
+
+			await harness.submitInput(`Проверка переименованного (${order})`);
+			await waitForCondition(() =>
+				harness!.screen().text().includes(`Чистая подсказка (${order})`),
+			);
+			await new Promise<void>((resolve) => setTimeout(resolve, 25));
+
+			expect(harness.calls).toHaveLength(1);
+			expect(harness.suggestionCalls).toHaveLength(1);
+			await harness.pressKey("\t");
+			expect(harness.screen().text()).toContain(`Чистая подсказка (${order})`);
+			expect(harness.screen().text()).not.toContain("INLINE_HIJACKED");
+
+			await harness.dispose();
+			harness = undefined;
+		}
+	});
+});
+
+describe("Prompt Suggestion configuration, sanitization, and external superseder rules", () => {
+	let tempRoot = "";
+	let prevAgentDir: string | undefined;
+
+	beforeEach(() => {
+		prevAgentDir = process.env.PI_CODING_AGENT_DIR;
+		tempRoot = mkdtempSync(join(tmpdir(), "pi-ui-cfg-unit-"));
+		process.env.PI_CODING_AGENT_DIR = join(tempRoot, "agent-a");
+	});
+
+	afterEach(() => {
+		if (prevAgentDir === undefined) {
+			delete process.env.PI_CODING_AGENT_DIR;
+		} else {
+			process.env.PI_CODING_AGENT_DIR = prevAgentDir;
+		}
+		if (tempRoot) {
+			rmSync(tempRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("resolves getAgentDir dynamically, defaults promptSuggestions to true, survives malformed JSON, and preserves symlinks and sibling keys", () => {
+		expect(getPiUiConfigPath()).toBe(join(tempRoot, "agent-a", "pi-ui.json"));
+		expect(loadPiUiUserConfig()).toEqual(DEFAULT_PI_UI_USER_CONFIG);
+		expect(loadPiUiUserConfig().promptSuggestions).toBe(true);
+
+		const secondDir = join(tempRoot, "agent-b");
+		process.env.PI_CODING_AGENT_DIR = secondDir;
+		expect(getPiUiConfigPath()).toBe(join(secondDir, "pi-ui.json"));
+
+		updatePiUiUserConfig({ promptSuggestions: false });
+		expect(loadPiUiUserConfig().promptSuggestions).toBe(false);
+
+		writeFileSync(getPiUiConfigPath(), "{broken json", "utf8");
+		expect(loadPiUiUserConfig()).toEqual(DEFAULT_PI_UI_USER_CONFIG);
+
+		writeFileSync(getPiUiConfigPath(), JSON.stringify({ promptSuggestions: "invalid" }), "utf8");
+		expect(loadPiUiUserConfig()).toEqual(DEFAULT_PI_UI_USER_CONFIG);
+
+		const symlinkDir = join(tempRoot, "agent-symlink");
+		process.env.PI_CODING_AGENT_DIR = symlinkDir;
+		const realTargetPath = join(tempRoot, "linked-target.json");
+		writeFileSync(
+			realTargetPath,
+			`${JSON.stringify({ appearanceMode: "auto", statusBar: true, promptSuggestions: true }, null, 2)}\n`,
+			"utf8",
+		);
+		updatePiUiUserConfig({ promptSuggestions: true });
+		rmSync(getPiUiConfigPath(), { force: true });
+		symlinkSync(realTargetPath, getPiUiConfigPath());
+
+		const updated = updatePiUiUserConfig({ promptSuggestions: false });
+		expect(updated.promptSuggestions).toBe(false);
+		expect(lstatSync(getPiUiConfigPath()).isSymbolicLink()).toBe(true);
+		expect(existsSync(realTargetPath)).toBe(true);
+		expect(JSON.parse(readFileSync(realTargetPath, "utf8"))).toEqual({
+			appearanceMode: "auto",
+			statusBar: true,
+			promptSuggestions: false,
+		});
+	});
+
+	it("sanitizes single-line Prompt Suggestions and rejects sentinels, multiline outputs, and strings over 100 chars", () => {
+		expect(MAX_PROMPT_SUGGESTION_LENGTH).toBe(100);
+		expect(sanitizePromptSuggestion('  "Запусти тесты и покажи отчёт"  ')).toBe(
+			"Запусти тесты и покажи отчёт",
+		);
+		expect(sanitizePromptSuggestion("`'npm run check'`")).toBe("npm run check");
+		expect(sanitizePromptSuggestion("«Покажи diff для composer.ts»")).toBe(
+			"Покажи diff для composer.ts",
+		);
+		expect(sanitizePromptSuggestion("Run `npm test` on the worktree")).toBe(
+			"Run `npm test` on the worktree",
+		);
+		expect(sanitizePromptSuggestion("Нет")).toBe("Нет");
+		expect(sanitizePromptSuggestion("x".repeat(100))).toBe("x".repeat(100));
+
+		expect(sanitizePromptSuggestion("")).toBeUndefined();
+		expect(sanitizePromptSuggestion("   ")).toBeUndefined();
+		expect(sanitizePromptSuggestion('""')).toBeUndefined();
+		expect(sanitizePromptSuggestion("nothing")).toBeUndefined();
+		expect(sanitizePromptSuggestion("(Nothing)")).toBeUndefined();
+		expect(sanitizePromptSuggestion("[none]")).toBeUndefined();
+		expect(sanitizePromptSuggestion("N/A")).toBeUndefined();
+		expect(sanitizePromptSuggestion("Line one\nLine two")).toBeUndefined();
+		expect(sanitizePromptSuggestion("Line one\rLine two")).toBeUndefined();
+		expect(sanitizePromptSuggestion("x".repeat(101))).toBeUndefined();
+	});
+
+	it("identifies superseded external suggestion extensions by package path, sourceInfo, and handler signatures without false positives", () => {
+		expect(
+			isSupersededExternalSuggestionExtension({
+				path: "/Users/dev/.pi/agent/npm/node_modules/pi-next-prompt/extensions/next-prompt.ts",
+			}),
+		).toBe(true);
+		expect(
+			isSupersededExternalSuggestionExtension({
+				path: "<inline:0>",
+				sourceInfo: { source: "npm:pi-next-prompt" },
+			}),
+		).toBe(true);
+		expect(
+			isSupersededExternalSuggestionExtension({
+				path: "<inline:1>",
+				handlers: new Map([
+					[
+						"agent_end",
+						[
+							function inlineLiteralHandler() {
+								return "[Suggestion mode] Predict what the user will type next in this conversation.";
+							},
+						],
+					],
+				]),
+			}),
+		).toBe(true);
+		expect(
+			isSupersededExternalSuggestionExtension({
+				path: "<inline:2>",
+				handlers: new Map([
+					[
+						"session_start",
+						[
+							function editorWrapperHandler(ctx: { ui: { setEditorComponent: (fn: unknown) => void } }) {
+								ctx.ui.setEditorComponent((lines: string[]) => lines[1]?.match(/ {3,}$/)?.[0]);
+							},
+						],
+					],
+				]),
+			}),
+		).toBe(true);
+		expect(
+			isSupersededExternalSuggestionExtension({
+				path: "/Users/dev/Projects/pi-ui/src/index.ts",
+				handlers: new Map([["session_start", [() => {}]]]),
+			}),
+		).toBe(false);
 	});
 });
 

@@ -46,7 +46,7 @@ describe("conartiPiUi end-to-end InteractiveMode smoke", () => {
 		expect(runtime).toBeDefined();
 		expect(isLightTheme(runtime!.theme())).toBe(false);
 
-		/* В реальном InteractiveMode runtime.tui — это Proxy (this.ui !== this.renderer) */
+		/* В реальном InteractiveMode runtime.tui является Proxy-обёрткой (this.ui !== this.renderer) */
 		expect(runtime!.tui).toBe(harness.tui);
 		expect(harness.tui).not.toBe(harness.tui.valueOf());
 
@@ -60,7 +60,6 @@ describe("conartiPiUi end-to-end InteractiveMode smoke", () => {
 		expect(runtime!.viewportSlots?.topSlot).toBeDefined();
 		expect(runtime!.viewportSlots?.rightRail).toBeDefined();
 
-		/* Проверяем регистрацию слэш-команд и инструмента ask_user_question в реальной сессии */
 		const slashNames = new Set(
 			harness.session.extensionRunner?.getRegisteredCommands().map((cmd) => cmd.name) ?? [],
 		);
@@ -74,11 +73,9 @@ describe("conartiPiUi end-to-end InteractiveMode smoke", () => {
 		const allToolNames = new Set(harness.session.getAllTools().map((tool) => tool.name));
 		expect(allToolNames.has("ask_user_question")).toBe(true);
 
-		/* Отправляем два хода через реальный цикл ввода InteractiveMode */
 		await harness.submitInput("First turn anchor question");
 		await harness.submitInput("Second turn follow-up question");
 
-		/* Проверяем, что Outline Rail реально скомпозирован в колонках width - 3 .. width - 2 (117..118) */
 		const bottomScreen = harness.screen();
 		let hasRailGlyph = false;
 		for (let r = 0; r < bottomScreen.height; r += 1) {
@@ -90,19 +87,16 @@ describe("conartiPiUi end-to-end InteractiveMode smoke", () => {
 		}
 		expect(hasRailGlyph).toBe(true);
 
-		/* Прокручиваем вверх к обмену первого хода и проверяем закреплённый сверху Sticky Prompt */
 		await harness.mouseWheel("up", 40, 10, 8);
 		const scrolledScreen = harness.screen();
 		const topRows = [0, 1, 2, 3].map((r) => scrolledScreen.rowText(r)).join("\n");
 		expect(topRows).toContain("First turn anchor question");
 
-		/* Возвращаемся вниз, выделяем мышью текст ответа и проверяем маску хрома + попап ╭ ❝ Цитировать ╮ */
 		await harness.mouseWheel("down", 40, 10, 12);
 		const readyScreen = harness.screen();
 		const targetPos = readyScreen.findText("Selectable target sentence");
 		expect(targetPos).toBeDefined();
 
-		/* Тянем выделение вплоть до колонки Outline Rail (118), проверяя, что хром не инвертируется */
 		await harness.mouseDrag(targetPos!.col, targetPos!.row, 118, targetPos!.row, { steps: 3 });
 		const selectedScreen = harness.screen();
 		expect(selectedScreen.cellAt(targetPos!.row, targetPos!.col)?.inverse).toBe(true);
@@ -113,7 +107,6 @@ describe("conartiPiUi end-to-end InteractiveMode smoke", () => {
 		expect(quotePopupPos).toBeDefined();
 		expect(selectedScreen.text()).toContain("╭ ❝ Цитировать ╮");
 
-		/* Кликаем по попапу цитирования через реальные SGR-координаты терминала */
 		await harness.mouseClick(quotePopupPos!.col + 2, quotePopupPos!.row);
 		const afterQuoteScreen = harness.screen();
 		expect(afterQuoteScreen.text()).toContain("Quote #1");

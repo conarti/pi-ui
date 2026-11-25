@@ -17,7 +17,10 @@ import {
 } from "@earendil-works/pi-tui";
 import { bgRgb, fgRgb } from "../../shared/ansi.ts";
 import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
-import { matchesLayoutChord } from "../../shared/keyboard-layout.ts";
+import {
+	createBracketedPasteTracker,
+	matchesLayoutChord,
+} from "../../shared/keyboard-layout.ts";
 import {
 	createModalCard,
 	createSingleLineInput,
@@ -504,25 +507,14 @@ export function registerCommandPaletteFeature(pi: ExtensionAPI): void {
 		unsubscribeInput = undefined;
 		if (ctx.mode !== "tui" || !ctx.hasUI) return;
 
-		let inBracketedPaste = false;
-		unsubscribeInput = ctx.ui.onTerminalInput((data) => {
-			if (data.includes("\x1b[200~")) {
-				inBracketedPaste = !data.includes("\x1b[201~");
-				return undefined;
-			}
-			if (inBracketedPaste) {
-				if (data.includes("\x1b[201~")) {
-					inBracketedPaste = false;
-				}
-				return undefined;
-			}
-			if (
-				isKeyRelease(data) ||
-				isKeyRepeat(data) ||
-				(!matchesKey(data, "ctrl+k") && !matchesLayoutChord(data, "ctrl+k"))
-			) {
-				return undefined;
-			}
+		const pasteTracker = createBracketedPasteTracker();
+		const isCtrlKInput = (seq: string): boolean =>
+			Boolean(seq) &&
+			!isKeyRelease(seq) &&
+			!isKeyRepeat(seq) &&
+			(matchesKey(seq, "ctrl+k") || matchesLayoutChord(seq, "ctrl+k"));
+
+		const resolveCtrlKDisposition = (): "passthrough" | "consume" | "open" => {
 			const hostTui = getActiveHostRuntime()?.tui;
 			if (hostTui) {
 				const inspectable = hostTui as TUI & { getTopmostVisibleOverlay?: () => unknown };
@@ -530,14 +522,64 @@ export function registerCommandPaletteFeature(pi: ExtensionAPI): void {
 					typeof inspectable.getTopmostVisibleOverlay === "function" &&
 					inspectable.getTopmostVisibleOverlay()
 				) {
-					return undefined;
+					return "passthrough";
 				}
 				if (hasBlockingModalOverlay(hostTui)) {
-					return { consume: true };
+					return "consume";
 				}
 			}
-			void showCommandPalette(pi, ctx);
-			return { consume: true };
+			return "open";
+		};
+
+		unsubscribeInput = ctx.ui.onTerminalInput((data) => {
+			const segments = pasteTracker.split(data);
+			if (segments.length === 0 || segments.every((seg) => seg.inPaste)) {
+				return undefined;
+			}
+
+			if (segments.length === 1) {
+				if (!isCtrlKInput(data)) {
+					return undefined;
+				}
+				const disposition = resolveCtrlKDisposition();
+				if (disposition === "passthrough") return undefined;
+				if (disposition === "open") {
+					void showCommandPalette(pi, ctx);
+				}
+				return { consume: true };
+			}
+
+			let matchedCtrlK = false;
+			let forwarded = "";
+			for (const seg of segments) {
+				if (!seg.inPaste && isCtrlKInput(seg.text)) {
+					matchedCtrlK = true;
+				} else {
+					forwarded += seg.text;
+				}
+			}
+			if (!matchedCtrlK) {
+				return undefined;
+			}
+
+			const disposition = resolveCtrlKDisposition();
+			if (disposition === "passthrough") {
+				return undefined;
+			}
+			if (!forwarded) {
+				if (disposition === "open") {
+					void showCommandPalette(pi, ctx);
+				}
+				return { consume: true };
+			}
+			if (disposition === "open") {
+				queueMicrotask(() => {
+					if (resolveCtrlKDisposition() === "open") {
+						void showCommandPalette(pi, ctx);
+					}
+				});
+			}
+			return { data: forwarded };
 		});
 	});
 

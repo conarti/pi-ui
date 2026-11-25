@@ -25,7 +25,6 @@ const PURE_UNIT_TEST_FILES = new Set([
 	"tests/host-peers.test.ts",
 	"tests/keyboard-layout.test.ts",
 	"tests/prompt-chips.test.ts",
-	"tests/prompt-suggestion-model.test.ts",
 	"tests/quotes.test.ts",
 	"tests/shell-analysis.test.ts",
 	"tests/viewport-chrome-geometry.test.ts",

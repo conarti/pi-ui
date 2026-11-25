@@ -227,7 +227,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		});
 		await harness.flush();
 
-		/* Во время стриминга Thinking работает единый 30 fps таймер анимации для волн Thinking и композера */
 		expect(vi.getTimerCount()).toBe(1);
 		const spineRgbFrame0 = findRowGlyphRgb(harness, "Thinking…", "┃");
 		const workingRgbFrame0 = findRowGlyphRgb(harness, "Working", "◆");
@@ -241,7 +240,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(spineRgbFrame1).not.toEqual(spineRgbFrame0);
 		expect(workingRgbFrame1).not.toEqual(workingRgbFrame0);
 
-		/* Завершаем первый шаг модели вызовом медленного инструмента после 2.4с размышления */
 		vi.advanceTimersByTime(2200);
 		const toolCallBlock = {
 			type: "toolCall" as const,
@@ -271,7 +269,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 
 		await harness.flush();
 
-		/* Во время выполнения инструмента крутится волна 30 fps на строке инструмента и индикаторе композера */
 		const toolDiamondBefore = findRowGlyphRgb(harness, "inspect_bundle", "◆");
 		expect(toolDiamondBefore).toBeDefined();
 		vi.advanceTimersByTime(33 * 6);
@@ -311,7 +308,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(settledText).toContain("Bundle Summary");
 		expect(settledText).toContain("export const bundleAnswer = 42;");
 
-		/* Клик по свёрнутой строке Thinking раскрывает и повторно сворачивает ход размышления */
 		const collapsedHit = harness.screen().findText("Thought for 2s");
 		expect(collapsedHit).toBeDefined();
 		await harness.mouseClick(collapsedHit!.col + 2, collapsedHit!.row);
@@ -323,7 +319,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(harness.screen().text()).not.toContain("Verifying tree-shaking boundaries");
 		expect(harness.screen().text()).not.toContain("Цитировать");
 
-		/* Наведение на карточку User Prompt показывает Copy без сдвига строки, клик копирует текст в HostClipboardProvider */
 		const promptHit = harness.screen().findText("› Audit src/entry.ts and show the helper");
 		expect(promptHit).toBeDefined();
 		await harness.mouseMove(promptHit!.col + 4, promptHit!.row);
@@ -337,7 +332,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 			"Audit src/entry.ts and show the helper",
 		);
 
-		/* Переключаемся в светлую тему, наводим на заголовок кодового блока и проверяем светлую поверхность + Copy */
 		harness.setTheme("light");
 		const codeLineHit = harness.screen().findText("export const bundleAnswer = 42;");
 		expect(codeLineHit).toBeDefined();
@@ -402,7 +396,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		await harness.submitInput("Design Turn One cache strategy");
 		await harness.submitInput("Refine Turn Two eviction rules");
 
-		/* Прокручиваем вверх через реальное колесо SGR: проверяем Sticky Prompt сверху и Outline Rail справа */
 		await harness.mouseWheel("up", 30, 10, 5);
 		const scrolledTopScreen = harness.screen();
 		const topChromeRows = [1, 2, 3].map((r) => scrolledTopScreen.rowText(r)).join("\n");
@@ -421,14 +414,12 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(tickRows.length).toBeGreaterThanOrEqual(2);
 		secondTickRow = tickRows[1]!;
 
-		/* Наведение на деление второго хода в Outline Rail показывает Hover Popup превью, клик переносит фокус к ходу */
 		await harness.mouseMove(railColStart + 1, secondTickRow);
 		expect(harness.screen().text()).toContain("Refine Turn Two eviction rules");
 
 		await harness.mouseClick(railColStart + 1, secondTickRow);
 		await harness.mouseMove(4, 12);
 
-		/* Прокручиваем к концу, выделяем две строки ответа мышью и нажимаем на попап ╭ ❝ Цитировать ╮ */
 		await harness.mouseWheel("down", 30, 10, 12);
 		const quoteLine1 = harness.screen().findText("Quotable line one");
 		const quoteLine2 = harness.screen().findText("Quotable line two");
@@ -444,7 +435,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		);
 		const popupPos = harness.screen().findText("Цитировать");
 		expect(popupPos).toBeDefined();
-		/* Сам попап цитирования не инвертируется выделением текста */
 		expect(harness.screen().cellAt(popupPos!.row, popupPos!.col)?.inverse).toBe(false);
 
 		await harness.mouseClick(popupPos!.col + 2, popupPos!.row);
@@ -453,7 +443,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		const editor = getActiveComposerEditor()!;
 		expect(editor.getText()).toBe("[❝ Quote #1 · 2 lines]");
 
-		/* Добавляем вторую цитату из буфера через Alt+Q, многострочную вставку и PNG-изображение через Ctrl+V */
 		await harness.typeText(" ");
 		await harness.pressKey("\x1bq");
 		await flushUiAsync(harness);
@@ -469,14 +458,12 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 			"[❝ Quote #1 · 2 lines] [❝ Quote #2 · 1 line] [📋 Pasted #3 · 4 lines] [🖼 Image #4]",
 		);
 
-		/* Наведение мыши на пилюлю в композере открывает неблокирующий Hover Popup превью содержимого */
 		const draftPastePos = harness.screen().findText("[📋 Pasted #3 · 4 lines]");
 		expect(draftPastePos).toBeDefined();
 		await harness.mouseMove(draftPastePos!.col + 3, draftPastePos!.row);
 		expect(harness.screen().text()).toContain("log-line-1");
 		await harness.mouseMove(2, 2);
 
-		/* Отправляем комбинированный промпт: модель получает развёрнутый текст + PNG, а транскрипт и Sticky Prompt хранят пилюли */
 		await harness.submitDraft();
 		const chipCall = harness.calls[2]!;
 		const serializedChipTurn = JSON.stringify(chipCall.messages.at(-1));
@@ -491,7 +478,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(stickyBand).not.toContain("log-line-4");
 		await harness.mouseWheel("down", 30, 10, 6);
 
-		/* Проверяем Prompt Suggestion: Tab принимает, Ctrl+Z откатывает без SIGTSTP */
 		await waitForCondition(() => harness!.screen().text().includes("Запусти бенчмарк парсера"));
 		await harness.pressKey("\t");
 		expect(editor.getText()).toBe("Запусти бенчмарк парсера");
@@ -500,7 +486,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(editor.getText()).toBe("");
 		expect(harness.screen().text()).toContain(COMPOSER_PLACEHOLDER);
 
-		/* На следующем ходе принимаем Prompt Suggestion стрелкой → и отправляем, затем скрываем по Esc и отключаем через /suggestions off */
 		await harness.submitInput("Trigger next prediction");
 		await waitForCondition(() => harness!.screen().text().includes("Проверь покрытие веток"));
 		await harness.pressKey("\x1b[C");
@@ -520,7 +505,7 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(persistedConfig.promptSuggestions).toBe(false);
 	});
 
-	it("exercises Tool Density presets & exploration grouping, Command Palette (Ctrl+K), ask_user_question questionnaire, and Plan / Auto-Safe preflight confirmations", async () => {
+	it("exercises Tool Density presets & exploration grouping, Command Palette (Ctrl+K), ask_user_question questionnaire, and Plan Approval / Permission Prompt preflight confirmations", async () => {
 		const projectDir = allocateTempDir("pi-ui-e2e-project-");
 		mkdirSync(join(projectDir, "src"), { recursive: true });
 		writeFileSync(
@@ -540,7 +525,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 			width: 112,
 			height: 36,
 			responses: [
-				/* Ход 1: группируемое исследование + правка edit + многострочный вывод bash */
 				fauxAssistantMessage(
 					[
 						fauxToolCall("read", { path: "src/service.ts" }, { id: "exp-r1" }),
@@ -575,7 +559,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 					{ stopReason: "toolUse" },
 				),
 				fauxAssistantMessage("Updated timeout and ran diagnostics."),
-				/* Ход 2: опросник ask_user_question */
 				fauxAssistantMessage(
 					[
 						fauxToolCall(
@@ -598,7 +581,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 					{ stopReason: "toolUse" },
 				),
 				fauxAssistantMessage("Rollout target recorded."),
-				/* Ход 3 (Plan Mode): read-only bash проходит, мутирующий bash блокируется, затем выходит Plan Studio */
 				fauxAssistantMessage(
 					[
 						fauxToolCall("bash", { command: "ls src" }, { id: "plan-ro-bash" }),
@@ -611,7 +593,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 					{ stopReason: "toolUse" },
 				),
 				fauxAssistantMessage("# Plan\n1. Increase timeout safely\n2. Verify healthchecks"),
-				/* Ход 4 (Auto-Safe): edit подтверждается по Enter, мутирующий bash отклоняется по Escape */
 				fauxAssistantMessage(
 					[
 						fauxToolCall(
@@ -639,7 +620,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 			],
 		});
 
-		/* 1. Tool Density: Detailed -> Diff Focus -> Compact + раскрытие/сворачивание группы Explored */
 		await harness.submitInput("Inspect and update service timeout");
 		const detailedText = harness.screen().text();
 		expect(detailedText).toContain("◆ Explored 2 files, 1 search");
@@ -674,11 +654,11 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		await harness.submitInput("/density detailed");
 		expect(harness.screen().text()).toContain("+export const timeoutMs = 2500;");
 
-		/* 2. Опросник ask_user_question: выбор Production стрелкой вниз + подтверждение после окна защиты от type-ahead (400мс) */
 		const askPromise = harness.submitInput("Ask me where to deploy");
 		await waitForCondition(() => harness!.screen().text().includes("Select rollout environment"));
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
 		await harness.pressKey("\x1b[B");
+		/* Выдерживаем 400мс окно защиты от случайного type-ahead перед Enter */
 		await new Promise<void>((resolve) => setTimeout(resolve, 420));
 		await harness.pressKey("\r");
 		await askPromise;
@@ -691,7 +671,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 			answers: [{ selected: ["Production"] }],
 		});
 
-		/* 3. Открываем Command Palette по Ctrl+K, фильтруем Plan Mode и включаем его по Enter */
 		await harness.pressKey("\x0b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
 		expect(harness.screen().text()).toContain("⌘ Command Palette");
@@ -701,8 +680,9 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(harness.session.getActiveToolNames()).not.toContain("edit");
 		expect(harness.session.getActiveToolNames()).not.toContain("write");
 
-		/* В Plan Mode read-only ls проходит, мутирующий редирект блокируется, а ответ открывает Plan Studio */
+		const suggestionCallsBeforePlan = harness.suggestionCalls.length;
 		await harness.submitInput("Draft rollout plan");
+		await new Promise<void>((resolve) => setTimeout(resolve, 25));
 		expect(existsSync(join(projectDir, "src", "mutated.txt"))).toBe(false);
 		const roBashRes = findToolResult(harness, "plan-ro-bash");
 		const mutBashRes = findToolResult(harness, "plan-mut-bash");
@@ -710,11 +690,11 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(mutBashRes?.isError).toBe(true);
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
 		expect(harness.screen().text()).toContain("Plan Studio");
+		expect(harness.suggestionCalls).toHaveLength(suggestionCallsBeforePlan);
 
 		await harness.pressKey("\x1b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 
-		/* 4. Переходим в Auto-Safe (/mode safe): разрешаем edit по Enter и блокируем rm по Escape */
 		await harness.submitInput("/mode safe");
 		expect(harness.session.getActiveToolNames()).toContain("edit");
 
@@ -766,13 +746,11 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(firstAltRenderer).toBeInstanceOf(TuiAltScreen);
 		expect(runtime.isFullscreen).toBe(true);
 
-		/* Отправляем первый ход с многострочным Prompt Chip и второй ход с текстом для выделения */
 		await harness.typeText("Inspect ");
 		await harness.paste("persist-log-1\npersist-log-2\npersist-log-3\npersist-log-4", true);
 		await harness.submitDraft();
 		await harness.submitInput("Prepare second turn");
 
-		/* Блокирующий Modal Card (Command Palette по Ctrl+K) запрещает переключение TUI-режима */
 		await harness.pressKey("\x0b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
 		expect(harness.screen().text()).toContain("⌘ Command Palette");
@@ -781,7 +759,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		await harness.pressKey("\x1b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 
-		/* Неблокирующий Hover Popup выделения (╭ ❝ Цитировать ╮) автоматически закрывается при уходе в regular */
 		const targetBeforeSwitch = harness.screen().findText("Selectable across mode switch");
 		expect(targetBeforeSwitch).toBeDefined();
 		await harness.mouseDrag(
@@ -801,11 +778,9 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		await harness.submitInput("Turn while in regular mode");
 		expect(harness.screen().text()).toContain("Regular mode turn succeeded.");
 
-		/* Включаем Plan Mode в regular-режиме и убеждаемся, что он переживает возврат в fullscreen и /reload */
 		await harness.submitInput("/mode plan");
 		expect(harness.session.getActiveToolNames()).not.toContain("edit");
 
-		/* Возврат regular -> fullscreen создаёт новый TuiAltScreen и перепривязывает ViewportChromeCompositor */
 		expect(await harness.setTuiMode("fullscreen")).toBe(true);
 		const secondAltRenderer = unwrapHostTui(harness.tui);
 		expect(secondAltRenderer).toBeInstanceOf(TuiAltScreen);
@@ -822,7 +797,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		).some((s) => /[▲▼─]/.test(s));
 		expect(hasRailAfterSwitch).toBe(true);
 
-		/* Проверяем цитирование мышью на новом TuiAltScreen после переключения режима */
 		const targetAfterSwitch = harness.screen().findText("Selectable across mode switch");
 		expect(targetAfterSwitch).toBeDefined();
 		await harness.mouseDrag(
@@ -839,7 +813,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(getActiveComposerEditor()!.getText()).toBe("[❝ Quote #1 · 1 line]");
 		getActiveComposerEditor()!.setText("");
 
-		/* Фиксируем ссылки на прототипные методы перед /reload и проверяем отсутствие наслоения обёрток */
 		const altProto = TuiAltScreen.prototype as unknown as { handleMouseEvent: unknown };
 		const altMouseBeforeReload = altProto.handleMouseEvent;
 		const userRenderBeforeReload = UserMessageComponent.prototype.render;
@@ -851,7 +824,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(UserMessageComponent.prototype.render).toBe(userRenderBeforeReload);
 		expect(AssistantMessageComponent.prototype.updateContent).toBe(assistantUpdateBeforeReload);
 
-		/* После /reload сохраняются Plan Mode, реконструкция пилюль Prompt Chip, Sticky Prompt, Ctrl+K и Prompt Suggestion */
 		expect(harness.session.getActiveToolNames()).not.toContain("edit");
 
 		await harness.mouseWheel("up", 30, 10, 10);
@@ -864,7 +836,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(harness.screen().text()).toContain("⌘ Command Palette");
 		await harness.pressKey("\x1b");
 
-		/* Переходим обратно в Code Mode, отправляем ход и проверяем фоновую генерацию Prompt Suggestion после /reload */
 		await harness.submitInput("/mode code");
 		expect(harness.session.getActiveToolNames()).toContain("edit");
 		await harness.submitInput("Verify post-reload turn");
@@ -875,5 +846,36 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		);
 		await harness.pressKey("\t");
 		expect(getActiveComposerEditor()!.getText()).toBe("Продолжи после перезагрузки");
+	});
+
+	it("renders markdown headings, code cards, and Copy badges with 256color ANSI sequences when trueColor is disabled", async () => {
+		harness = await createInteractiveHarness({
+			theme: "light",
+			trueColor: false,
+			width: 96,
+			height: 28,
+			responses: [
+				fauxAssistantMessage(
+					"### Heading Three\n#### Heading Four\n\n```ts\nexport const answer = 42;\n```",
+				),
+			],
+		});
+
+		await harness.submitInput("Show 256color card");
+		const headingHit = harness.screen().findText("Heading Three");
+		const codeHeaderHit = harness.screen().findText("ts");
+		expect(headingHit).toBeDefined();
+		expect(codeHeaderHit).toBeDefined();
+
+		await harness.mouseMove(codeHeaderHit!.col + 1, codeHeaderHit!.row);
+		const hoveredFrame = harness.renderFrame();
+		const headingAnsi = hoveredFrame[headingHit!.row] ?? "";
+		const codeHeaderAnsi = hoveredFrame[codeHeaderHit!.row] ?? "";
+		expect(headingAnsi).toContain("\x1b[38;5;");
+		expect(headingAnsi).not.toContain("\x1b[38;2;");
+		expect(codeHeaderAnsi).toContain("\x1b[48;5;");
+		expect(codeHeaderAnsi).toContain("\x1b[38;5;");
+		expect(codeHeaderAnsi).not.toContain("\x1b[48;2;");
+		expect(codeHeaderAnsi).not.toContain("\x1b[38;2;");
 	});
 });

@@ -96,7 +96,7 @@ function buildDestructiveExtensionTool(log: string[]): ExtensionFactory {
 	};
 }
 
-describe("Tool-call preflight (Shell Effect, destructiveHint, Auto-Safe queue on real InteractiveMode)", () => {
+describe("Tool-call preflight (Shell Effect, destructiveHint, Permission Prompt queue on real InteractiveMode)", () => {
 	let harness: InteractiveHarness | undefined;
 	const tempDirs: string[] = [];
 
@@ -117,7 +117,6 @@ describe("Tool-call preflight (Shell Effect, destructiveHint, Auto-Safe queue on
 	});
 
 	it("in Plan mode blocks edit, write, destructiveHint tools, and mutating bash/powershell while allowing read-only Shell Effect and unannotated tools", async () => {
-		/* Проверяем совместимость legacy-порта destructiveHint на чистом уровне SessionWorkflow */
 		const legacyWf = new SessionWorkflow();
 		legacyWf.mode = "plan";
 		const legacyRes = await legacyWf.preflightToolCall(
@@ -222,7 +221,7 @@ describe("Tool-call preflight (Shell Effect, destructiveHint, Auto-Safe queue on
 		expect(findToolResult(harness, "plan-docs")?.isError).toBe(false);
 	});
 
-	it("in Auto-Safe mode runs read-only tools immediately and gates edit, write, destructiveHint, and mutating bash/powershell behind Auto-Safe Modal Card", async () => {
+	it("in Auto Session Mode runs read-only tools immediately and gates edit, write, destructiveHint, and mutating bash/powershell behind Permission Prompt Modal Card", async () => {
 		const executed: string[] = [];
 		const projectDir = createTempProject();
 		mkdirSync(join(projectDir, "src"), { recursive: true });
@@ -293,20 +292,17 @@ describe("Tool-call preflight (Shell Effect, destructiveHint, Auto-Safe queue on
 
 		const safeTurn = harness.submitInput("Apply safe mutations");
 
-		/* edit -> Enter разрешает */
 		const editModalText = await waitForScreen(harness, (t) => t.includes("src/app.ts"));
 		expect(editModalText).toContain("Auto-Safe Confirmation");
 		expect(editModalText).toContain("edit");
 		await harness.pressKey("\r");
 
-		/* write -> Escape блокирует (ждём открытия следующего диалога после завершения записи edit) */
 		const writeModalText = await waitForScreen(harness, (t) => t.includes("src/new.ts"));
 		expect(readFileSync(join(projectDir, "src", "app.ts"), "utf8")).toBe("export const mode = 'new';\n");
 		expect(writeModalText).toContain("Auto-Safe Confirmation");
 		expect(writeModalText).toContain("write");
 		await harness.pressKey("\x1b");
 
-		/* deploy_prod (destructiveHint) -> Enter разрешает */
 		const deployModalText = await waitForScreen(harness, (t) => t.includes("deploy_prod"));
 		expect(existsSync(join(projectDir, "src", "new.ts"))).toBe(false);
 		expect(findToolResult(harness, "safe-write")?.isError).toBe(true);
@@ -314,13 +310,11 @@ describe("Tool-call preflight (Shell Effect, destructiveHint, Auto-Safe queue on
 		expect(deployModalText).toContain("deploy_prod");
 		await harness.pressKey("\r");
 
-		/* mutating bash -> Escape блокирует */
 		const bashModalText = await waitForScreen(harness, (t) => t.includes("touch blocked.txt"));
 		expect(executed).toContain("deploy_prod:prod");
 		expect(bashModalText).toContain("bash");
 		await harness.pressKey("\x1b");
 
-		/* mutating powershell -> Enter разрешает */
 		const psModalText = await waitForScreen(harness, (t) => t.includes("Remove-Item dist -Recurse"));
 		expect(existsSync(join(projectDir, "blocked.txt"))).toBe(false);
 		expect(findToolResult(harness, "safe-bash")?.isError).toBe(true);
@@ -447,7 +441,6 @@ describe("Tool-call preflight (Shell Effect, destructiveHint, Auto-Safe queue on
 		const batchResult = JSON.parse(contentText(findToolResult(harness, "batch-1")!.content));
 		expect(batchResult).toEqual({ firstErr: false, secondErr: true, thirdErr: false });
 
-		/* Регрессия: прерывание сессии при открытом Auto-Safe диалоге закрывает карточку без дедлока */
 		const abortTurn = harness.submitInput("Trigger abortable safe prompt");
 		await waitForScreen(harness, (t) => t.includes("aborted-write.txt"));
 		await harness.session.abort();
