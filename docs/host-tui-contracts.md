@@ -52,3 +52,11 @@ Verified runtime behaviors in `@earendil-works/pi-tui` and `@earendil-works/pi-c
   - Track bracketed paste state (`\x1b[200~` .. `\x1b[201~`) statefully across split chunks and pass paste payloads through untouched.
   - When Kitty CSI-u includes `:baseLayoutKey` (`\x1b[codepoint:shifted:base;modu`), trust `:baseLayoutKey` before consulting macOS `Option`-composed character tables so non-US physical layouts (`Russian`, `RussianWin`, `QWERTZ`) never misroute chords.
   - Rewrite Cyrillic codepoints and `Option`-composed symbols only when modifier bits (`Alt`, `Ctrl`, `Super`), `ESC` prefixes, or registered `alt+<letter>` Option chords apply, preserving plain printable text entry.
+
+## Real `InteractiveMode` Test Harness & Banned Host Fakes (`ADR-0006`)
+
+- **Real-host acquisition & test seam**:
+  - `acquireHostRuntime(ctx)` acquires the live host TUI exclusively through Pi's `ctx.ui.custom` contract (no `setHostRuntimeAdapter` test-adapter seam in production code).
+  - UI and extension integration tests boot real `InteractiveMode` + `createAgentSessionRuntime` + `registerFauxProvider` + `VirtualTerminal` (`tests/harness/interactive-harness.ts`) so `this.ui` `Proxy` wrapping, `createChatViewport` hierarchy, `ExtensionRunner` reserved-shortcut filtering, `switchTuiMode`, and `/reload` execute identically to live Pi.
+- **Mechanically banned patterns (`scripts/check-standards.mjs`)**:
+  - `npm run lint` rejects `as unknown as TUI` / `.asTui()` casts, private `.overlayStack` reads, direct `.handleMouse(` / `.handleMouse?.(` calls in integration suites, and any reintroduction of deleted fake-host modules (`fake-tui`, `fake-theme`, `extension-harness`) or `setHostRuntimeAdapter` / `HostRuntimeAdapter`.

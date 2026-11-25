@@ -232,7 +232,7 @@ export class ToolGroupComponent extends Container {
 			return { handled: true };
 		};
 		const handleHeaderMouse = (event: { type?: string; button?: string; y?: number }) => {
-			if (event.type !== "click" || event.button !== "left") return undefined;
+			if (event.button !== "left") return undefined;
 			if (
 				event.y === 0 &&
 				lastHeaderLines.length > 1 &&
@@ -240,10 +240,14 @@ export class ToolGroupComponent extends Container {
 			) {
 				return undefined;
 			}
+			if (event.type === "press") return { handled: true, render: false };
+			if (event.type !== "click") return undefined;
 			return toggleGroup();
 		};
 		const handleFooterMouse = (event: { type?: string; button?: string }) => {
-			if (event.type !== "click" || event.button !== "left") return undefined;
+			if (event.button !== "left") return undefined;
+			if (event.type === "press") return { handled: true, render: false };
+			if (event.type !== "click") return undefined;
 			return toggleGroup();
 		};
 		this.addChild({

@@ -182,9 +182,14 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			expect(copyPos).toBeDefined();
 			expect(copyPos!.col).toBeGreaterThan(30);
 
-			const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+			const writesBeforeCopy = harness.terminal.writes.length;
 			await harness.mouseClick(copyPos!.col + 1, copyPos!.row);
-			expect(stdoutSpy).toHaveBeenCalled();
+			expect(
+				harness.terminal.writes.slice(writesBeforeCopy).some((w) => w.includes("\x1b]52;c;")),
+			).toBe(true);
+			expect(await getActiveHostRuntime()!.clipboard.readText?.()).toBe(
+				"Build a clean parser for edge cases now",
+			);
 
 			const copiedScreen = harness.screen();
 			expect(copiedScreen.rowText(cardMidRow - 1)).toContain("Copied");

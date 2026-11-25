@@ -69,24 +69,55 @@ export function hookMethod(
 	return true;
 }
 
+const ACTIVE_RUNTIME_LOOKUP_KEY = Symbol.for("conarti.pi-ui.host-runtime.v1");
+
 export function copyToClipboard(text: string): void {
 	if (!text) return;
+	const runtimeSlot = (
+		globalThis as Record<
+			symbol,
+			| {
+					active?: {
+						clipboard?: { writeText?: (value: string) => unknown };
+						tui?: { terminal?: { write?: (data: string) => void } };
+					};
+					clipboard?: { writeText?: (value: string) => unknown };
+			  }
+			| undefined
+		>
+	)[ACTIVE_RUNTIME_LOOKUP_KEY];
+	const customWriter =
+		runtimeSlot?.active?.clipboard?.writeText ?? runtimeSlot?.clipboard?.writeText;
+	if (typeof customWriter === "function") {
+		try {
+			void customWriter(text);
+		} catch {
+			/* Ошибки пользовательского буфера обмена не должны прерывать рендер */
+		}
+		return;
+	}
 	if (process.platform === "darwin") {
 		try {
 			const child = spawn("pbcopy", [], { stdio: ["pipe", "ignore", "ignore"] });
 			child.on("error", () => {});
 			child.stdin?.end(text, "utf8");
 		} catch {
-			// Fall back to OSC 52
+			/* Переходим к резервной отправке OSC 52 */
 		}
 	}
 	try {
 		const b64 = Buffer.from(text, "utf8").toString("base64");
 		if (b64.length <= 100_000) {
-			process.stdout.write(`\x1b]52;c;${b64}\x07`);
+			const osc52 = `\x1b]52;c;${b64}\x07`;
+			const termWrite = runtimeSlot?.active?.tui?.terminal?.write;
+			if (typeof termWrite === "function") {
+				termWrite.call(runtimeSlot?.active?.tui?.terminal, osc52);
+			} else {
+				process.stdout.write(osc52);
+			}
 		}
 	} catch {
-		// Best-effort
+		/* Игнорируем сбои записи в поток вывода */
 	}
 }
 

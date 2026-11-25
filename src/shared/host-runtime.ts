@@ -36,17 +36,14 @@ export interface HostClipboardProvider {
 	readFilePaths?(): Promise<readonly string[] | null | undefined>;
 	readImage?(): Promise<ClipboardImagePayload | null | undefined>;
 	readText?(): Promise<string | null | undefined>;
+	writeText?(text: string): void | Promise<void>;
 }
 
-export interface AcquiredHostTui {
+interface AcquiredHostTui {
 	tui: TUI;
 	keybindings?: KeybindingsManager;
 	theme?: () => Theme;
 	clipboard?: HostClipboardProvider;
-}
-
-export interface HostRuntimeAdapter {
-	acquire(ctx: ExtensionContext): Promise<AcquiredHostTui | undefined>;
 }
 
 export interface HostRuntimeHandle {
@@ -84,7 +81,6 @@ interface InternalHostRuntimeHandle extends HostRuntimeHandle {
 
 interface RuntimeSlot {
 	active?: InternalHostRuntimeHandle;
-	adapter?: HostRuntimeAdapter;
 	clipboard?: HostClipboardProvider;
 }
 
@@ -155,10 +151,6 @@ export function isSameHostTui(a: unknown, b: unknown): boolean {
 	return a === b || unwrapHostTui(a) === unwrapHostTui(b);
 }
 
-export function setHostRuntimeAdapter(adapter: HostRuntimeAdapter | undefined): void {
-	getRuntimeSlot().adapter = adapter;
-}
-
 export function setHostClipboardProvider(clipboard: HostClipboardProvider | undefined): void {
 	getRuntimeSlot().clipboard = clipboard;
 }
@@ -211,9 +203,8 @@ function resolveContainerCandidate(candidate: unknown): Container | undefined {
 }
 
 /**
- * Resolves the transcript chat container in both fullscreen and non-fullscreen modes,
- * supporting both Pi's nested document layout (`[header, ..., chatContainer]`) and
- * flat test/fake containers where messages live directly under `scroll.child` or `tui.children[0]`.
+ * Разрешает контейнер сообщений транскрипта как в fullscreen (`ScrollView`),
+ * так и в обычном (`regular`) режиме вложенного документа Pi (`[header, ..., chatContainer]`).
  */
 export function findChatContainer(tui: unknown, scroll?: ScrollView): Container | undefined {
 	const scrollChild = (scroll as unknown as { child?: unknown } | undefined)?.child;
@@ -651,42 +642,41 @@ export const defaultHostClipboardProvider: HostClipboardProvider = {
 	},
 };
 
-const defaultAdapter: HostRuntimeAdapter = {
-	async acquire(ctx: ExtensionContext): Promise<AcquiredHostTui | undefined> {
-		if (ctx.mode !== "tui" || !ctx.hasUI) return undefined;
-		let acquired: AcquiredHostTui | undefined;
-		let finishProbe: (() => void) | undefined;
+async function acquireHostTuiFromExtensionUi(
+	ctx: ExtensionContext,
+): Promise<AcquiredHostTui | undefined> {
+	if (ctx.mode !== "tui" || !ctx.hasUI) return undefined;
+	let acquired: AcquiredHostTui | undefined;
+	let finishProbe: (() => void) | undefined;
 
-		await ctx.ui.custom<void>(
-			(tui, _theme, keybindings, done) => {
-				finishProbe = () => done();
-				pruneOrphanedProbeOverlays(tui, true);
-				acquired = {
-					tui,
-					keybindings,
-					theme: () => ctx.ui.theme,
-				};
-				return { render: () => [], invalidate() {} };
-			},
-			{
-				overlay: true,
-				overlayOptions: { nonCapturing: true, visible: () => false },
-				onHandle: () => finishProbe?.(),
-			},
-		);
+	await ctx.ui.custom<void>(
+		(tui, _theme, keybindings, done) => {
+			finishProbe = () => done();
+			pruneOrphanedProbeOverlays(tui, true);
+			acquired = {
+				tui,
+				keybindings,
+				theme: () => ctx.ui.theme,
+			};
+			return { render: () => [], invalidate() {} };
+		},
+		{
+			overlay: true,
+			overlayOptions: { nonCapturing: true, visible: () => false },
+			onHandle: () => finishProbe?.(),
+		},
+	);
 
-		return acquired;
-	},
-};
+	return acquired;
+}
 
 /**
- * Acquires the active Pi host TUI once per session start through either the
- * injected adapter (for tests) or the default single-probe production adapter.
- * Supports both fullscreen (`ScrollView` + `layoutRoot`) and non-fullscreen TUI modes.
+ * Получает активный хост TUI строго через публичный UI-контракт расширения Pi (`ctx.ui.custom`)
+ * один раз при старте сессии, поддерживая как `fullscreen`, так и `regular` режим.
  */
 export async function acquireHostRuntime(
 	ctx: ExtensionContext,
-	options?: { adapter?: HostRuntimeAdapter; clipboard?: HostClipboardProvider },
+	options?: { clipboard?: HostClipboardProvider },
 ): Promise<HostRuntimeHandle | undefined> {
 	const slot = getRuntimeSlot();
 	if (slot.active && slot.active.ctx === ctx) {
@@ -695,8 +685,7 @@ export async function acquireHostRuntime(
 
 	disposeActiveHostRuntime();
 
-	const adapter = options?.adapter ?? slot.adapter ?? defaultAdapter;
-	const acquired = await adapter.acquire(ctx);
+	const acquired = await acquireHostTuiFromExtensionUi(ctx);
 	if (!acquired) return undefined;
 
 	const { tui, keybindings } = acquired;

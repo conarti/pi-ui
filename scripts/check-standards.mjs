@@ -13,6 +13,49 @@ const BANNED_COMMIT_PATTERNS = [
 	{ label: "double hyphen in prose", regex: /(?:^|\s)--(?:\s|$)/m },
 ];
 
+const DELETED_FAKE_HARNESS_FILES = [
+	"tests/harness/fake-tui.ts",
+	"tests/harness/fake-theme.ts",
+	"tests/harness/extension-harness.ts",
+];
+
+const PURE_UNIT_TEST_FILES = new Set([
+	"tests/animation-scheduler.test.ts",
+	"tests/check-standards.test.ts",
+	"tests/host-peers.test.ts",
+	"tests/keyboard-layout.test.ts",
+	"tests/prompt-chips.test.ts",
+	"tests/prompt-suggestion-model.test.ts",
+	"tests/quotes.test.ts",
+	"tests/shell-analysis.test.ts",
+	"tests/viewport-chrome-geometry.test.ts",
+]);
+
+const BANNED_FAKE_MODULE_RE = /(?:^|\/)(?:fake-tui|fake-theme|extension-harness)(?:\.[cm]?[jt]s)?$/;
+const BANNED_TEST_SYMBOL_RE =
+	/\b(FakeTui|ExtensionHarness|createExtensionHarness|createFakeTheme|createDarkTheme|createLightTheme|setHostRuntimeAdapter|HostRuntimeAdapter)\b/g;
+const BANNED_SRC_SYMBOL_RE =
+	/\b(setHostRuntimeAdapter|HostRuntimeAdapter|FakeTui|ExtensionHarness|createExtensionHarness|createFakeTheme)\b/g;
+const NON_MEMBER_BRACKET_PREDECESSORS = new Set([
+	"=",
+	",",
+	"(",
+	"{",
+	"[",
+	":",
+	";",
+	"?",
+	"&&",
+	"||",
+	"??",
+	"return",
+	"throw",
+	"yield",
+	"case",
+	"of",
+	"in",
+]);
+
 /**
  * Возвращает 1-индексированные номера строк с однострочными комментариями,
  * пропуская строки, шаблонные литералы, регулярные выражения и блочные комментарии.
@@ -220,6 +263,385 @@ export function findSingleLineCommentLines(sourceText) {
 	return [...foundLines].sort((a, b) => a - b);
 }
 
+/**
+ * Маскирует комментарии и строковые/шаблонные/регулярные литералы пробелами с сохранением переводов строк,
+ * одновременно извлекая реальные спецификаторы модулей import/export и строковые обращения к свойствам `obj["prop"]`.
+ */
+function scanTypeScriptCode(sourceText) {
+	const chars = Array.from(sourceText);
+	const out = new Array(chars.length).fill(" ");
+	const moduleSpecifiers = [];
+	const bracketProperties = [];
+	const len = sourceText.length;
+	let i = 0;
+	let line = 1;
+	let canStartRegex = true;
+	let prevToken = null;
+	let prevPrevToken = null;
+	const templateBraceDepthStack = [];
+
+	const pushToken = (tok) => {
+		prevPrevToken = prevToken;
+		prevToken = tok;
+	};
+
+	const copyBreak = (idx) => {
+		const ch = sourceText[idx];
+		if (ch === "\r") {
+			out[idx] = "\r";
+			line += 1;
+			if (sourceText[idx + 1] === "\n") {
+				out[idx + 1] = "\n";
+				return 2;
+			}
+			return 1;
+		}
+		if (ch === "\n") {
+			out[idx] = "\n";
+			line += 1;
+			return 1;
+		}
+		return 0;
+	};
+
+	if (sourceText.startsWith("#!")) {
+		while (i < len && sourceText[i] !== "\n" && sourceText[i] !== "\r") i += 1;
+	}
+
+	while (i < len) {
+		const ch = sourceText[i];
+		const next = sourceText[i + 1];
+
+		const nlStep = copyBreak(i);
+		if (nlStep > 0) {
+			i += nlStep;
+			continue;
+		}
+
+		if (ch === " " || ch === "\t" || ch === "\f" || ch === "\v") {
+			i += 1;
+			continue;
+		}
+
+		if (ch === "/" && next === "/") {
+			i += 2;
+			while (i < len && sourceText[i] !== "\n" && sourceText[i] !== "\r") i += 1;
+			continue;
+		}
+
+		if (ch === "/" && next === "*") {
+			i += 2;
+			while (i < len && !(sourceText[i] === "*" && sourceText[i + 1] === "/")) {
+				const step = copyBreak(i);
+				if (step > 0) {
+					i += step;
+					continue;
+				}
+				i += 1;
+			}
+			i += 2;
+			continue;
+		}
+
+		if (ch === "'" || ch === '"') {
+			const quote = ch;
+			const startLine = line;
+			out[i] = quote;
+			i += 1;
+			const contentStart = i;
+			while (i < len && sourceText[i] !== quote) {
+				if (sourceText[i] === "\\") {
+					i += 1;
+					if (i < len) {
+						const step = copyBreak(i);
+						i += step > 0 ? step : 1;
+					}
+					continue;
+				}
+				const step = copyBreak(i);
+				if (step > 0) {
+					i += step;
+					break;
+				}
+				i += 1;
+			}
+			const rawValue = sourceText.slice(contentStart, i);
+			if (sourceText[i] === quote) {
+				out[i] = quote;
+				i += 1;
+			}
+			if (
+				prevToken === "from" ||
+				prevToken === "import" ||
+				(prevToken === "(" &&
+					(prevPrevToken === "import" ||
+						prevPrevToken === "require" ||
+						prevPrevToken === "mock" ||
+						prevPrevToken === "doMock"))
+			) {
+				moduleSpecifiers.push({ line: startLine, value: rawValue });
+			} else if (
+				prevToken === "[" &&
+				prevPrevToken !== null &&
+				!NON_MEMBER_BRACKET_PREDECESSORS.has(prevPrevToken)
+			) {
+				bracketProperties.push({ line: startLine, value: rawValue });
+			}
+			pushToken("<string>");
+			canStartRegex = false;
+			continue;
+		}
+
+		if (ch === "`") {
+			out[i] = "`";
+			i += 1;
+			while (i < len && sourceText[i] !== "`") {
+				if (sourceText[i] === "\\") {
+					i += 1;
+					if (i < len) {
+						const step = copyBreak(i);
+						i += step > 0 ? step : 1;
+					}
+					continue;
+				}
+				if (sourceText[i] === "$" && sourceText[i + 1] === "{") {
+					out[i] = "$";
+					out[i + 1] = "{";
+					templateBraceDepthStack.push(0);
+					pushToken("${");
+					i += 2;
+					canStartRegex = true;
+					break;
+				}
+				const step = copyBreak(i);
+				if (step > 0) {
+					i += step;
+					continue;
+				}
+				i += 1;
+			}
+			if (sourceText[i] === "`") {
+				out[i] = "`";
+				i += 1;
+				pushToken("<template>");
+				canStartRegex = false;
+			}
+			continue;
+		}
+
+		if (templateBraceDepthStack.length > 0) {
+			if (ch === "{") {
+				templateBraceDepthStack[templateBraceDepthStack.length - 1] += 1;
+				out[i] = "{";
+				pushToken("{");
+				i += 1;
+				canStartRegex = true;
+				continue;
+			}
+			if (ch === "}") {
+				const depth = templateBraceDepthStack[templateBraceDepthStack.length - 1];
+				if (depth > 0) {
+					templateBraceDepthStack[templateBraceDepthStack.length - 1] = depth - 1;
+					out[i] = "}";
+					pushToken("}");
+					i += 1;
+					canStartRegex = false;
+					continue;
+				}
+				templateBraceDepthStack.pop();
+				out[i] = "}";
+				i += 1;
+				while (i < len && sourceText[i] !== "`") {
+					if (sourceText[i] === "\\") {
+						i += 1;
+						if (i < len) {
+							const step = copyBreak(i);
+							i += step > 0 ? step : 1;
+						}
+						continue;
+					}
+					if (sourceText[i] === "$" && sourceText[i + 1] === "{") {
+						out[i] = "$";
+						out[i + 1] = "{";
+						templateBraceDepthStack.push(0);
+						pushToken("${");
+						i += 2;
+						canStartRegex = true;
+						break;
+					}
+					const step = copyBreak(i);
+					if (step > 0) {
+						i += step;
+						continue;
+					}
+					i += 1;
+				}
+				if (sourceText[i] === "`") {
+					out[i] = "`";
+					i += 1;
+					pushToken("<template>");
+					canStartRegex = false;
+				}
+				continue;
+			}
+		}
+
+		if (ch === "/" && canStartRegex) {
+			out[i] = "/";
+			i += 1;
+			let inCharClass = false;
+			while (i < len) {
+				const rc = sourceText[i];
+				if (rc === "\n" || rc === "\r") break;
+				if (rc === "\\") {
+					i += 2;
+					continue;
+				}
+				if (rc === "[") inCharClass = true;
+				else if (rc === "]") inCharClass = false;
+				else if (rc === "/" && !inCharClass) {
+					out[i] = "/";
+					i += 1;
+					while (i < len && /[a-z]/i.test(sourceText[i])) i += 1;
+					break;
+				}
+				i += 1;
+			}
+			pushToken("<regex>");
+			canStartRegex = false;
+			continue;
+		}
+
+		if (/[A-Za-z0-9_$]/.test(ch)) {
+			const start = i;
+			out[i] = ch;
+			i += 1;
+			while (i < len && /[A-Za-z0-9_$]/.test(sourceText[i])) {
+				out[i] = sourceText[i];
+				i += 1;
+			}
+			const word = sourceText.slice(start, i);
+			pushToken(word);
+			canStartRegex =
+				word === "return" ||
+				word === "throw" ||
+				word === "case" ||
+				word === "typeof" ||
+				word === "void" ||
+				word === "delete" ||
+				word === "in" ||
+				word === "of" ||
+				word === "instanceof" ||
+				word === "new" ||
+				word === "await" ||
+				word === "yield";
+			continue;
+		}
+
+		out[i] = ch;
+		pushToken(ch);
+		canStartRegex = "([{:;,=!?&|+-*%^~<>".includes(ch);
+		i += 1;
+	}
+
+	const codeText = out.join("");
+	const lineStarts = [0];
+	for (let idx = 0; idx < codeText.length; idx += 1) {
+		if (codeText[idx] === "\n") {
+			lineStarts.push(idx + 1);
+		}
+	}
+
+	const lineAtOffset = (offset) => {
+		let lo = 0;
+		let hi = lineStarts.length - 1;
+		while (lo <= hi) {
+			const mid = (lo + hi) >> 1;
+			if (lineStarts[mid] <= offset) {
+				lo = mid + 1;
+			} else {
+				hi = mid - 1;
+			}
+		}
+		return hi + 1;
+	};
+
+	return { codeText, moduleSpecifiers, bracketProperties, lineAtOffset };
+}
+
+/**
+ * Проверяет исходный код теста на запрещённые фейки хоста, приведения `as unknown as TUI`,
+ * чтение приватного `.overlayStack` и прямые вызовы `.handleMouse(...)` в интеграционных сьютах (ADR-0006).
+ */
+export function findTestAntiMockViolations(sourceText, options = {}) {
+	const { isPureUnit = false } = options;
+	const { codeText, moduleSpecifiers, bracketProperties, lineAtOffset } =
+		scanTypeScriptCode(sourceText);
+	const violations = [];
+
+	for (const spec of moduleSpecifiers) {
+		if (BANNED_FAKE_MODULE_RE.test(spec.value)) {
+			violations.push({
+				line: spec.line,
+				message: `do not import removed fake-host module "${spec.value}" (use tests/harness/interactive-harness.ts per ADR-0006)`,
+			});
+		}
+	}
+
+	for (const prop of bracketProperties) {
+		if (prop.value === "overlayStack") {
+			violations.push({
+				line: prop.line,
+				message:
+					"do not access private .overlayStack in tests (use hasBlockingModalOverlay(tui) or terminal screen assertions)",
+			});
+		}
+	}
+
+	for (const match of codeText.matchAll(BANNED_TEST_SYMBOL_RE)) {
+		violations.push({
+			line: lineAtOffset(match.index ?? 0),
+			message: `do not reference removed fake-host symbol "${match[1]}" in tests (ADR-0006)`,
+		});
+	}
+
+	for (const match of codeText.matchAll(/\bas\s+unknown\s+as\s+TUI\b/g)) {
+		violations.push({
+			line: lineAtOffset(match.index ?? 0),
+			message:
+				'do not cast fake objects with "as unknown as TUI" in tests (boot real InteractiveMode per ADR-0006)',
+		});
+	}
+
+	for (const match of codeText.matchAll(/\.\s*asTui\s*\(/g)) {
+		violations.push({
+			line: lineAtOffset(match.index ?? 0),
+			message:
+				"do not call legacy .asTui() cast helper in tests (boot real InteractiveMode per ADR-0006)",
+		});
+	}
+
+	for (const match of codeText.matchAll(/\.\s*overlayStack\b/g)) {
+		violations.push({
+			line: lineAtOffset(match.index ?? 0),
+			message:
+				"do not access private .overlayStack in tests (use hasBlockingModalOverlay(tui) or terminal screen assertions)",
+		});
+	}
+
+	if (!isPureUnit) {
+		for (const match of codeText.matchAll(/\.\s*handleMouse\s*(?:\?\.\s*)?\(/g)) {
+			violations.push({
+				line: lineAtOffset(match.index ?? 0),
+				message:
+					"do not call component .handleMouse(...) directly in integration tests; drive SGR mouse input through VirtualTerminal / InteractiveHarness",
+			});
+		}
+	}
+
+	return violations.sort((a, b) => a.line - b.line);
+}
+
 export function validateCommitMessage(rawMessage) {
 	const cleaned = rawMessage
 		.split(/\r?\n/)
@@ -250,7 +672,7 @@ function parseAddedLinesFromGitDiff(rootDir) {
 		diffOutput = execFileSync(
 			"git",
 			["diff", "HEAD", "--unified=0", "--no-color", "--", "src", "tests"],
-			{ cwd: rootDir, encoding: "utf8" },
+			{ cwd: rootDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
 		);
 	} catch {
 		return new Map();
@@ -342,7 +764,7 @@ export function checkRepositoryStandards(rootDir = ROOT_DIR) {
 		const untracked = execFileSync(
 			"git",
 			["ls-files", "--others", "--exclude-standard", "--", "src", "tests"],
-			{ cwd: rootDir, encoding: "utf8" },
+			{ cwd: rootDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
 		)
 			.split(/\r?\n/)
 			.map((s) => s.trim())
@@ -356,6 +778,42 @@ export function checkRepositoryStandards(rootDir = ROOT_DIR) {
 		}
 	} catch {
 		/* git недоступен вне репозитория */
+	}
+
+	/* 5. Запрет удалённых фейков хоста, бэкдоров адаптера и ручных TUI-обходов в тестах (ADR-0006) */
+	for (const bannedRel of DELETED_FAKE_HARNESS_FILES) {
+		if (existsSync(join(rootDir, bannedRel))) {
+			errors.push(`${bannedRel}: legacy fake-host harness file must remain deleted (ADR-0006)`);
+		}
+	}
+
+	for (const file of walkFiles(join(rootDir, "src"))) {
+		if (!file.endsWith(".ts")) continue;
+		const rel = relative(rootDir, file).replaceAll("\\", "/");
+		const { codeText, moduleSpecifiers, lineAtOffset } = scanTypeScriptCode(
+			readFileSync(file, "utf8"),
+		);
+		for (const spec of moduleSpecifiers) {
+			if (BANNED_FAKE_MODULE_RE.test(spec.value)) {
+				errors.push(`${rel}:${spec.line}: do not import fake-host module "${spec.value}" in src/`);
+			}
+		}
+		for (const match of codeText.matchAll(BANNED_SRC_SYMBOL_RE)) {
+			errors.push(
+				`${rel}:${lineAtOffset(match.index ?? 0)}: do not reintroduce test-adapter backdoor or fake-host symbol "${match[1]}" in src/ (ADR-0006)`,
+			);
+		}
+	}
+
+	for (const file of walkFiles(join(rootDir, "tests"))) {
+		if (!file.endsWith(".ts")) continue;
+		const rel = relative(rootDir, file).replaceAll("\\", "/");
+		const violations = findTestAntiMockViolations(readFileSync(file, "utf8"), {
+			isPureUnit: PURE_UNIT_TEST_FILES.has(rel),
+		});
+		for (const v of violations) {
+			errors.push(`${rel}:${v.line}: ${v.message}`);
+		}
 	}
 
 	return errors;
