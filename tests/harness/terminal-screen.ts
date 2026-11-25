@@ -1,5 +1,4 @@
-import { visibleWidth } from "@earendil-works/pi-tui";
-import type { FakeTui } from "./fake-tui.ts";
+import { visibleWidth, type TUI } from "@earendil-works/pi-tui";
 
 export type TerminalColor =
 	| { kind: "default" }
@@ -36,6 +35,19 @@ export interface TerminalScreenSnapshot {
 	cellAt(row: number, col: number): TerminalCell | undefined;
 	rowText(row: number): string;
 	sliceText(row: number, startCol: number, endCol?: number): string;
+	text(): string;
+	findText(needle: string): { row: number; col: number } | undefined;
+}
+
+export interface ViewportRenderableTarget {
+	readonly terminal: { readonly columns: number; readonly rows: number };
+	renderViewport(width?: number, height?: number): string[];
+}
+
+export interface FrameRenderableTarget {
+	readonly width: number;
+	readonly height: number;
+	renderFrame(width?: number, height?: number): string[];
 }
 
 interface PenState {
@@ -345,14 +357,102 @@ export function parseTerminalFrame(lines: string[], explicitWidth?: number): Ter
 				.map((c) => (c.width === 0 ? "" : c.char))
 				.join("");
 		},
+		text(): string {
+			const rows: string[] = [];
+			for (let r = 0; r < height; r += 1) {
+				const lineCells = cells[r];
+				if (!lineCells) {
+					rows.push("");
+					continue;
+				}
+				rows.push(
+					lineCells
+						.map((c) => (c.width === 0 ? "" : c.char))
+						.join("")
+						.trimEnd(),
+				);
+			}
+			return rows.join("\n");
+		},
+		findText(needle: string): { row: number; col: number } | undefined {
+			if (!needle) return undefined;
+			for (let r = 0; r < height; r += 1) {
+				const lineCells = cells[r];
+				if (!lineCells) continue;
+				let rowStr = "";
+				const charOffsetToCol: number[] = [];
+				for (let c = 0; c < lineCells.length; c += 1) {
+					const cell = lineCells[c]!;
+					if (cell.width === 0) continue;
+					for (let k = 0; k < cell.char.length; k += 1) {
+						charOffsetToCol.push(c);
+					}
+					rowStr += cell.char;
+				}
+				const hit = rowStr.indexOf(needle);
+				if (hit !== -1) {
+					return { row: r, col: charOffsetToCol[hit] ?? 0 };
+				}
+			}
+			return undefined;
+		},
 	};
 }
 
+export type CapturableTerminalTarget =
+	| FrameRenderableTarget
+	| ViewportRenderableTarget
+	| TUI;
+
+function isFrameRenderableTarget(target: CapturableTerminalTarget): target is FrameRenderableTarget {
+	return typeof (target as FrameRenderableTarget).renderFrame === "function";
+}
+
+function isViewportRenderableTarget(
+	target: CapturableTerminalTarget,
+): target is ViewportRenderableTarget {
+	return typeof (target as ViewportRenderableTarget).renderViewport === "function";
+}
+
 export function captureTerminalScreen(
-	tui: FakeTui,
-	width = tui.terminal.columns,
-	height = tui.terminal.rows,
+	target: CapturableTerminalTarget,
+	explicitWidth?: number,
+	explicitHeight?: number,
 ): TerminalScreenSnapshot {
-	const lines = tui.renderViewport(width, height);
-	return parseTerminalFrame(lines, width);
+	if (isFrameRenderableTarget(target)) {
+		const width = explicitWidth ?? target.width;
+		const height = explicitHeight ?? target.height;
+		return parseTerminalFrame(target.renderFrame(width, height), width);
+	}
+
+	if (isViewportRenderableTarget(target)) {
+		const width = explicitWidth ?? target.terminal.columns;
+		const height = explicitHeight ?? target.terminal.rows;
+		return parseTerminalFrame(target.renderViewport(width, height), width);
+	}
+
+	const tui = target as TUI & {
+		mode?: string;
+		renderNow?: (force?: boolean) => void;
+		getScreenLines?: () => string[];
+		terminal: { columns: number; rows: number; resize?: (cols: number, rows: number) => void };
+	};
+	const width = explicitWidth ?? tui.terminal.columns;
+	const height = explicitHeight ?? tui.terminal.rows;
+	if (
+		(width !== tui.terminal.columns || height !== tui.terminal.rows) &&
+		typeof tui.terminal.resize === "function"
+	) {
+		tui.terminal.resize(width, height);
+	}
+	tui.renderNow?.();
+
+	if (tui.mode !== "regular" && typeof tui.getScreenLines === "function") {
+		return parseTerminalFrame(tui.getScreenLines(), width);
+	}
+
+	const unwrapped =
+		typeof tui.valueOf === "function" ? (tui.valueOf() as { previousLines?: string[] }) : undefined;
+	const previousLines = Array.isArray(unwrapped?.previousLines) ? unwrapped.previousLines : [];
+	return parseTerminalFrame(previousLines.slice(-height), width);
 }

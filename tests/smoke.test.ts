@@ -1,79 +1,146 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { ScrollView, VStack } from "@earendil-works/pi-tui";
-import conartiPiUi from "../src/index.ts";
+import { HStack, ScrollView, VStack } from "@earendil-works/pi-tui";
 import { isLightTheme } from "../src/shared/ansi.ts";
 import { getActiveHostRuntime } from "../src/shared/host-runtime.ts";
-import { createExtensionHarness, type ExtensionHarness } from "./harness/index.ts";
+import {
+	createInteractiveHarness,
+	fauxAssistantMessage,
+	type InteractiveHarness,
+} from "./harness/index.ts";
 
-describe("conartiPiUi end-to-end extension smoke", () => {
-	let harness: ExtensionHarness | undefined;
+function buildTallReply(prefix: string, linesCount: number, markerLine?: string): string {
+	const lines: string[] = [];
+	for (let i = 1; i <= linesCount; i += 1) {
+		lines.push(`${prefix} line ${i}: detailed response content for viewport scrolling.`);
+	}
+	if (markerLine) {
+		lines.push(markerLine);
+	}
+	return lines.join("\n");
+}
+
+describe("conartiPiUi end-to-end InteractiveMode smoke", () => {
+	let harness: InteractiveHarness | undefined;
 
 	afterEach(async () => {
 		if (harness) {
-			await harness.shutdownSession();
+			await harness.dispose();
 			harness = undefined;
 		}
 	});
 
-	it("mounts, renders, and cleans up cleanly with dark theme in fullscreen viewport", async () => {
-		harness = createExtensionHarness({ theme: "dark", width: 120, height: 32 });
-		expect(isLightTheme(harness.ctx.ui.theme)).toBe(false);
+	it("mounts in dark theme over InteractiveMode Proxy, renders Sticky Prompt + Outline Rail, masks chrome selection, and quotes via mouse Hover Popup", async () => {
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 120,
+			height: 28,
+			responses: [
+				fauxAssistantMessage(buildTallReply("Alpha response", 20)),
+				fauxAssistantMessage(
+					buildTallReply("Beta response", 12, "Selectable target sentence for quoting"),
+				),
+			],
+		});
 
-		const originalRoot = harness.tui.layoutRoot;
-		harness.mount(conartiPiUi);
+		const runtime = getActiveHostRuntime();
+		expect(runtime).toBeDefined();
+		expect(isLightTheme(runtime!.theme())).toBe(false);
 
-		// Core flags, commands, shortcuts, and tools are registered
-		expect(harness.flags.has("plan")).toBe(true);
-		expect(harness.commands.has("context")).toBe(true);
-		expect(harness.commands.has("palette")).toBe(true);
-		expect(harness.commands.has("sticky")).toBe(true);
-		expect(harness.commands.has("outline")).toBe(true);
-		expect(harness.shortcuts.has("alt+m")).toBe(true);
-		expect(harness.shortcuts.has("ctrl+alt+p")).toBe(true);
-		expect(harness.tools.has("ask_user_question")).toBe(true);
+		/* В реальном InteractiveMode runtime.tui — это Proxy (this.ui !== this.renderer) */
+		expect(runtime!.tui).toBe(harness.tui);
+		expect(harness.tui).not.toBe(harness.tui.valueOf());
 
-		await harness.startSession();
+		const layoutRoot = (harness.tui as unknown as { layoutRoot?: unknown }).layoutRoot;
+		expect(layoutRoot).toBeInstanceOf(VStack);
+		const rootEntries =
+			(layoutRoot as { entries?: Array<{ component: unknown }> }).entries ?? [];
+		expect(rootEntries.some((entry) => entry.component instanceof HStack)).toBe(false);
+		expect(runtime!.scroll).toBeInstanceOf(ScrollView);
+		expect(runtime!.scroll?.scrollbar).toBe("auto");
+		expect(runtime!.viewportSlots?.topSlot).toBeDefined();
+		expect(runtime!.viewportSlots?.rightRail).toBeDefined();
 
-		// Header & composer mounted and render cleanly
-		expect(harness.header).toBeDefined();
-		expect(harness.editor).toBeDefined();
-		const headerLines = harness.header!.render(120);
-		const editorLines = harness.editor!.render(120);
-		expect(headerLines.length).toBeGreaterThan(0);
-		expect(editorLines.length).toBeGreaterThan(0);
+		/* Проверяем регистрацию слэш-команд и инструмента ask_user_question в реальной сессии */
+		const slashNames = new Set(
+			harness.session.extensionRunner?.getRegisteredCommands().map((cmd) => cmd.name) ?? [],
+		);
+		expect(slashNames.has("context")).toBe(true);
+		expect(slashNames.has("palette")).toBe(true);
+		expect(slashNames.has("sticky")).toBe(true);
+		expect(slashNames.has("outline")).toBe(true);
+		expect(slashNames.has("quote")).toBe(true);
+		expect(slashNames.has("quotes")).toBe(true);
 
-		expect(harness.tui.layoutRoot).toBe(originalRoot);
-		expect(harness.tui.layoutRoot).toBeInstanceOf(VStack);
-		expect(harness.tui.scroll).toBeInstanceOf(ScrollView);
-		expect(harness.tui.scroll.scrollbar).toBe("auto");
-		expect(getActiveHostRuntime()?.viewportSlots?.topSlot).toBeDefined();
-		expect(getActiveHostRuntime()?.viewportSlots?.rightRail).toBeDefined();
+		const allToolNames = new Set(harness.session.getAllTools().map((tool) => tool.name));
+		expect(allToolNames.has("ask_user_question")).toBe(true);
 
-		const viewportLines = harness.tui.renderViewport(120, 32);
-		expect(viewportLines.length).toBeGreaterThan(0);
+		/* Отправляем два хода через реальный цикл ввода InteractiveMode */
+		await harness.submitInput("First turn anchor question");
+		await harness.submitInput("Second turn follow-up question");
 
-		await harness.shutdownSession();
-		expect(harness.tui.layoutRoot).toBe(originalRoot);
+		/* Проверяем, что Outline Rail реально скомпозирован в колонках width - 3 .. width - 2 (117..118) */
+		const bottomScreen = harness.screen();
+		let hasRailGlyph = false;
+		for (let r = 0; r < bottomScreen.height; r += 1) {
+			const railSlice = bottomScreen.sliceText(r, 117, 119);
+			if (/[●○▲▼│]/.test(railSlice)) {
+				hasRailGlyph = true;
+				break;
+			}
+		}
+		expect(hasRailGlyph).toBe(true);
+
+		/* Прокручиваем вверх к обмену первого хода и проверяем закреплённый сверху Sticky Prompt */
+		await harness.mouseWheel("up", 40, 10, 8);
+		const scrolledScreen = harness.screen();
+		const topRows = [0, 1, 2, 3].map((r) => scrolledScreen.rowText(r)).join("\n");
+		expect(topRows).toContain("First turn anchor question");
+
+		/* Возвращаемся вниз, выделяем мышью текст ответа и проверяем маску хрома + попап ╭ ❝ Цитировать ╮ */
+		await harness.mouseWheel("down", 40, 10, 12);
+		const readyScreen = harness.screen();
+		const targetPos = readyScreen.findText("Selectable target sentence");
+		expect(targetPos).toBeDefined();
+
+		/* Тянем выделение вплоть до колонки Outline Rail (118), проверяя, что хром не инвертируется */
+		await harness.mouseDrag(targetPos!.col, targetPos!.row, 118, targetPos!.row, { steps: 3 });
+		const selectedScreen = harness.screen();
+		expect(selectedScreen.cellAt(targetPos!.row, targetPos!.col)?.inverse).toBe(true);
+		expect(selectedScreen.cellAt(targetPos!.row, 117)?.inverse).toBe(false);
+		expect(selectedScreen.cellAt(targetPos!.row, 118)?.inverse).toBe(false);
+
+		const quotePopupPos = selectedScreen.findText("Цитировать");
+		expect(quotePopupPos).toBeDefined();
+		expect(selectedScreen.text()).toContain("╭ ❝ Цитировать ╮");
+
+		/* Кликаем по попапу цитирования через реальные SGR-координаты терминала */
+		await harness.mouseClick(quotePopupPos!.col + 2, quotePopupPos!.row);
+		const afterQuoteScreen = harness.screen();
+		expect(afterQuoteScreen.text()).toContain("Quote #1");
+
+		await harness.dispose();
 		expect(getActiveHostRuntime()).toBeUndefined();
 		harness = undefined;
 	});
 
-	it("mounts, renders, and cleans up cleanly with light theme in fullscreen viewport", async () => {
-		harness = createExtensionHarness({ theme: "light", width: 120, height: 32 });
-		expect(isLightTheme(harness.ctx.ui.theme)).toBe(true);
+	it("mounts cleanly with light package theme and --plan flag in fullscreen viewport", async () => {
+		harness = await createInteractiveHarness({
+			theme: "light",
+			flags: { plan: true },
+			width: 120,
+			height: 28,
+		});
 
-		const originalRoot = harness.tui.layoutRoot;
-		harness.mount(conartiPiUi);
-		await harness.startSession();
+		const runtime = getActiveHostRuntime();
+		expect(runtime).toBeDefined();
+		expect(isLightTheme(runtime!.theme())).toBe(true);
 
-		expect(harness.header).toBeDefined();
-		expect(harness.editor).toBeDefined();
-		expect(harness.header!.render(120).length).toBeGreaterThan(0);
-		expect(harness.editor!.render(120).length).toBeGreaterThan(0);
-		expect(harness.tui.renderViewport(120, 32).length).toBeGreaterThan(0);
+		const frame = harness.screen();
+		expect(frame.height).toBe(28);
+		expect(frame.text()).toContain("Plan");
 
-		await harness.shutdownSession();
-		expect(harness.tui.layoutRoot).toBe(originalRoot);
+		await harness.dispose();
+		expect(getActiveHostRuntime()).toBeUndefined();
 		harness = undefined;
 	});
 });

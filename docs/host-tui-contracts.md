@@ -1,6 +1,23 @@
 # Host TUI Runtime Contracts
 
-Verified runtime behaviors in `@earendil-works/pi-tui` and `@earendil-works/pi-coding-agent` that govern viewport compositing, mouse selection, inline images, custom editors, and keyboard input.
+Verified runtime behaviors in `@earendil-works/pi-tui` and `@earendil-works/pi-coding-agent` that govern `InteractiveMode` renderer resolution, mode switches, viewport compositing, mouse selection, inline images, custom editors, and keyboard input.
+
+## `InteractiveMode` Proxy Reference & Mode-Switch / `/reload` Lifecycle
+
+1. **Proxy vs underlying renderer (`this.ui !== this.renderer`)**:
+   - `InteractiveMode` wraps its active renderer (`this.renderer`: `TuiAltScreen` in `fullscreen` mode or `TuiMainScreen` in `regular` mode) inside `this.ui = createInteractiveTuiReference(() => this.renderer)`.
+   - Extension UI callbacks (`ctx.ui.custom`, `ctx.ui.setEditorComponent`, `ctx.ui.setHeader`, `ctx.ui.setFooter`) always receive `this.ui` (`Proxy`), whereas `TuiAltScreen.prototype` methods (`compositeScrollToEndIndicator`, `getSelectionColumns`, `applySelection`, `dispatchMouseToLayout`, `handleMouseEvent`) execute with `this === this.renderer` via `Reflect.apply`.
+   - Never key `WeakMap` / `WeakSet` registries on `tui` directly or compare `runtime.tui === self` by strict reference. Unwrap `tui` dynamically via `unwrapHostTui(tui)` (`tui.valueOf()`) when indexing renderer-scoped maps or tracking active overlay renderers, and compare TUI identities via `isSameHostTui(a, b)`.
+   - `createInteractiveTuiReference` traps `get`, `set`, `has`, and `getPrototypeOf`, and omits `defineProperty` / `getOwnPropertyDescriptor`. Only call `Object.defineProperty` on an unwrapped renderer (`self` inside prototype hooks or `unwrapHostTui(tui)`), never on `this.ui`.
+
+2. **Live `fullscreen` <-> `regular` mode transitions (`InteractiveMode.switchTuiMode`)**:
+   - Switching TUI mode replaces `this.renderer` in-place (`TuiAltScreen` <-> `TuiMainScreen`) without emitting `session_shutdown` or `session_start`, and switching back to `fullscreen` constructs a brand-new `TuiAltScreen` instance while reusing `this.ui` and `this.fullscreenLayoutRoot`.
+   - `InteractiveMode.switchTuiMode` checks `previousUi.hasOverlayEntries` (`overlayStack.length > 0`) before swapping renderers. Dismiss registered transient `nonCapturing: true` `Hover Popup` overlays (when no blocking `Modal Card` is open) before `switchTuiMode` evaluates `hasOverlayEntries` so hover popups never block TUI mode toggles while blocking `Modal Card` dialogs still guard the switch.
+   - `HostRuntimeHandle` evaluates `isFullscreen`, `scroll`, `chatContainer`, and `viewportSlots` dynamically against `unwrapHostTui(tui)`: detaching `ViewportChromeCompositor` (restoring `scroll.getContentWidth` and disposing `Sticky Prompt` / `Outline Rail`) on `fullscreen` -> `regular`, and rebinding a fresh `ViewportChromeCompositor` + `1003h` pointer-motion sequence onto the new `TuiAltScreen` on `regular` -> `fullscreen`.
+
+3. **Hot `/reload` lifecycle**:
+   - `/reload` emits `session_shutdown({ reason: "reload" })`, reloads extensions, and emits `session_start({ reason: "reload" })` while keeping `this.renderer`, `this.ui`, `this.transcriptScrollView`, and `this.fullscreenLayoutRoot` intact.
+   - Prototype patches installed through `hookMethod` hot-swap their handler functions in place without stacking wrappers, and `disposeActiveHostRuntime()` detaches the prior `ViewportChromeCompositor` before the reloaded extension mounts a fresh one.
 
 ## Viewport Compositing & Selection Render Order
 

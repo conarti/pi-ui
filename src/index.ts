@@ -127,6 +127,9 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 
 		const hostRuntime = await acquireHostRuntime(ctx);
 		disposeShell = hostRuntime?.mountViewportSlots((shell) => {
+			unsubscribeStickyKey?.();
+			unsubscribeStickyKey = undefined;
+
 			const turnIndex = new TranscriptTurnIndex({
 				shell,
 				getBranch: () => ctx.sessionManager.getBranch(),
@@ -134,7 +137,20 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 
 			const stickyBar = new StickyPromptBar(shell, turnIndex, getStickyConfig());
 			activeStickyBar = stickyBar;
-			unsubscribeStickyKey = bindStickyExpandKey(ctx, shell, stickyBar);
+			const unbindKey = bindStickyExpandKey(ctx, shell, stickyBar);
+			unsubscribeStickyKey = unbindKey;
+
+			const origStickyDispose = stickyBar.dispose.bind(stickyBar);
+			stickyBar.dispose = () => {
+				unbindKey();
+				if (unsubscribeStickyKey === unbindKey) {
+					unsubscribeStickyKey = undefined;
+				}
+				if (activeStickyBar === stickyBar) {
+					activeStickyBar = undefined;
+				}
+				origStickyDispose();
+			};
 
 			const outlineRail = createOutlineRailSlot(ctx, shell, turnIndex);
 

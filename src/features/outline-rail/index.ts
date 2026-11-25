@@ -1,7 +1,10 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, type OverlayHandle, type OverlayOptions } from "@earendil-works/pi-tui";
 import type { FullscreenShellContext } from "../../shared/fullscreen-layout.ts";
-import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
+import {
+	getActiveHostRuntime,
+	registerTransientHoverDismisser,
+} from "../../shared/host-runtime.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import type { IndexedTurn, TranscriptTurnIndex } from "../../shared/turn-index.ts";
 import { reconstructTurnPromptText } from "../prompt-chips/registry.ts";
@@ -121,8 +124,13 @@ export function createOutlineRailSlot(
 		},
 	);
 
+	const unregisterHoverDismisser = registerTransientHoverDismisser("outlineRail.preview", () =>
+		hidePopup(true),
+	);
+
 	return Object.assign(rail, {
 		dispose() {
+			unregisterHoverDismisser();
 			hidePopup();
 		},
 	});
