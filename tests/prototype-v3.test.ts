@@ -1,5 +1,6 @@
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it } from "vitest";
+import { renderDensityCall, renderDensityResult } from "../src/features/tool-calls/density.ts";
 import {
 	buildPrototypeStepHeaderParts,
 	resolveExternalToolSummary,
@@ -216,5 +217,56 @@ describe("prototype v3: glimmer sweep, 30s verb stability, step summaries, and h
 		expect(slot.scrollFromBottom).toBe(2);
 		const scrolledHdr = stripTerminalSequences(tb.render(90)[0]!);
 		expect(scrolledHdr).toContain("⏸ -2 lines");
+	});
+
+	it("shows the full untruncated wrapped command when expanded both while running and after completion", () => {
+		setPrototypeVariant("B");
+		const mockTheme = {
+			fg: (_c: string, t: string) => t,
+			bold: (t: string) => t,
+			name: "one-blue-light",
+		} as any;
+		const longCommand =
+			'agy --print "Дай развернутый архитектурный анализ всех модулей проекта без потери единого флага --verbose --json-stream"';
+
+		/* 1. While still running (before any result exists) */
+		const runningState: any = { expanded: true };
+		const callComp = renderDensityCall({
+			name: "bash",
+			args: { command: longCommand },
+			theme: mockTheme,
+			state: runningState,
+			getStatus: () => "running",
+			syncRunning: () => {},
+			getStepSummary: () => "Run agy architectural analysis",
+		});
+		const callPlain = callComp
+			.render(64)
+			.map((line) => stripTerminalSequences(line))
+			.join("\n");
+		expect(callPlain).toContain("--verbose --json-stream");
+
+		/* 2. After completion (single-line bash command with stepSummary header) */
+		const settledState: any = { expanded: true, finished: true };
+		const resComp = renderDensityResult({
+			name: "bash",
+			args: { command: longCommand },
+			result: { content: [{ type: "text", text: "Analysis complete" }], details: {} },
+			output: "Analysis complete",
+			theme: mockTheme,
+			state: settledState,
+			isError: false,
+			isPartial: false,
+			getDensity: () => "balanced",
+			canRun: () => false,
+			syncRunning: () => {},
+		});
+		const resPlain = resComp
+			.render(64)
+			.map((line) => stripTerminalSequences(line))
+			.join("\n");
+		expect(resPlain).toContain("$ agy --print");
+		expect(resPlain).toContain("--verbose --json-stream");
+		expect(resPlain).toContain("Analysis complete");
 	});
 });

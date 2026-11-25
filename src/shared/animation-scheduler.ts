@@ -270,11 +270,55 @@ export function paintShimmerText(
 	return out;
 }
 
+const LIGHT_CAUSTIC_STOPS: readonly [RgbTuple, RgbTuple, RgbTuple, RgbTuple] = [
+	[29, 78, 216],
+	[37, 99, 235],
+	[16, 150, 248],
+	[126, 210, 255],
+];
+
+const DARK_CAUSTIC_STOPS: readonly [RgbTuple, RgbTuple, RgbTuple, RgbTuple] = [
+	[84, 122, 184],
+	[104, 164, 242],
+	[150, 214, 255],
+	[236, 250, 255],
+];
+
+function interpolateFourStops(
+	stops: readonly [RgbTuple, RgbTuple, RgbTuple, RgbTuple],
+	level: number,
+): RgbTuple {
+	const t = Math.max(0, Math.min(1, level));
+	let a: RgbTuple;
+	let b: RgbTuple;
+	let u: number;
+	if (t < 0.32) {
+		a = stops[0];
+		b = stops[1];
+		u = t / 0.32;
+	} else if (t < 0.7) {
+		a = stops[1];
+		b = stops[2];
+		u = (t - 0.32) / 0.38;
+	} else {
+		a = stops[2];
+		b = stops[3];
+		u = (t - 0.7) / 0.3;
+	}
+	return [
+		Math.round(a[0] + (b[0] - a[0]) * u),
+		Math.round(a[1] + (b[1] - a[1]) * u),
+		Math.round(a[2] + (b[2] - a[2]) * u),
+	];
+}
+
 /**
- * Claude-Code-principled sweep-with-pause glimmer upgraded to 30 fps continuous
- * sub-character Gaussian interpolation: text rests calmly in `baseRgb` while a
- * focused ~3-char highlight beam (`shimmerRgb`) glides left-to-right and pauses
- * cleanly between sweeps.
+ * Wide, organic 30 fps liquid-aurora shimmer:
+ * 1) Non-linear eased S-curve glide (`u + 0.14 * sin(2πu)`, C∞ seamless at loop boundary)
+ *    so the wave accelerates out of the brand mark and lingers/expands over the words;
+ * 2) Asymmetric 12-16 char comet envelope (crisp leading edge + long luminous wake) whose
+ *    width dynamically breathes (`1 + 0.36 * sin(2.2t)`) instead of a rigid vertical bar;
+ * 3) Dual-harmonic counter-drifting caustic swell beneath the main crest across 4 blue-cyan stops.
  */
 export function paintGlimmerSweepText(
 	text: string,
@@ -294,17 +338,41 @@ export function paintGlimmerSweepText(
 			? options.light
 			: isLightTheme(options?.theme ?? getActiveGlobalTheme());
 	const elapsed = Number.isFinite(options?.elapsedMs) ? options!.elapsedMs! : getAnimationElapsedMs();
-	const baseRgb: RgbTuple = options?.baseRgb ?? (light ? [37, 99, 235] : [108, 168, 242]);
-	const shimmerRgb: RgbTuple = options?.shimmerRgb ?? (light ? [116, 200, 255] : [230, 247, 255]);
+	const tSec = Math.max(0, elapsed) / 1000;
 
 	const segments = [...shimmerSegmenter.segment(text)].map((s) => s.segment);
 	const startIdx = options?.startIndex ?? 0;
 	const totalSpan = Math.max(segments.length, options?.totalSpanChars ?? startIdx + segments.length);
-	const leadPad = options?.leadPad ?? 6;
-	const trailPad = options?.trailPad ?? 12;
+	const leadPad = options?.leadPad ?? 9;
+	const trailPad = options?.trailPad ?? 15;
 	const cycleLen = totalSpan + leadPad + trailPad;
-	const speed = options?.charsPerSecond ?? 18;
-	const beamCenter = (((Math.max(0, elapsed) / 1000) * speed) % cycleLen) - leadPad;
+	const periodSec = Math.max(1.9, cycleLen / (options?.charsPerSecond ?? 17));
+	const rawU = (tSec / periodSec) % 1;
+	const easedU = rawU + (0.14 * Math.sin(rawU * Math.PI * 2)) / (Math.PI * 2) * 4.2;
+	const headPos = easedU * cycleLen - leadPad;
+
+	const breathScale = 1 + 0.36 * Math.sin(tSec * 2.25);
+	const sigmaFront = 3.4 * breathScale;
+	const sigmaTail = 8.4 * breathScale;
+
+	const customStops: readonly [RgbTuple, RgbTuple, RgbTuple, RgbTuple] | undefined =
+		options?.baseRgb && options?.shimmerRgb
+			? [
+					options.baseRgb,
+					[
+						Math.round(options.baseRgb[0] * 0.82 + options.shimmerRgb[0] * 0.18),
+						Math.round(options.baseRgb[1] * 0.82 + options.shimmerRgb[1] * 0.18),
+						Math.round(options.baseRgb[2] * 0.82 + options.shimmerRgb[2] * 0.18),
+					],
+					[
+						Math.round(options.baseRgb[0] * 0.38 + options.shimmerRgb[0] * 0.62),
+						Math.round(options.baseRgb[1] * 0.38 + options.shimmerRgb[1] * 0.62),
+						Math.round(options.baseRgb[2] * 0.38 + options.shimmerRgb[2] * 0.62),
+					],
+					options.shimmerRgb,
+				]
+			: undefined;
+	const paletteStops = customStops ?? (light ? LIGHT_CAUSTIC_STOPS : DARK_CAUSTIC_STOPS);
 
 	let out = "";
 	for (let i = 0; i < segments.length; i++) {
@@ -313,18 +381,17 @@ export function paintGlimmerSweepText(
 			out += " ";
 			continue;
 		}
-		const dist = startIdx + i - beamCenter;
-		const weight = Math.exp(-(dist * dist) / 2.6);
-		if (weight < 0.03) {
-			out += fgRgb(baseRgb, ch);
-		} else {
-			const rgb: RgbTuple = [
-				Math.round(baseRgb[0] + (shimmerRgb[0] - baseRgb[0]) * weight),
-				Math.round(baseRgb[1] + (shimmerRgb[1] - baseRgb[1]) * weight),
-				Math.round(baseRgb[2] + (shimmerRgb[2] - baseRgb[2]) * weight),
-			];
-			out += fgRgb(rgb, ch);
-		}
+		const x = startIdx + i;
+		const delta = x - headPos;
+		const sigma = delta > 0 ? sigmaFront : sigmaTail;
+		const comet = Math.exp(-(delta * delta) / (2 * sigma * sigma));
+
+		const swellA = (Math.sin(x * 0.21 - tSec * 2.5) + 1) * 0.5;
+		const swellB = (Math.sin(x * 0.36 + tSec * 1.65) + 1) * 0.5;
+		const caustic = Math.pow(swellA * 0.64 + swellB * 0.36, 1.5);
+
+		const level = Math.min(1, 0.14 + comet * 0.74 + caustic * 0.28);
+		out += fgRgb(interpolateFourStops(paletteStops, level), ch);
 	}
 	return out;
 }

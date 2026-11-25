@@ -246,9 +246,10 @@ export function buildPrototypeStepHeaderParts(options: {
 	rawPath: string;
 	stepSummary?: string;
 	cwd?: string;
+	expanded?: boolean;
 	summarizeCustomArgs: (args: ToolArgs) => string;
 }): { verb: string; target: string } {
-	const { name, args, status, rawPath, stepSummary, cwd, summarizeCustomArgs } = options;
+	const { name, args, status, rawPath, stepSummary, cwd, expanded = false, summarizeCustomArgs } = options;
 	const running = status === "running";
 	const failed = status === "error";
 	const relPath = formatWorkspacePath(rawPath, cwd);
@@ -285,7 +286,8 @@ export function buildPrototypeStepHeaderParts(options: {
 					target: relPath || "",
 				};
 			}
-			const pat = typeof args.pattern === "string" ? args.pattern.replace(/\s+/gu, " ").trim().slice(0, 48) : "…";
+			const rawGrepPat = typeof args.pattern === "string" ? args.pattern.replace(/\s+/gu, " ").trim() : "…";
+			const pat = expanded ? rawGrepPat : rawGrepPat.slice(0, 48);
 			return {
 				verb: failed ? "Failed grep" : running ? "Searching" : "Searched",
 				target: relPath ? `/${pat}/ in ${relPath}` : `/${pat}/`,
@@ -298,7 +300,8 @@ export function buildPrototypeStepHeaderParts(options: {
 					target: relPath || "",
 				};
 			}
-			const pat = typeof args.pattern === "string" ? args.pattern.replace(/\s+/gu, " ").trim().slice(0, 48) : "…";
+			const rawFindPat = typeof args.pattern === "string" ? args.pattern.replace(/\s+/gu, " ").trim() : "…";
+			const pat = expanded ? rawFindPat : rawFindPat.slice(0, 48);
 			return {
 				verb: failed ? "Failed find" : running ? "Finding" : "Found",
 				target: relPath ? `${pat} in ${relPath}` : pat,

@@ -5,6 +5,7 @@ import {
 	stripTerminalSequences,
 	truncateToWidth,
 	visibleWidth,
+	wrapTextWithAnsi,
 	type Component,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
@@ -495,6 +496,33 @@ export function isCommandLikeTool(name: string): boolean {
 	return name === "bash" || name === "powershell" || name === "codemode";
 }
 
+/**
+ * Formats the complete, untruncated shell command (both 1-line and multi-line) wrapped
+ * cleanly within `avail` under `rail`, so expanding a truncated command row NEVER loses
+ * any flags, arguments, or quoted prompts.
+ */
+function formatWrappedShellCommandRows(
+	rawCommand: string,
+	pal: DensityPalette,
+	rail: string,
+	avail: number,
+): string[] {
+	const cleaned = normalizeLineEndings(stripTerminalSequences(rawCommand)).trimEnd();
+	if (!cleaned) return [];
+	const wrapWidth = Math.max(8, avail - 2);
+	const out: string[] = [];
+	const logicalLines = cleaned.split("\n");
+	for (let lineIdx = 0; lineIdx < logicalLines.length; lineIdx++) {
+		const logical = logicalLines[lineIdx]!;
+		const chunks = logical.length > 0 ? wrapTextWithAnsi(logical, wrapWidth) : [""];
+		for (let chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
+			const prefix = lineIdx === 0 && chunkIdx === 0 ? "$ " : "  ";
+			out.push(`${rail}${pal.target(`${prefix}${chunks[chunkIdx]!}`, true)}`);
+		}
+	}
+	return out;
+}
+
 function formatParentheticalMeta(
 	pal: DensityPalette,
 	status: RowStatus,
@@ -666,7 +694,7 @@ export function renderDensityCall(options: {
 	const { name, args, theme, state, getStatus, syncRunning, getNestedSummary, getStepSummary, cwd } = options;
 	syncRunning(getStatus() === "running");
 
-	const resolveHeader = (status: RowStatus) =>
+	const resolveHeader = (status: RowStatus, expanded = false) =>
 		isPrototypeActive()
 			? buildPrototypeStepHeaderParts({
 					name,
@@ -675,6 +703,7 @@ export function renderDensityCall(options: {
 					rawPath: pathOf(args),
 					stepSummary: getStepSummary?.(),
 					cwd,
+					expanded,
 					summarizeCustomArgs: summarizeCustomArguments,
 				})
 			: buildHeaderParts(name, args, status);
@@ -686,7 +715,7 @@ export function renderDensityCall(options: {
 			const expanded = state.expanded === true;
 			const elapsedBucket = status === "running" ? String(getAnimationElapsedMs()) : "settled";
 			const d = state.density;
-			const { verb, target } = resolveHeader(status);
+			const { verb, target } = resolveHeader(status, expanded);
 			const liveNested = getNestedSummary?.() ?? d?.nestedSummary ?? "";
 			return [
 				status,
@@ -707,7 +736,7 @@ export function renderDensityCall(options: {
 			const status = getStatus();
 			const expanded = state.expanded === true;
 			const diamond = pal.diamond(status, expanded, hovered);
-			const { verb, target } = resolveHeader(status);
+			const { verb, target } = resolveHeader(status, expanded);
 			const styledVerb = pal.title(verb, status, expanded, hovered);
 			const styledTarget = target ? ` ${pal.target(target, expanded, hovered)}` : "";
 			const meta = formatParentheticalMeta(pal, status, state, name, getNestedSummary?.());
@@ -716,23 +745,49 @@ export function renderDensityCall(options: {
 			const rightGuard = protoOn && width >= 48 ? 4 : 0;
 			const usableWidth = Math.max(8, width - rightGuard);
 			const hoverChevron =
-				hovered && status !== "running" && protoOn
+				hovered && protoOn
 					? ` ${pal.dim(expanded ? "⌄" : "›")}`
 					: "";
 			const leadPrefix = protoOn ? "  " : " ";
 			const head = `${leadPrefix}${diamond} ${styledVerb}${styledTarget}${meta}${hoverChevron}`;
-			const lines = [truncateToWidth(head, usableWidth, "…")];
+			const lines =
+				expanded && protoOn && visibleWidth(head) > usableWidth
+					? wrapTextWithAnsi(head, Math.max(8, usableWidth - 4)).map((chunk, idx) =>
+							idx === 0 ? chunk : `    ${chunk}`,
+						)
+					: [truncateToWidth(head, usableWidth, "…")];
+
+			const argRail = pal.rail(protoOn ? "    │ " : "   │ ");
+			const railAvail = Math.max(8, usableWidth - (protoOn ? 6 : 5));
 
 			if (!protoOn && status === "running" && isCommandLikeTool(name) && !state.density) {
-				const subPad = protoOn ? "    " : "   ";
-				const avail = Math.max(1, usableWidth - (protoOn ? 6 : 5));
+				const subPad = "   ";
 				const bar = paintDensityWaveGlyph(pal.theme, pal.light, 1, "▎");
-				lines.push(`${subPad}${bar} ${pal.dim(truncateToWidth("Running…", avail, "…"))}`);
+				lines.push(`${subPad}${bar} ${pal.dim(truncateToWidth("Running…", railAvail, "…"))}`);
+			}
+
+			/* While a command/script is still running before any result arrives, expanding the call
+			   immediately reveals the full untruncated command or script. */
+			if (expanded && protoOn && !state.density && isCommandLikeTool(name)) {
+				if ((name === "bash" || name === "powershell") && typeof args.command === "string" && args.command.trim()) {
+					lines.push(...formatWrappedShellCommandRows(args.command, pal, argRail, railAvail));
+				} else if (name === "codemode" && typeof args.code === "string" && args.code.trim()) {
+					const codeView = renderCodeView(args.code, "script.js", pal.theme, { rail: argRail });
+					if (codeView) lines.push(...codeView.render(usableWidth));
+				}
+			}
+
+			/* If a grep/find header used a human stepSummary, show the exact pattern & path when expanded */
+			if (expanded && protoOn && (name === "grep" || name === "find") && typeof args.pattern === "string" && getStepSummary?.()) {
+				const p = pathOf(args);
+				const detail = p ? `pattern: ${args.pattern}  path: ${p}` : `pattern: ${args.pattern}`;
+				for (const w of wrapTextWithAnsi(detail, railAvail)) {
+					lines.push(`${argRail}${pal.dim(w)}`);
+				}
 			}
 
 			if (expanded && !isCommandLikeTool(name) && name !== "read" && name !== "edit" && name !== "write" && name !== "grep" && name !== "find" && name !== "ls") {
 				if (Object.keys(args).length > 0) {
-					const argRail = pal.rail(protoOn ? "    │ " : "   │ ");
 					lines.push(...renderArguments(args, pal.theme, argRail).render(usableWidth));
 				}
 			}
@@ -888,15 +943,32 @@ export function renderDensityResult(options: {
 			const running = isPartial && canRun();
 			const expanded = state.expanded === true;
 			const density = getDensity();
-			const rail = pal.rail("   │ ");
-			const avail = Math.max(1, width - 5);
+			const protoOn = isPrototypeActive();
+			const rightGuard = protoOn && width >= 48 ? 4 : 0;
+			const usableWidth = Math.max(8, width - rightGuard);
+			const rail = pal.rail(protoOn ? "    │ " : "   │ ");
+			const avail = Math.max(1, usableWidth - (protoOn ? 6 : 5));
 
 			if (running) {
 				if (!cmdLike) return [];
+				const cmdHeaderRows: string[] = [];
+				if (expanded && protoOn) {
+					if ((name === "bash" || name === "powershell") && typeof args.command === "string" && args.command.trim()) {
+						cmdHeaderRows.push(...formatWrappedShellCommandRows(args.command, pal, rail, avail));
+					} else if (name === "codemode" && typeof args.code === "string" && args.code.trim()) {
+						const codeView = renderCodeView(args.code, "script.js", pal.theme, { rail });
+						if (codeView) cmdHeaderRows.push(...codeView.render(usableWidth));
+					}
+				}
 				const lines = extractedCmd?.lines ?? [];
 				if (lines.length === 0) {
+					const subLead = protoOn ? "    " : "   ";
 					const bar = paintDensityWaveGlyph(pal.theme, pal.light, 1, "▎");
-					return [`   ${bar} ${pal.dim(truncateToWidth("Running…", avail, "…"))}`];
+					return [...cmdHeaderRows, `${subLead}${bar} ${pal.dim(truncateToWidth("Running…", avail, "…"))}`];
+				}
+				if (expanded && protoOn) {
+					const renderedOut = renderOutput(lines.join("\n"), pal.theme, isError, rail);
+					return [...cmdHeaderRows, ...(renderedOut?.render(usableWidth) ?? [])];
 				}
 				const sliced = expanded
 					? { head: lines, omitted: 0, tail: [] }
@@ -1009,10 +1081,18 @@ export function renderDensityResult(options: {
 				const outRows: string[] = [];
 				if (name === "codemode" && typeof args.code === "string" && args.code.trim()) {
 					const codeView = renderCodeView(args.code, "script.js", pal.theme, { rail });
-					if (codeView) outRows.push(...codeView.render(width));
-				} else if ((name === "bash" || name === "powershell") && typeof args.command === "string" && args.command.includes("\n")) {
-					for (const cmdLine of normalizeLineEndings(args.command).split("\n")) {
-						outRows.push(`${rail}${pal.target(`$ ${cmdLine}`, true)}`);
+					if (codeView) outRows.push(...codeView.render(usableWidth));
+				} else if (
+					(name === "bash" || name === "powershell") &&
+					typeof args.command === "string" &&
+					(protoOn ? args.command.trim().length > 0 : args.command.includes("\n"))
+				) {
+					if (protoOn) {
+						outRows.push(...formatWrappedShellCommandRows(args.command, pal, rail, avail));
+					} else {
+						for (const cmdLine of normalizeLineEndings(args.command).split("\n")) {
+							outRows.push(`${rail}${pal.target(`$ ${cmdLine}`, true)}`);
+						}
 					}
 				}
 				const nestedCallLines = name === "codemode" ? formatCodemodeCallLines(detailsCalls) : [];
@@ -1023,13 +1103,19 @@ export function renderDensityResult(options: {
 					lines.every((line, idx) => line === nestedCallLines[idx]);
 				if (nestedCallLines.length > 0 && !linesAlreadyAreCalls) {
 					for (const callLine of nestedCallLines) {
-						outRows.push(`${rail}${pal.dim(truncateToWidth(callLine, avail, "…"))}`);
+						if (protoOn) {
+							for (const wrappedCall of wrapTextWithAnsi(callLine, avail)) {
+								outRows.push(`${rail}${pal.dim(wrappedCall)}`);
+							}
+						} else {
+							outRows.push(`${rail}${pal.dim(truncateToWidth(callLine, avail, "…"))}`);
+						}
 					}
 				}
 				if (lines.length > 0) {
 					const fullText = lines.join("\n");
 					const renderedOut = renderOutput(fullText, pal.theme, isError, rail);
-					if (renderedOut) outRows.push(...renderedOut.render(width));
+					if (renderedOut) outRows.push(...renderedOut.render(usableWidth));
 				} else if (!isError && nestedCallLines.length === 0) {
 					outRows.push(`${rail}${pal.dim("(no output)")}`);
 				}

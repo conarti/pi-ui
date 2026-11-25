@@ -211,9 +211,13 @@ function waveAccentGlyph(row: number, glyph: string, lightMode: boolean): string
 }
 
 function shimmerSpineGlyph(row: number, glyph: string, lightMode: boolean): string {
-	return paintSpecularWaveGlyph(row * 0.11, glyph, {
+	return paintGlimmerSweepText(glyph, {
 		light: lightMode,
-		periodMs: 1850,
+		startIndex: row * 2,
+		totalSpanChars: 18,
+		charsPerSecond: 14,
+		baseRgb: lightMode ? [116, 134, 162] : [76, 98, 132],
+		shimmerRgb: lightMode ? [28, 136, 248] : [186, 230, 255],
 	});
 }
 
