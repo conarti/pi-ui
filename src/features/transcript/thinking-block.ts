@@ -16,6 +16,8 @@ import {
 	activateAnimationSurface,
 	deactivateAnimationSurface,
 	paintBreathingWaveGlyph,
+	paintGlimmerSweepText,
+	paintSpecularWaveGlyph,
 } from "../../shared/animation-scheduler.ts";
 import { bgRgb, fgRgb, getActiveGlobalTheme, isLightTheme } from "../../shared/ansi.ts";
 import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
@@ -206,6 +208,30 @@ export function stopThinkingWave(): void {
 
 function waveAccentGlyph(row: number, glyph: string, lightMode: boolean): string {
 	return paintBreathingWaveGlyph(row, glyph, { light: lightMode });
+}
+
+function shimmerSpineGlyph(row: number, glyph: string, lightMode: boolean): string {
+	return paintSpecularWaveGlyph(row * 0.11, glyph, {
+		light: lightMode,
+		periodMs: 1850,
+	});
+}
+
+function shimmerStreamingHeader(
+	text: string,
+	isHovered: boolean,
+	lightMode: boolean,
+	hoverColor: (s: string) => string,
+): string {
+	if (isHovered) return hoverColor(text);
+	return paintGlimmerSweepText(text, {
+		light: lightMode,
+		charsPerSecond: 16,
+		leadPad: 4,
+		trailPad: 10,
+		baseRgb: lightMode ? [82, 100, 130] : [118, 136, 162],
+		shimmerRgb: lightMode ? [37, 128, 248] : [210, 240, 255],
+	});
 }
 
 function createSoftThinkingMarkdown(text: string, themeRef: Theme, light: boolean): Markdown {
@@ -486,17 +512,16 @@ export class ThinkingBlock implements Component {
 
 			/* Клик по заголовку или Ctrl+T во время стриминга сразу разворачивает ВЕСЬ поток мыслей с первой строки */
 			if (this.isExpanded) {
+				const hdrLabel = shimmerStreamingHeader("⌄ Thinking…", isHovered, light, headerMuted);
 				const hdrRow = truncateToWidth(
-					`${margin}${leadGlyph} ${headerMuted("⌄ Thinking…")}${timerSuffix}${seamBadge}`,
+					`${margin}${leadGlyph} ${hdrLabel}${timerSuffix}${seamBadge}`,
 					width - rightClearance,
 					"…",
 				);
 				out.push(padFullWidth(hdrRow));
-				const openSpine = light ? fgRgb(148, 163, 184, "│") : fgRgb(76, 92, 118, "│");
 				for (let i = 0; i < proseLines.length; i++) {
 					const rowText = proseLines[i]!;
-					const spine =
-						i >= proseLines.length - 4 ? waveAccentGlyph(i + 1, "│", light) : openSpine;
+					const spine = shimmerSpineGlyph(i + 1, "│", light);
 					const bodyLine = rowText ? `${margin}${spine} ${rowText}` : `${margin}${spine}`;
 					out.push(padFullWidth(truncateToWidth(bodyLine, width - rightClearance, "…")));
 				}
@@ -509,33 +534,50 @@ export class ThinkingBlock implements Component {
 				const intentPart = intent ? dimHint(` · ${intent}`) : "";
 				const morePart =
 					nonEmptyProse.length > 1 ? dimHint(` (+${nonEmptyProse.length} lines ›)`) : dimHint(" ›");
+				const hdrLabel = shimmerStreamingHeader("Thinking…", isHovered, light, headerMuted);
 				const row = truncateToWidth(
-					`${margin}${leadGlyph} ${headerMuted("Thinking")}${timerSuffix}${seamBadge}${intentPart}${morePart}`,
+					`${margin}${leadGlyph} ${hdrLabel}${timerSuffix}${seamBadge}${intentPart}${morePart}`,
 					width - rightClearance,
 					"…",
 				);
 				return [padFullWidth(row)];
 			}
 
-			/* Variant B: стабильная страница на 6 строк (заполняется сверху вниз без прыжков на каждом переносе слова) */
-			const page = stabilizedPageWindow(nonEmptyProse, STREAMING_PAGE_LINES, STREAMING_PAGE_STEP);
-			const hiddenCue =
-				page.hiddenAbove > 0
-					? dimHint(`  · +${page.hiddenAbove} lines ›`)
-					: nonEmptyProse.length > 0
-						? dimHint(" ›")
-						: "";
+			/* Variant B: стабильная страница на 6 строк + поддержка прокрутки колесом мыши вверх к ранним строкам */
+			const maxBack = Math.max(0, nonEmptyProse.length - STREAMING_PAGE_LINES);
+			const back = Math.max(0, Math.min(this.hoverSlot.scrollFromBottom ?? 0, maxBack));
+			this.hoverSlot.scrollFromBottom = back;
+
+			let visibleSlice: readonly string[];
+			let hiddenCue = "";
+			if (back > 0) {
+				const endIdx = nonEmptyProse.length - back;
+				const startIdx = Math.max(0, endIdx - STREAMING_PAGE_LINES);
+				visibleSlice = nonEmptyProse.slice(startIdx, endIdx);
+				hiddenCue = dimHint(` · ⏸ -${back} lines ›`);
+			} else {
+				const page = stabilizedPageWindow(nonEmptyProse, STREAMING_PAGE_LINES, STREAMING_PAGE_STEP);
+				visibleSlice = page.slice;
+				hiddenCue =
+					page.hiddenAbove > 0
+						? dimHint(` · +${page.hiddenAbove} lines ›`)
+						: nonEmptyProse.length > 0
+							? dimHint(" ›")
+							: "";
+			}
+
+			const hdrLabel = shimmerStreamingHeader("Thinking…", isHovered, light, headerMuted);
 			const hdrRow = truncateToWidth(
-				`${margin}${leadGlyph} ${headerMuted("Thinking…")}${timerSuffix}${seamBadge}${hiddenCue}`,
+				`${margin}${leadGlyph} ${hdrLabel}${timerSuffix}${seamBadge}${hiddenCue}`,
 				width - rightClearance,
 				"…",
 			);
 			out.push(padFullWidth(hdrRow));
 
-			for (let i = 0; i < page.slice.length; i++) {
-				const spine = waveAccentGlyph(i + 1, "▎", light);
+			for (let i = 0; i < visibleSlice.length; i++) {
+				const spine = shimmerSpineGlyph(i + 1, "▎", light);
 				const row = truncateToWidth(
-					`${margin}${spine} ${page.slice[i]!}`,
+					`${margin}${spine} ${visibleSlice[i]!}`,
 					width - rightClearance,
 					"…",
 				);
@@ -687,17 +729,18 @@ export class ThinkingBlock implements Component {
 			return undefined;
 		}
 
-		/* В Variant C колесо мыши над стримящимся компактным окном позволяет прокручивать ранние строки мысли на месте */
+		/* В Variant B и Variant C колесо мыши над стримящимся компактным окном прокручивает ранние строки мысли */
+		const streamWindowLines = variant === "C" ? STREAMING_BOX_LINES : STREAMING_PAGE_LINES;
 		if (
 			protoActive &&
-			variant === "C" &&
+			(variant === "B" || variant === "C") &&
 			this.isStreamingNow &&
 			!this.isExpanded &&
-			this.lastTotalStreamLines > STREAMING_BOX_LINES
+			this.lastTotalStreamLines > streamWindowLines
 		) {
 			const evType = String(event.type);
 			if (evType === "wheel" || evType === "mouse_wheel_up" || evType === "mouse_wheel_down") {
-				const maxBack = Math.max(0, this.lastTotalStreamLines - STREAMING_BOX_LINES);
+				const maxBack = Math.max(0, this.lastTotalStreamLines - streamWindowLines);
 				const step =
 					evType === "mouse_wheel_up"
 						? 2

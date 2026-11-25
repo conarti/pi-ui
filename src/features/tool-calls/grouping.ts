@@ -750,13 +750,21 @@ export class ToolGroupController {
 			}
 		}
 
+		const failedCount = statuses.filter((s) => s === "error").length;
+		const allFailed = failedCount > 0 && failedCount === rows.length;
 		const status: RowStatus = running
 			? "running"
-			: statuses.includes("error")
-				? "error"
-				: statuses.includes("pending")
-					? "pending"
-					: "success";
+			: protoOn
+				? allFailed
+					? "error"
+					: statuses.includes("pending")
+						? "pending"
+						: "success"
+				: statuses.includes("error")
+					? "error"
+					: statuses.includes("pending")
+						? "pending"
+						: "success";
 
 		const groupedInfo = protoOn
 			? formatAllGroupedSummary(rows, this.canRun)
@@ -782,7 +790,6 @@ export class ToolGroupController {
 			const dur = elapsed >= 1000 ? formatDensityDuration(elapsed) : undefined;
 			if (dur) meta = ` ${pal.dim(`(${dur})`)}`;
 		} else {
-			const failedCount = statuses.filter((s) => s === "error").length;
 			let totalMs = 0;
 			let hasDuration = false;
 			for (const row of rows) {
@@ -801,14 +808,22 @@ export class ToolGroupController {
 					hasDuration = true;
 				}
 			}
-			const parts: string[] = [];
+			const styledParts: string[] = [];
 			if (foldedThoughts > 0) {
-				parts.push(`${foldedThoughts} ${foldedThoughts === 1 ? "thought" : "thoughts"}`);
+				styledParts.push(pal.dim(`${foldedThoughts} ${foldedThoughts === 1 ? "thought" : "thoughts"}`));
 			}
-			if (failedCount > 0) parts.push(`${failedCount} failed`);
+			if (failedCount > 0) {
+				styledParts.push(
+					protoOn && !allFailed
+						? pal.theme.fg("error", `${failedCount} failed`)
+						: pal.dim(`${failedCount} failed`),
+				);
+			}
 			const dur = hasDuration ? formatDensityDuration(totalMs) : undefined;
-			if (dur) parts.push(dur);
-			if (parts.length > 0) meta = ` ${pal.dim(`(${parts.join(" · ")})`)}`;
+			if (dur) styledParts.push(pal.dim(dur));
+			if (styledParts.length > 0) {
+				meta = ` ${pal.dim("(")}${styledParts.join(pal.dim(" · "))}${pal.dim(")")}`;
+			}
 		}
 
 		const disclosure =

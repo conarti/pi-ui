@@ -200,10 +200,10 @@ class DemoToolGroupMock implements Component {
 		if (this.expanded) {
 			const subGlyph = pal.diamond("success", false, false);
 			const guide = pal.rail("  │");
-			out.push(fit(`${guide} ${subGlyph} ${pal.title("Explored", "success", false)} ${pal.target("3 files, 1 search", false)} ${pal.dim("(340ms)")}`));
+			out.push(fit(`${guide} ${subGlyph} ${pal.title("Inspect repo state and tool-summary source", "success", false)} ${pal.dim("(340ms) · bash 1 · read 3")}`));
 			out.push(fit(`${guide} ${subGlyph} ${pal.title("Edited", "success", false)} ${pal.target("src/features/transcript/thinking-block.ts", false)} ${pal.dim("(+12 -3 · 280ms)")}`));
 			out.push(fit(`${guide} ${subGlyph} ${pal.title("Edited", "success", false)} ${pal.target("src/features/tool-calls/grouping.ts", false)} ${pal.dim("(+6 -1 · 240ms)")}`));
-			out.push(fit(`${guide} ${subGlyph} ${pal.title("Ran", "success", false)} ${pal.target("npm run typecheck", false)} ${pal.dim("(910ms)")}`));
+			out.push(fit(`${guide} ${subGlyph} ${pal.title("Verify lint, typecheck, and unit tests", "success", false)} ${pal.target("npm run check", false)} ${pal.dim("(910ms)")}`));
 		}
 		return out;
 	}

@@ -6,13 +6,21 @@
 import {
 	getAnimationElapsedMs,
 	paintBreathingWaveGlyph,
+	paintGlimmerSweepText,
+	paintSpecularWaveGlyph,
 	type WaveSampleOptions,
 } from "../../shared/animation-scheduler.ts";
-import { getActiveGlobalTheme, isLightTheme } from "../../shared/ansi.ts";
+import { fgRgb, getActiveGlobalTheme, isLightTheme } from "../../shared/ansi.ts";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 export type PrototypeVariant = "A" | "B" | "C" | "off";
 export type ActivePrototypeVariant = Exclude<PrototypeVariant, "off">;
 export type WorkingPhase = "idle" | "ttft" | "thinking" | "tool" | "text";
+
+export interface BrandMarkFacet {
+	readonly glyph: string;
+	readonly phase: number;
+}
 
 export interface PrototypeVariantMeta {
 	readonly key: ActivePrototypeVariant;
@@ -20,51 +28,96 @@ export interface PrototypeVariantMeta {
 	readonly shortLabel: string;
 	readonly pillLabel: string;
 	readonly summary: string;
+	readonly borderFacets: readonly BrandMarkFacet[];
+	readonly inlineGlyph: string;
 	readonly settledGlyph: string;
 	readonly subtleGlyph: string;
-	readonly runningFrames: readonly string[];
-	readonly frameStepMs: number;
-	readonly defaultDensity: "compact" | "grouped";
+	readonly defaultDensity: "compact" | "balanced" | "grouped";
 }
 
 export const PROTOTYPE_VARIANTS: Record<ActivePrototypeVariant, PrototypeVariantMeta> = {
 	A: {
 		key: "A",
-		name: "Quiet Whisper",
-		shortLabel: "A · Quiet Whisper",
-		pillLabel: "◌ A · Quiet ↻",
-		summary: "Orbital ring ◌/◑/●, 1-line calm streaming Thinking ticker (click expands full stream), Compact all-grouped tools, left turn sign-off",
-		settledGlyph: "◈",
+		name: "Polaris Star",
+		shortLabel: "A · Polaris Star",
+		pillLabel: "✦ A · Star ↻",
+		summary: "Stationary ✦ mark with 30fps color shimmer, 1-line streaming Thinking, Compact all-grouped tools",
+		borderFacets: [{ glyph: "✦", phase: 0 }],
+		inlineGlyph: "✦",
+		settledGlyph: "✦",
 		subtleGlyph: "•",
-		runningFrames: ["◌", "◔", "◑", "◕", "●", "◕", "◑", "◔"],
-		frameStepMs: 140,
 		defaultDensity: "compact",
 	},
 	B: {
 		key: "B",
-		name: "Prism Rail",
-		shortLabel: "B · Prism Rail",
-		pillLabel: "❖ B · Prism ↻",
-		summary: "Prism mark ❖/✦, contextual working summary, 6-line page-stabilized streaming Thinking (click unfolds full stream), right metrics rule",
+		name: "Pi Reeds",
+		shortLabel: "B · Pi Reeds",
+		pillLabel: "▍▎ B · Reeds ↻",
+		summary: "Stationary ▍▎ twin-reed π mark with 30fps phase shimmer, 6-line wheel-scrollable Thinking, Balanced step-by-step tools",
+		borderFacets: [
+			{ glyph: "▍", phase: 0 },
+			{ glyph: "▎", phase: 0.32 },
+		],
+		inlineGlyph: "❖",
 		settledGlyph: "❖",
 		subtleGlyph: "❖",
-		runningFrames: ["·", "✦", "✧", "❖", "✧", "✦"],
-		frameStepMs: 160,
-		defaultDensity: "compact",
+		defaultDensity: "balanced",
 	},
 	C: {
 		key: "C",
-		name: "Structured Studio",
-		shortLabel: "C · Structured Studio",
-		pillLabel: "⬢ C · Studio ↻",
-		summary: "Hex lattice ⬢ + phase tag, 8-line wheel-scrollable live Thinking box, category-grouped tools, two-zone metrics strip",
-		settledGlyph: "⬢",
-		subtleGlyph: "⬢",
-		runningFrames: ["⠋", "⠙", "⠸", "⣠", "⣄", "⡆"],
-		frameStepMs: 110,
+		name: "Split Prism",
+		shortLabel: "C · Split Prism",
+		pillLabel: "◢◤ C · Prism ↻",
+		summary: "Stationary ◢◤ dual-facet prism with 30fps color wave, 8-line Thinking card, Grouped category tools",
+		borderFacets: [
+			{ glyph: "◢", phase: 0 },
+			{ glyph: "◤", phase: 0.36 },
+		],
+		inlineGlyph: "◈",
+		settledGlyph: "◈",
+		subtleGlyph: "◈",
 		defaultDensity: "grouped",
 	},
 };
+
+/**
+ * Original 1-word tactile/craft/optics/culinary English gerunds inspired by Claude Code's
+ * single-word spinner principle (never multi-word corporate boilerplate, never copied verbatim).
+ */
+export const PLAYFUL_WORKING_VERBS: readonly string[] = [
+	"Tinkering…",
+	"Simmering…",
+	"Unspooling…",
+	"Dovetailing…",
+	"Steeping…",
+	"Refracting…",
+	"Whittling…",
+	"Sifting…",
+	"Triangulating…",
+	"Burnishing…",
+	"Noodling…",
+	"Distilling…",
+	"Spelunking…",
+	"Weaving…",
+	"Percolating…",
+	"Sketching…",
+	"Tempering…",
+	"Untangling…",
+	"Decanting…",
+	"Stargazing…",
+	"Kneading…",
+	"Charting…",
+	"Riffing…",
+	"Sculpting…",
+	"Infusing…",
+	"Mulling…",
+	"Calibrating…",
+	"Forging…",
+];
+
+const VERB_ROTATION_MS = 30_000;
+const MIN_CONTEXTUAL_HOLD_MS = 4500;
+const TOOL_END_LINGER_MS = 1800;
 
 export interface ThinkingDisplayResult {
 	readonly text: string;
@@ -85,7 +138,10 @@ interface PrototypeRuntimeState {
 	phase: WorkingPhase;
 	turnStartedAt?: number;
 	firstContentAt?: number;
+	turnVerbSeed: number;
 	contextualSummary?: string;
+	contextualUpdatedAt?: number;
+	contextualExpiresAt?: number;
 	thinkingProvider?: ThinkingDisplayProvider;
 	listeners: Set<() => void>;
 }
@@ -108,6 +164,7 @@ function getProtoState(): PrototypeRuntimeState {
 			demoTranslated: false,
 			metricsVisible: true,
 			phase: "idle",
+			turnVerbSeed: Math.floor(Math.random() * PLAYFUL_WORKING_VERBS.length),
 			listeners: new Set(),
 		};
 	}
@@ -220,6 +277,10 @@ export function notifyPrototypeChanged(): void {
 	}
 }
 
+/**
+ * Renders the 1-cell inline brand mark with 30 fps specular color wave (stationary geometry,
+ * zero glyph jumping) for Thinking headers and running Tool Call rows.
+ */
 export function samplePrototypeRunningGlyph(
 	row = 0,
 	options?: WaveSampleOptions & { variant?: ActivePrototypeVariant },
@@ -230,10 +291,30 @@ export function samplePrototypeRunningGlyph(
 		return paintBreathingWaveGlyph(row, "◆", options);
 	}
 	const meta = PROTOTYPE_VARIANTS[activeKey];
-	const elapsed = options?.elapsedMs ?? getAnimationElapsedMs();
-	const idx = Math.floor(Math.max(0, elapsed) / meta.frameStepMs) % meta.runningFrames.length;
-	const glyph = meta.runningFrames[idx] ?? meta.settledGlyph;
-	return paintBreathingWaveGlyph(row, glyph, options);
+	return paintSpecularWaveGlyph(row * 0.14, meta.inlineGlyph, {
+		...options,
+		periodMs: 1850,
+	});
+}
+
+/**
+ * Renders the multi-facet Composer border brand mark (✦, ▍▎, or ◢◤) with a 30 fps
+ * phase-shifted specular wave across facets.
+ */
+export function renderPrototypeBrandMark(
+	options?: WaveSampleOptions & { variant?: ActivePrototypeVariant },
+): string {
+	const state = getProtoState();
+	const activeKey = options?.variant ?? (state.variant === "off" ? "B" : state.variant);
+	const meta = PROTOTYPE_VARIANTS[activeKey];
+	return meta.borderFacets
+		.map((facet) =>
+			paintSpecularWaveGlyph(facet.phase, facet.glyph, {
+				...options,
+				periodMs: 1850,
+			}),
+		)
+		.join("");
 }
 
 export function getPrototypeSettledGlyph(variant?: PrototypeVariant): string {
@@ -242,9 +323,9 @@ export function getPrototypeSettledGlyph(variant?: PrototypeVariant): string {
 	return PROTOTYPE_VARIANTS[v].settledGlyph;
 }
 
-/* ── Contextual, meaning-aware Working / TTFT status extraction ──────────── */
+/* ── Zero-token heading extraction & playful 1-word fallback verbs ──────── */
 
-function cleanSnippetWords(raw: string, maxChars = 48): string | undefined {
+function cleanSnippetWords(raw: string, maxChars = 46): string | undefined {
 	const single = raw
 		.replace(/`([^`]+)`/gu, "$1")
 		.replace(/[*_#~[\]()]/gu, "")
@@ -257,8 +338,9 @@ function cleanSnippetWords(raw: string, maxChars = 48): string | undefined {
 }
 
 /**
- * Extracts a concise, concrete status phrase from the model's live Thinking stream
- * (preferring explicit bold/markdown section titles, otherwise the latest active clause).
+ * Extracts explicit section headings (**Heading** or ### Heading) emitted naturally
+ * in the model's streaming thoughts (100% token-free local parsing). Never grabs random
+ * half-sentences so fallback 1-word verbs remain crisp and readable.
  */
 export function summarizeLiveThinkingIntent(rawThinking: string): string | undefined {
 	if (!rawThinking.trim()) return undefined;
@@ -269,32 +351,20 @@ export function summarizeLiveThinkingIntent(rawThinking: string): string | undef
 		.filter((l) => l.length > 0 && !/^(?:`{3,}|~{3,})/u.test(l));
 	if (lines.length === 0) return undefined;
 
-	/* 1. Ищем последний явный смысловой заголовок (**Heading** или ### Heading) */
 	for (let i = lines.length - 1; i >= 0; i--) {
 		const line = lines[i]!;
-		const boldMatch = /^\*\*([^*]{4,64})\*\*(?::|\s|$)/u.exec(line);
+		const boldMatch = /^\*\*([^*]{4,56})\*\*(?::|\s|$)/u.exec(line);
 		if (boldMatch?.[1]) {
-			const cleaned = cleanSnippetWords(boldMatch[1], 46);
+			const cleaned = cleanSnippetWords(boldMatch[1], 44);
 			if (cleaned) return cleaned.endsWith("…") ? cleaned : `${cleaned}…`;
 		}
-		const mdMatch = /^#{1,4}\s+(.{4,64})$/u.exec(line);
+		const mdMatch = /^#{1,4}\s+(.{4,56})$/u.exec(line);
 		if (mdMatch?.[1]) {
-			const cleaned = cleanSnippetWords(mdMatch[1], 46);
+			const cleaned = cleanSnippetWords(mdMatch[1], 44);
 			if (cleaned) return cleaned.endsWith("…") ? cleaned : `${cleaned}…`;
 		}
 	}
-
-	/* 2. Иначе берём свежую осмысленную фразу из последней непустой строки */
-	const latest = lines[lines.length - 1]!;
-	const strippedLead = latest
-		.replace(/^(?:[-*+]\s+|\d+\.\s+)/u, "")
-		.replace(/^(?:ok(?:ay)?[,.]?\s+|so\s+|now\s+|first[,.]?\s+|let's\s+|we\s+(?:need|should|can)\s+to\s+|we\s+(?:need|should|can)\s+)/iu, "");
-	if (strippedLead.length < 6) return undefined;
-	const firstClause = strippedLead.split(/[.!?;—–]/u)[0]?.trim() ?? strippedLead;
-	const cleaned = cleanSnippetWords(firstClause, 46);
-	if (!cleaned) return undefined;
-	const capitalized = cleaned[0]!.toUpperCase() + cleaned.slice(1);
-	return capitalized.endsWith("…") ? capitalized : `${capitalized}…`;
+	return undefined;
 }
 
 export function beginWorkingTurn(now = Date.now()): void {
@@ -302,12 +372,15 @@ export function beginWorkingTurn(now = Date.now()): void {
 	state.phase = "ttft";
 	state.turnStartedAt = now;
 	state.firstContentAt = undefined;
+	state.turnVerbSeed = (state.turnVerbSeed + 5 + Math.floor(now % 7)) % PLAYFUL_WORKING_VERBS.length;
 	state.contextualSummary = undefined;
+	state.contextualUpdatedAt = undefined;
+	state.contextualExpiresAt = undefined;
 }
 
 export function markWorkingPhase(
 	phase: WorkingPhase,
-	options?: { now?: number; summary?: string },
+	options?: { now?: number; summary?: string; lingerPrevious?: boolean },
 ): void {
 	const state = getProtoState();
 	const now = options?.now ?? Date.now();
@@ -316,6 +389,8 @@ export function markWorkingPhase(
 		state.turnStartedAt = undefined;
 		state.firstContentAt = undefined;
 		state.contextualSummary = undefined;
+		state.contextualUpdatedAt = undefined;
+		state.contextualExpiresAt = undefined;
 		return;
 	}
 	state.turnStartedAt ??= now;
@@ -323,11 +398,68 @@ export function markWorkingPhase(
 		state.firstContentAt = now;
 	}
 	state.phase = phase;
-	if (options?.summary !== undefined) {
-		state.contextualSummary = options.summary;
+
+	if (options?.lingerPrevious) {
+		if (state.contextualSummary) {
+			state.contextualExpiresAt = now + TOOL_END_LINGER_MS;
+		}
+		return;
+	}
+
+	if (phase === "text") {
+		state.contextualSummary = "Drafting…";
+		state.contextualUpdatedAt = now;
+		state.contextualExpiresAt = undefined;
+		return;
+	}
+
+	if (options && "summary" in options) {
+		const nextSummary = options.summary;
+		if (!nextSummary) {
+			/* Keep current contextual summary if it hasn't finished its minimum display hold yet */
+			if (
+				state.contextualSummary &&
+				state.contextualUpdatedAt !== undefined &&
+				now - state.contextualUpdatedAt < MIN_CONTEXTUAL_HOLD_MS
+			) {
+				return;
+			}
+			state.contextualSummary = undefined;
+			state.contextualUpdatedAt = undefined;
+			state.contextualExpiresAt = undefined;
+			return;
+		}
+		if (nextSummary === state.contextualSummary) {
+			state.contextualExpiresAt = undefined;
+			return;
+		}
+		/* Avoid rapid flickering between consecutive headings or fast sub-1s tool calls */
+		if (
+			state.contextualSummary &&
+			state.contextualUpdatedAt !== undefined &&
+			now - state.contextualUpdatedAt < MIN_CONTEXTUAL_HOLD_MS
+		) {
+			return;
+		}
+		state.contextualSummary = nextSummary;
+		state.contextualUpdatedAt = now;
+		state.contextualExpiresAt = undefined;
 	} else if (phase === "ttft") {
 		state.contextualSummary = undefined;
+		state.contextualUpdatedAt = undefined;
+		state.contextualExpiresAt = undefined;
 	}
+}
+
+function resolveActiveContextualSummary(state: PrototypeRuntimeState, now: number): string | undefined {
+	if (!state.contextualSummary) return undefined;
+	if (state.contextualExpiresAt !== undefined && now >= state.contextualExpiresAt) {
+		state.contextualSummary = undefined;
+		state.contextualUpdatedAt = undefined;
+		state.contextualExpiresAt = undefined;
+		return undefined;
+	}
+	return state.contextualSummary;
 }
 
 function formatCompactElapsed(ms: number): string {
@@ -338,25 +470,21 @@ function formatCompactElapsed(ms: number): string {
 	return `${Math.floor(sec / 60)}m ${sec % 60}s`;
 }
 
-function resolveDefaultPhaseLabel(phase: WorkingPhase): string {
-	switch (phase) {
-		case "ttft":
-			return "Connecting…";
-		case "thinking":
-			return "Thinking…";
-		case "tool":
-			return "Running tools…";
-		case "text":
-			return "Responding…";
-		case "idle":
-		default:
-			return "Working…";
+function pickPlayfulVerb(seed: number, elapsedMs: number): string {
+	const steps = Math.floor(Math.max(0, elapsedMs) / VERB_ROTATION_MS);
+	const idx = (seed + steps * 3) % PLAYFUL_WORKING_VERBS.length;
+	return PLAYFUL_WORKING_VERBS[idx] ?? "Tinkering…";
+}
+
+function resolveDefaultPhaseLabel(phase: WorkingPhase, seed: number, elapsedMs: number): string {
+	if (phase === "text") {
+		return "Drafting…";
 	}
+	return pickPlayfulVerb(seed, elapsedMs);
 }
 
 /**
- * Returns the animated brand glyph and a plain-text status string WITHOUT inner SGR resets
- * and WITHOUT redundant "(esc to interrupt)" hints, so WorkingStatusIndicator paints evenly.
+ * Plain-text fallback for hosts outside Composer's custom shimmer border.
  */
 export function buildLiveWorkingPresentation(options?: {
 	now?: number;
@@ -376,32 +504,85 @@ export function buildLiveWorkingPresentation(options?: {
 
 	const phase: WorkingPhase = state.phase === "idle" ? "ttft" : state.phase;
 	const elapsedTurnMs = state.turnStartedAt !== undefined ? Math.max(0, now - state.turnStartedAt) : animMs;
-	const summary = state.contextualSummary || resolveDefaultPhaseLabel(phase);
+	const activeContextual = resolveActiveContextualSummary(state, now);
+	const summary = activeContextual || resolveDefaultPhaseLabel(phase, state.turnVerbSeed, elapsedTurnMs);
 	const timerText = formatCompactElapsed(elapsedTurnMs);
-	const indicatorFrame = samplePrototypeRunningGlyph(0, {
+	const indicatorFrame = renderPrototypeBrandMark({
 		theme,
 		light,
 		elapsedMs: animMs,
 		variant: activeVariant,
 	});
 
-	if (activeVariant === "C") {
-		const phaseTag =
-			phase === "ttft"
-				? "TTFT"
-				: phase === "thinking"
-					? "THINK"
-					: phase === "tool"
-						? "TOOLS"
-						: "REPLY";
-		return {
-			indicatorFrame,
-			borderMessage: `[${phaseTag} ${timerText}] ${summary}`,
-		};
-	}
-
 	return {
 		indicatorFrame,
 		borderMessage: `${summary} · ${timerText}`,
 	};
+}
+
+/**
+ * Renders the full 30 fps shimmering Composer top-border working status:
+ * stationary multi-facet brand mark + per-character specular shimmer across the status
+ * label + calm muted elapsed timer, strictly fitted within `maxWidth`.
+ */
+export function renderPrototypeBorderWorkingStatus(
+	maxWidth: number,
+	options?: {
+		now?: number;
+		animElapsedMs?: number;
+		theme?: unknown;
+		variant?: ActivePrototypeVariant;
+	},
+): string {
+	if (maxWidth <= 0) return "";
+	const state = getProtoState();
+	const activeVariant = options?.variant ?? (state.variant === "off" ? "B" : state.variant);
+	const meta = PROTOTYPE_VARIANTS[activeVariant];
+	const now = options?.now ?? Date.now();
+	const animMs = options?.animElapsedMs ?? getAnimationElapsedMs();
+	const theme = options?.theme ?? getActiveGlobalTheme();
+	const light = isLightTheme(theme);
+
+	const markPlain = meta.borderFacets.map((f) => f.glyph).join("");
+	const markW = visibleWidth(markPlain);
+	if (maxWidth <= markW) {
+		return truncateToWidth(
+			renderPrototypeBrandMark({ theme, light, elapsedMs: animMs, variant: activeVariant }),
+			maxWidth,
+			"",
+		);
+	}
+
+	const phase: WorkingPhase = state.phase === "idle" ? "ttft" : state.phase;
+	const elapsedTurnMs = state.turnStartedAt !== undefined ? Math.max(0, now - state.turnStartedAt) : animMs;
+	const activeContextual = resolveActiveContextualSummary(state, now);
+	const rawSummary = activeContextual || resolveDefaultPhaseLabel(phase, state.turnVerbSeed, elapsedTurnMs);
+	const timerPlain = ` · ${formatCompactElapsed(elapsedTurnMs)}`;
+	const timerW = visibleWidth(timerPlain);
+	const dimTimer = light ? fgRgb(124, 138, 160, timerPlain) : fgRgb(104, 118, 142, timerPlain);
+
+	const availAfterMark = maxWidth - markW - 1;
+	if (availAfterMark < 4) {
+		return renderPrototypeBrandMark({
+			theme,
+			light,
+			elapsedMs: animMs,
+			variant: activeVariant,
+		});
+	}
+
+	const includeTimer = availAfterMark >= timerW + 8;
+	const summaryBudget = includeTimer ? availAfterMark - timerW : availAfterMark;
+	const clippedSummary = truncateToWidth(rawSummary, summaryBudget, "…");
+	const combinedPlain = `${markPlain} ${clippedSummary}`;
+	const glimmerCombined = paintGlimmerSweepText(combinedPlain, {
+		theme,
+		light,
+		elapsedMs: animMs,
+		charsPerSecond: 18,
+		leadPad: 5,
+		trailPad: 12,
+	});
+
+	return includeTimer ? `${glimmerCombined}${dimTimer}` : glimmerCombined;
 }

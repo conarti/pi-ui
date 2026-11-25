@@ -58,6 +58,7 @@ import { CODEX_BULLET, CODEX_INDENT } from "./codex.ts";
 import { NestedCallSummaries } from "./nested.ts";
 import { renderCodexCall, renderCodexResult } from "./codex-rows.ts";
 import { renderDensityCall, renderDensityResult } from "./density.ts";
+import { resolveExternalToolSummary } from "./step-summaries.ts";
 import { ToolGroupController } from "./grouping.ts";
 import { chromePainter, completionPainter, paintIndicator } from "./palette.ts";
 import { ProgressController } from "./progress.ts";
@@ -81,6 +82,7 @@ const PREVIEW_DIFF_CONTEXT_LINES = 1;
 
 const runtime = new ToolRuntime();
 const nestedSummaries = new NestedCallSummaries();
+let activeModuleSessionContext: ExtensionContext | undefined;
 let registeredConfiguration: string | undefined;
 /**
  * Whether the last session found its directory trusted. A /reload rebuilds the
@@ -242,9 +244,15 @@ function renderRowCallContent(name: string, args: ToolArgs, theme: Theme, ctx: R
 			args,
 			theme,
 			state,
+			cwd: ctx.cwd ?? activeModuleSessionContext?.cwd ?? getActiveHostRuntime()?.ctx.cwd,
 			getStatus: () => callStatus(ctx, state),
 			syncRunning: (running) => {
 				runtime.syncIndicator(ctx.toolCallId, running, () => ctx.invalidate());
+			},
+			getStepSummary: () => {
+				const sm = (activeModuleSessionContext ?? getActiveHostRuntime()?.ctx)?.sessionManager;
+				const entries = sm?.getEntries?.() ?? sm?.getBranch?.();
+				return resolveExternalToolSummary(ctx.toolCallId, args, entries);
 			},
 			getNestedSummary:
 				name === "codemode"
@@ -860,6 +868,7 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 		const failures: UIFailure[] = [];
 		detachUI({ restoreNative: true }, failures);
 		sessionContext = ctx;
+		activeModuleSessionContext = ctx;
 		unsubscribeProto?.();
 		unsubscribeProto = subscribePrototypeChanges(() => {
 			if (!sessionContext) return;
@@ -941,6 +950,7 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 		detachUI({ clearTimings: event.reason !== "reload" }, failures);
 		reportFailures(sessionContext, failures);
 		sessionContext = undefined;
+		activeModuleSessionContext = undefined;
 		if (event.reason !== "reload") {
 			setSessionStyleOverride(undefined);
 			nestedSummaries.clear();

@@ -2,6 +2,7 @@ import { formatSize, type Theme } from "@earendil-works/pi-coding-agent";
 import {
 	truncateToWidth,
 	visibleWidth,
+	wrapTextWithAnsi,
 	type Component,
 	type OverlayHandle,
 	type OverlayOptions,
@@ -9,6 +10,7 @@ import {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
+import { isPrototypeActive } from "../transcript/prototype-state.ts";
 import {
 	fgRgb,
 	getThemeSurfacePalette,
@@ -27,7 +29,10 @@ export interface PreviewContentSpec {
 	readonly lines: Array<{ text: string; muted?: boolean }>;
 }
 
-export function buildChipPreviewSpec(chip: SerializedPromptChip): PreviewContentSpec {
+export function buildChipPreviewSpec(
+	chip: SerializedPromptChip,
+	options?: { wrapInnerWidth?: number; maxVisibleRows?: number; scrollOffset?: number },
+): PreviewContentSpec {
 	if (chip.kind === "image") {
 		const metaParts: string[] = [];
 		if (chip.widthPx && chip.heightPx) {
@@ -53,6 +58,39 @@ export function buildChipPreviewSpec(chip: SerializedPromptChip): PreviewContent
 
 	if (chip.kind === "paste") {
 		const rawLines = (chip.previewText || "").replace(/\t/g, "  ").split("\n");
+		const unitLabel =
+			chip.metric === "chars"
+				? `${chip.charCount} ${chip.charCount === 1 ? "char" : "chars"}`
+				: `${chip.lineCount} ${chip.lineCount === 1 ? "line" : "lines"}`;
+		if (options?.wrapInnerWidth && isPrototypeActive()) {
+			const wrapW = Math.max(16, options.wrapInnerWidth);
+			const maxRows = Math.max(8, options.maxVisibleRows ?? 22);
+			const wrapped: string[] = [];
+			for (const line of rawLines) {
+				if (!line) {
+					wrapped.push(" ");
+					continue;
+				}
+				for (const chunk of wrapTextWithAnsi(line, wrapW)) {
+					wrapped.push(chunk || " ");
+				}
+			}
+			const maxScroll = Math.max(0, wrapped.length - maxRows);
+			const start = Math.max(0, Math.min(options.scrollOffset ?? 0, maxScroll));
+			const slice = wrapped.slice(start, start + maxRows);
+			const shown: Array<{ text: string; muted?: boolean }> = slice.map((t) => ({ text: t }));
+			const below = Math.max(0, wrapped.length - (start + slice.length));
+			if (start > 0 || below > 0) {
+				shown.push({
+					text: `↑ ${start} · ↓ ${below} lines (wheel to scroll)`,
+					muted: true,
+				});
+			}
+			return {
+				title: `📋 Pasted #${chip.number} · ${unitLabel}`,
+				lines: shown.length > 0 ? shown : [{ text: " " }],
+			};
+		}
 		const shown: Array<{ text: string; muted?: boolean }> = rawLines
 			.slice(0, MAX_EXCERPT_LINES)
 			.map((line) => ({
@@ -62,10 +100,6 @@ export function buildChipPreviewSpec(chip: SerializedPromptChip): PreviewContent
 		if (remaining > 0) {
 			shown.push({ text: `… (+${remaining} more ${remaining === 1 ? "line" : "lines"})`, muted: true });
 		}
-		const unitLabel =
-			chip.metric === "chars"
-				? `${chip.charCount} ${chip.charCount === 1 ? "char" : "chars"}`
-				: `${chip.lineCount} ${chip.lineCount === 1 ? "line" : "lines"}`;
 		return {
 			title: `📋 Pasted #${chip.number} · ${unitLabel}`,
 			lines: shown.length > 0 ? shown : [{ text: " " }],
@@ -73,6 +107,37 @@ export function buildChipPreviewSpec(chip: SerializedPromptChip): PreviewContent
 	}
 
 	const quoteLines = (chip.previewText || "").replace(/\t/g, "  ").split("\n");
+	const unit = chip.lineCount === 1 ? "line" : "lines";
+	if (options?.wrapInnerWidth && isPrototypeActive()) {
+		const wrapW = Math.max(14, options.wrapInnerWidth - 2);
+		const maxRows = Math.max(8, options.maxVisibleRows ?? 22);
+		const wrapped: string[] = [];
+		for (const line of quoteLines) {
+			if (!line) {
+				wrapped.push("│");
+				continue;
+			}
+			for (const chunk of wrapTextWithAnsi(line, wrapW)) {
+				wrapped.push(`│ ${chunk}`);
+			}
+		}
+		const maxScroll = Math.max(0, wrapped.length - maxRows);
+		const start = Math.max(0, Math.min(options.scrollOffset ?? 0, maxScroll));
+		const slice = wrapped.slice(start, start + maxRows);
+		const shown: Array<{ text: string; muted?: boolean }> = slice.map((t) => ({ text: t }));
+		const below = Math.max(0, wrapped.length - (start + slice.length));
+		if (start > 0 || below > 0) {
+			shown.push({
+				text: `↑ ${start} · ↓ ${below} lines (wheel to scroll)`,
+				muted: true,
+			});
+		}
+		return {
+			title: `❝ Quote #${chip.number} · ${chip.lineCount} ${unit}`,
+			lines: shown.length > 0 ? shown : [{ text: " " }],
+		};
+	}
+
 	const shown: Array<{ text: string; muted?: boolean }> = quoteLines
 		.slice(0, MAX_EXCERPT_LINES)
 		.map((line) => ({
@@ -82,7 +147,6 @@ export function buildChipPreviewSpec(chip: SerializedPromptChip): PreviewContent
 	if (remaining > 0) {
 		shown.push({ text: `… (+${remaining} more ${remaining === 1 ? "line" : "lines"})`, muted: true });
 	}
-	const unit = chip.lineCount === 1 ? "line" : "lines";
 	return {
 		title: `❝ Quote #${chip.number} · ${chip.lineCount} ${unit}`,
 		lines: shown.length > 0 ? shown : [{ text: " " }],
@@ -91,6 +155,8 @@ export function buildChipPreviewSpec(chip: SerializedPromptChip): PreviewContent
 
 export class PromptChipPreviewPopup implements Component {
 	chip: SerializedPromptChip | undefined;
+	scrollOffset = 0;
+	maxBodyRows = 22;
 	onDismiss?: () => void;
 
 	constructor(private readonly getTheme: () => Theme) {}
@@ -98,6 +164,19 @@ export class PromptChipPreviewPopup implements Component {
 	invalidate(): void {}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		const evType = String(event.type);
+		if (evType === "wheel" || evType === "mouse_wheel_up" || evType === "mouse_wheel_down") {
+			const step =
+				evType === "mouse_wheel_up"
+					? -3
+					: evType === "mouse_wheel_down"
+						? 3
+						: ((event as unknown as { deltaY?: number }).deltaY ?? 0) < 0
+							? -3
+							: 3;
+			this.scrollOffset = Math.max(0, this.scrollOffset + step);
+			return { handled: true, render: true };
+		}
 		if (event.type === "press" && event.button === "left") {
 			return { handled: true, render: false };
 		}
@@ -108,8 +187,26 @@ export class PromptChipPreviewPopup implements Component {
 		return undefined;
 	}
 
-	computeDimensions(termCols: number): { width: number; height: number } {
+	computeDimensions(termCols: number, termRows = 34): { width: number; height: number } {
 		if (!this.chip) return { width: 24, height: 3 };
+		if (isPrototypeActive() && this.chip.kind !== "image") {
+			const maxAllowed = Math.max(28, Math.min(88, termCols - 6));
+			this.maxBodyRows = Math.max(8, Math.min(22, termRows - 8));
+			const rawMaxLen = Math.max(
+				visibleWidth(this.chip.token) + 8,
+				...(this.chip.previewText || "")
+					.replace(/\t/g, "  ")
+					.split("\n")
+					.map((l) => visibleWidth(l) + 6),
+			);
+			const width = Math.max(28, Math.min(maxAllowed, rawMaxLen));
+			const spec = buildChipPreviewSpec(this.chip, {
+				wrapInnerWidth: Math.max(12, width - 4),
+				maxVisibleRows: this.maxBodyRows,
+				scrollOffset: this.scrollOffset,
+			});
+			return { width, height: spec.lines.length + 2 };
+		}
 		const spec = buildChipPreviewSpec(this.chip);
 		const maxAllowed = Math.max(20, Math.min(68, termCols - 4));
 		const naturalInner = Math.max(
@@ -136,7 +233,14 @@ export class PromptChipPreviewPopup implements Component {
 		const mutedRgb: RgbTuple = light ? [100, 116, 139] : [136, 152, 176];
 		const [bgR, bgG, bgB] = palette.surfaceBg;
 
-		const spec = buildChipPreviewSpec(this.chip);
+		const spec =
+			isPrototypeActive() && this.chip.kind !== "image"
+				? buildChipPreviewSpec(this.chip, {
+						wrapInnerWidth: textWidth,
+						maxVisibleRows: this.maxBodyRows,
+						scrollOffset: this.scrollOffset,
+					})
+				: buildChipPreviewSpec(this.chip);
 		const b = (s: string) => fgRgb(borderRgb, s);
 
 		const clippedTitle = truncateToWidth(` ${spec.title} `, Math.max(1, innerSpan - 2), "…");
@@ -215,11 +319,15 @@ export class PromptChipOverlayController {
 			this.popup = new PromptChipPreviewPopup(this.getTheme);
 			this.popup.onDismiss = () => this.hide(["sent-pill"]);
 		}
+		const nextChipKey = `${source}:${chip.id}:${chip.token}`;
+		if (this.activeChipKey !== nextChipKey) {
+			this.popup.scrollOffset = 0;
+		}
 		this.popup.chip = chip;
 
 		const termCols = Math.max(24, tui.terminal?.columns ?? 80);
 		const termRows = Math.max(8, tui.terminal?.rows ?? 30);
-		const { width, height } = this.popup.computeDimensions(termCols);
+		const { width, height } = this.popup.computeDimensions(termCols, termRows);
 
 		const clampedCol = Math.max(1, Math.min(anchor.col, Math.max(1, termCols - width - 1)));
 		let row = anchor.rowAbove - height;

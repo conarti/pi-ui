@@ -6,6 +6,7 @@ import {
 	stopAllAnimations,
 	type WaveSampleOptions,
 } from "../../shared/animation-scheduler.ts";
+import { requestRender } from "../../shared/ui-action-bridge.ts";
 import {
 	buildLiveWorkingPresentation,
 	isPrototypeActive,
@@ -118,6 +119,9 @@ export function startComposerWorkingWave(): void {
 			return;
 		}
 		applyWorkingIndicatorFrame(activeCtx);
+		if (isPrototypeActive()) {
+			requestRender();
+		}
 	});
 }
 

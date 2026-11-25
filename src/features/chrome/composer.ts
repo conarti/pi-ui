@@ -30,8 +30,16 @@ import { setAppActionRunner, setRequestRender } from "../../shared/ui-action-bri
 import { setSessionMode } from "../plan-studio/index.ts";
 import { showPlanStudio } from "../plan-studio/studio-overlay.ts";
 import {
+	loadEffectiveConfig,
+	setSessionStyleOverride,
+} from "../tool-calls/command.ts";
+import type { ToolDensity } from "../tool-calls/types.ts";
+import {
 	cyclePrototypeVariant,
 	getActiveVariantMeta,
+	isPrototypeActive,
+	notifyPrototypeChanged,
+	renderPrototypeBorderWorkingStatus,
 } from "../transcript/prototype-state.ts";
 import { bindComposerWorkingIndicator, buildWaveIndicator } from "./working-indicator.ts";
 
@@ -147,6 +155,12 @@ interface EditorInternals {
 	isEditorEmpty(): boolean;
 	insertTextAtCursor(text: string): void;
 	buildVisualLineMap?(width: number): Array<{ logicalLine: number; startCol: number; length: number }>;
+	findCurrentVisualLine?(visualLines: Array<{ logicalLine: number; startCol: number; length: number }>): number;
+	moveToVisualLine?(
+		visualLines: Array<{ logicalLine: number; startCol: number; length: number }>,
+		currentVisualLine: number,
+		targetVisualLine: number,
+	): void;
 }
 
 export interface ComposerVisualSlice {
@@ -254,6 +268,12 @@ export class PiUiComposerEditor extends CustomEditor {
 		const { state } = this.internals();
 		const currentLine = state.lines[state.cursorLine] ?? "";
 		return state.cursorCol > 0 ? (currentLine[state.cursorCol - 1] ?? "") : "";
+	}
+
+	getCharAfterCursor(): string {
+		const { state } = this.internals();
+		const currentLine = state.lines[state.cursorLine] ?? "";
+		return state.cursorCol < currentLine.length ? (currentLine[state.cursorCol] ?? "") : "";
 	}
 
 	getVisualSlice(visualLineIndex: number, totalWidth?: number): ComposerVisualSlice | undefined {
@@ -713,6 +733,39 @@ export class PiUiComposerEditor extends CustomEditor {
 		}
 		if (!process.env.VITEST) {
 			const protoMeta = getActiveVariantMeta();
+			if (protoMeta) {
+				const effCfg = loadEffectiveConfig(ctx.cwd, ctx.isProjectTrusted());
+				const curDensity: ToolDensity = effCfg.density;
+				const densityLabels: Record<ToolDensity, string> = {
+					balanced: "Balanced ↻",
+					compact: "Compact ↻",
+					grouped: "Grouped ↻",
+					"diff-focus": "Diff ↻",
+					detailed: "Detailed ↻",
+				};
+				const cycleOrder: readonly ToolDensity[] = [
+					"balanced",
+					"compact",
+					"grouped",
+					"diff-focus",
+					"detailed",
+				];
+				allPills.push({
+					id: "density",
+					str: renderPill(densityLabels[curDensity] ?? "Balanced ↻", {
+						hovered: this.hoveredBadge === "density",
+						active: false,
+						variant: "neutral",
+						theme,
+					}),
+					onClick: () => {
+						const idx = cycleOrder.indexOf(curDensity);
+						const nextDensity = cycleOrder[(idx + 1) % cycleOrder.length] ?? "balanced";
+						setSessionStyleOverride({ style: nextDensity });
+						notifyPrototypeChanged();
+					},
+				});
+			}
 			const protoLabel = protoMeta ? protoMeta.pillLabel : "PROTO: off ↻";
 			allPills.push({
 				id: "proto",
@@ -723,6 +776,7 @@ export class PiUiComposerEditor extends CustomEditor {
 					theme,
 				}),
 				onClick: () => {
+					setSessionStyleOverride(undefined);
 					cyclePrototypeVariant();
 				},
 			});
@@ -747,7 +801,9 @@ export class PiUiComposerEditor extends CustomEditor {
 		if (anySelf.embedWorkingStatus && anySelf.workingStatusIndicator) {
 			const maxStatusW = Math.max(1, spanWidth - pillsWidth - 4);
 			let statusCandidate = anySelf.workingStatusIndicator.renderInBorder?.(maxStatusW) ?? "";
-			if (visibleWidth(statusCandidate) + pillsWidth + 4 > spanWidth) {
+			if (visibleWidth(statusCandidate) > 0 && isPrototypeActive()) {
+				statusCandidate = renderPrototypeBorderWorkingStatus(maxStatusW, { theme });
+			} else if (visibleWidth(statusCandidate) + pillsWidth + 4 > spanWidth) {
 				statusCandidate = anySelf.workingStatusIndicator.renderSpinnerInBorder?.(maxStatusW) ?? "";
 			}
 			if (visibleWidth(statusCandidate) > 0 && visibleWidth(statusCandidate) + pillsWidth + 3 <= spanWidth) {
@@ -878,7 +934,21 @@ export class PiUiComposerEditor extends CustomEditor {
 			out.push(`${leftPrefix}${cell}${rightSuffix}`);
 		}
 
-		out.push(`${bLine("╰")}${bLine("─".repeat(width - 2))}${bLine("╯")}`);
+		const { visualLines } = this.resolveBoxLayout(width);
+		const hiddenBelow = isPrototypeActive()
+			? Math.max(0, visualLines.length - (internal.scrollOffset + visibleRows))
+			: 0;
+		const bottomSpan = Math.max(0, width - 2);
+		const downBadge = hiddenBelow > 0 ? theme.fg("dim", ` ↓ ${hiddenBelow} `) : "";
+		const downBadgeW = visibleWidth(downBadge);
+		if (downBadgeW > 0 && downBadgeW + 4 <= bottomSpan) {
+			const rem = bottomSpan - downBadgeW;
+			const leftD = Math.floor(rem / 2);
+			const rightD = rem - leftD;
+			out.push(`${bLine("╰")}${bLine("─".repeat(leftD))}${downBadge}${bLine("─".repeat(rightD))}${bLine("╯")}`);
+		} else {
+			out.push(`${bLine("╰")}${bLine("─".repeat(bottomSpan))}${bLine("╯")}`);
+		}
 
 		for (let idx = visibleRows + 2; idx < baseLines.length; idx++) {
 			out.push(`    ${fitExactWidth(baseLines[idx] ?? "", innerWidth)}  `);
@@ -890,11 +960,44 @@ export class PiUiComposerEditor extends CustomEditor {
 	override handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		const hooks = getComposerHooks();
 		const totalWidth = event.width ?? 80;
-		const { compact, leftOffset, innerWidth } = this.resolveBoxLayout(totalWidth);
-		const visibleRows = this.internals().renderedVisibleLineCount ?? 1;
+		const { compact, leftOffset, innerWidth, visualLines } = this.resolveBoxLayout(totalWidth);
+		const internal = this.internals();
+		const visibleRows = internal.renderedVisibleLineCount ?? 1;
 		const autocompleteStartRow = visibleRows + 2;
 		const inBox = event.y >= 0 && event.y < autocompleteStartRow;
 		let hoverStateChanged = false;
+
+		/* Прокрутка колесом мыши внутри многострочного черновика Composer, когда текст переполняет видимое окно */
+		const evType = String(event.type);
+		if (
+			inBox &&
+			(evType === "wheel" || evType === "mouse_wheel_up" || evType === "mouse_wheel_down") &&
+			visualLines.length > visibleRows
+		) {
+			const maxScroll = Math.max(0, visualLines.length - visibleRows);
+			const step =
+				evType === "mouse_wheel_up"
+					? -2
+					: evType === "mouse_wheel_down"
+						? 2
+						: ((event as unknown as { deltaY?: number }).deltaY ?? 0) < 0
+							? -2
+							: 2;
+			const nextScroll = Math.max(0, Math.min(maxScroll, internal.scrollOffset + step));
+			if (nextScroll !== internal.scrollOffset) {
+				if (internal.findCurrentVisualLine && internal.moveToVisualLine) {
+					const curVL = internal.findCurrentVisualLine(visualLines);
+					const clampedVL = Math.max(nextScroll, Math.min(nextScroll + visibleRows - 1, curVL));
+					if (clampedVL !== curVL) {
+						internal.moveToVisualLine(visualLines, curVL, clampedVL);
+					}
+				}
+				internal.scrollOffset = nextScroll;
+				hooks?.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
+				return { handled: true, render: true };
+			}
+			return { handled: true, render: false };
+		}
 
 		if (event.type === "move") {
 			if (inBox) {

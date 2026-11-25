@@ -35,6 +35,7 @@ import { matchesLayoutChord } from "../../shared/keyboard-layout.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import { hookMethod } from "../../shared/runtime-hooks.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
+import { isPrototypeActive } from "../transcript/prototype-state.ts";
 import {
 	extractPastedImageFilesSync,
 	materializeClipboardImagePayload,
@@ -132,6 +133,15 @@ export function decorateComposerLineWithChips(line: string, theme: Theme): strin
 	);
 }
 
+function padChipTokenForComposer(editor: PiUiComposerEditor, tokenText: string): string {
+	if (!isPrototypeActive()) return tokenText;
+	const before = editor.getCharBeforeCursor();
+	const after = editor.getCharAfterCursor();
+	const lead = before.length > 0 && !/\s/u.test(before) ? " " : "";
+	const trail = after === " " ? "" : " ";
+	return `${lead}${tokenText}${trail}`;
+}
+
 export function insertQuoteChipInComposer(
 	editor: PiUiComposerEditor,
 	quoteText: string,
@@ -141,7 +151,7 @@ export function insertQuoteChipInComposer(
 	const registry = getActivePromptChipRegistry();
 	const preSnap = registry.captureUndoSnapshot();
 	const chip = registry.registerQuote(quoteText, sourceLabel);
-	editor.insertTextWithUndoSnapshot(chip.token, preSnap);
+	editor.insertTextWithUndoSnapshot(padChipTokenForComposer(editor, chip.token), preSnap);
 	requestRender();
 	return chip;
 }
@@ -411,7 +421,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 					}
 				}
 				if (tokens.length > 0) {
-					editor.insertTextWithUndoSnapshot(tokens.join(" "), preSnap);
+					editor.insertTextWithUndoSnapshot(padChipTokenForComposer(editor, tokens.join(" ")), preSnap);
 					syncComposerPreview(editor);
 					requestRender();
 				}
@@ -441,7 +451,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 				if (imageFiles && imageFiles.length > 0) {
 					const preSnap = registry.captureUndoSnapshot();
 					const tokens = imageFiles.map((img) => registry.registerImage(img).token);
-					editor.insertTextWithUndoSnapshot(tokens.join(" "), preSnap);
+					editor.insertTextWithUndoSnapshot(padChipTokenForComposer(editor, tokens.join(" ")), preSnap);
 					syncComposerPreview(editor);
 					requestRender();
 					return;
@@ -450,7 +460,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 				if (!isBashDraft(editor) && classified.shouldCreateChip) {
 					const preSnap = registry.captureUndoSnapshot();
 					const chip = registry.registerPaste(text);
-					editor.insertTextWithUndoSnapshot(chip.token, preSnap);
+					editor.insertTextWithUndoSnapshot(padChipTokenForComposer(editor, chip.token), preSnap);
 				} else if (classified.normalizedText.length > 0) {
 					editor.insertTextAtCursor(classified.normalizedText);
 				}

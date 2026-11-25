@@ -275,6 +275,43 @@ function installViewportChromeHooks(): void {
 
 	hookMethod(
 		altProto,
+		"routeWheel",
+		"viewport.dispatchComponentWheel",
+		(self, args, original) => {
+			const raw = args[0] as { x?: number; y?: number; button?: number } | undefined;
+			const delta = Number(args[1] ?? 0);
+			if (
+				raw &&
+				typeof raw.x === "number" &&
+				typeof raw.y === "number" &&
+				typeof self.createMouseEvent === "function" &&
+				typeof self.dispatchMouseToLayout === "function"
+			) {
+				const baseEvent = self.createMouseEvent("wheel", raw.button ?? 64, raw.x, raw.y);
+				const wheelEvent = { ...baseEvent, deltaY: delta };
+				const overlay =
+					typeof self.dispatchMouseToOverlay === "function"
+						? self.dispatchMouseToOverlay(wheelEvent)
+						: { hit: false, result: undefined };
+				const result =
+					overlay.result ?? (overlay.hit ? undefined : self.dispatchMouseToLayout(wheelEvent));
+				if (result) {
+					const shouldRender =
+						typeof self.applyMouseDispatchResult === "function"
+							? self.applyMouseDispatchResult(wheelEvent, result)
+							: true;
+					if (shouldRender) {
+						self.requestRender?.();
+					}
+					return;
+				}
+			}
+			return original.apply(self, args);
+		},
+	);
+
+	hookMethod(
+		altProto,
 		"beforeTerminalStart",
 		"viewport.beforeTerminalStart",
 		(self, args, original) => {

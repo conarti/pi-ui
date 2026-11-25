@@ -53,6 +53,7 @@ import {
 	trimDiffContext,
 	type CodeDiffLine,
 } from "./layout.ts";
+import { buildPrototypeStepHeaderParts } from "./step-summaries.ts";
 import type { RowState, ToolArgs, ToolDensity } from "./types.ts";
 
 export const COMMAND_PREVIEW_HEAD = 2;
@@ -523,11 +524,13 @@ function formatParentheticalMeta(
 		return ` ${pal.dim("(")}${added}${pal.dim(" ")}${removed}${durSuffix}${pal.dim(")")}`;
 	}
 
+	const resolvedNested = liveNestedSummary ?? densityMeta?.nestedSummary;
+	const suppressInternalLineCount =
+		isPrototypeActive() && name === "codemode" && Boolean(resolvedNested);
 	const parts: string[] = [];
-	if (densityMeta?.lineSummary) parts.push(densityMeta.lineSummary);
+	if (densityMeta?.lineSummary && !suppressInternalLineCount) parts.push(densityMeta.lineSummary);
 	if (duration) parts.push(duration);
 	const base = parts.length > 0 ? ` ${pal.dim(`(${parts.join(" · ")})`)}` : "";
-	const resolvedNested = liveNestedSummary ?? densityMeta?.nestedSummary;
 	const nested = resolvedNested ? `${pal.dim(" · ")}${resolvedNested}` : "";
 	return base + nested;
 }
@@ -657,9 +660,24 @@ export function renderDensityCall(options: {
 	getStatus: () => RowStatus;
 	syncRunning: (running: boolean) => void;
 	getNestedSummary?: () => string | undefined;
+	getStepSummary?: () => string | undefined;
+	cwd?: string;
 }): Component {
-	const { name, args, theme, state, getStatus, syncRunning, getNestedSummary } = options;
+	const { name, args, theme, state, getStatus, syncRunning, getNestedSummary, getStepSummary, cwd } = options;
 	syncRunning(getStatus() === "running");
+
+	const resolveHeader = (status: RowStatus) =>
+		isPrototypeActive()
+			? buildPrototypeStepHeaderParts({
+					name,
+					args,
+					status,
+					rawPath: pathOf(args),
+					stepSummary: getStepSummary?.(),
+					cwd,
+					summarizeCustomArgs: summarizeCustomArguments,
+				})
+			: buildHeaderParts(name, args, status);
 
 	return new DensityLiveLines(
 		() => {
@@ -668,7 +686,7 @@ export function renderDensityCall(options: {
 			const expanded = state.expanded === true;
 			const elapsedBucket = status === "running" ? String(getAnimationElapsedMs()) : "settled";
 			const d = state.density;
-			const { verb, target } = buildHeaderParts(name, args, status);
+			const { verb, target } = resolveHeader(status);
 			const liveNested = getNestedSummary?.() ?? d?.nestedSummary ?? "";
 			return [
 				status,
@@ -689,7 +707,7 @@ export function renderDensityCall(options: {
 			const status = getStatus();
 			const expanded = state.expanded === true;
 			const diamond = pal.diamond(status, expanded, hovered);
-			const { verb, target } = buildHeaderParts(name, args, status);
+			const { verb, target } = resolveHeader(status);
 			const styledVerb = pal.title(verb, status, expanded, hovered);
 			const styledTarget = target ? ` ${pal.target(target, expanded, hovered)}` : "";
 			const meta = formatParentheticalMeta(pal, status, state, name, getNestedSummary?.());
@@ -705,7 +723,7 @@ export function renderDensityCall(options: {
 			const head = `${leadPrefix}${diamond} ${styledVerb}${styledTarget}${meta}${hoverChevron}`;
 			const lines = [truncateToWidth(head, usableWidth, "…")];
 
-			if (status === "running" && isCommandLikeTool(name) && !state.density) {
+			if (!protoOn && status === "running" && isCommandLikeTool(name) && !state.density) {
 				const subPad = protoOn ? "    " : "   ";
 				const avail = Math.max(1, usableWidth - (protoOn ? 6 : 5));
 				const bar = paintDensityWaveGlyph(pal.theme, pal.light, 1, "▎");

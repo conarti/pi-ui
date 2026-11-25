@@ -30,6 +30,10 @@ import { createModalCard, openModalCard } from "../../shared/modal-card.ts";
 import { claimHover, copyToClipboard } from "../../shared/runtime-hooks.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
 import {
+	formatWorkspacePath,
+	resolveExternalToolSummary,
+} from "../tool-calls/step-summaries.ts";
+import {
 	beginWorkingTurn,
 	getPrototypeVariant,
 	isPrototypeActive,
@@ -350,62 +354,70 @@ export class ResponseMetricsRowComponent implements Component {
 		const ttftLabel =
 			computed.ttftMs !== undefined ? `ttft ${formatMetricsDuration(computed.ttftMs)}` : undefined;
 		const totalLabel = formatMetricsDuration(elapsedMs);
-		const timeLabel = formatClockTime(this.data.completedAt || this.data.timestamp);
+		const fullDateLabel = formatFullDateTime(this.data.completedAt || this.data.timestamp);
 
+		const hoverAccent = (s: string) =>
+			light ? fgRgb(37, 99, 235, s) : fgRgb(136, 196, 252, s);
+		const hoverSoft = (s: string) =>
+			light ? fgRgb(59, 114, 228, s) : fgRgb(112, 168, 226, s);
 		const dimFg = (s: string) =>
-			light ? fgRgb(120, 134, 156, s) : fgRgb(104, 118, 142, s);
+			this.hovered
+				? hoverSoft(s)
+				: light
+					? fgRgb(120, 134, 156, s)
+					: fgRgb(104, 118, 142, s);
 		const valFg = (s: string) =>
 			this.hovered
-				? light
-					? fgRgb(29, 78, 216, s)
-					: fgRgb(145, 198, 252, s)
+				? hoverAccent(s)
 				: light
 					? fgRgb(78, 94, 118, s)
 					: fgRgb(136, 152, 178, s);
-		const accentFg = (s: string) =>
-			light ? fgRgb(37, 99, 235, s) : fgRgb(110, 182, 248, s);
 		const sep = dimFg(" · ");
 
 		const lines: string[] = [];
 
 		if (variant === "A") {
 			const parts: string[] = [
-				`${this.hovered ? accentFg("◈") : dimFg("✓")} ${valFg(`Worked for ${totalLabel}`)}`,
+				`${dimFg("✓")} ${valFg(`Worked for ${totalLabel}`)}`,
 			];
 			if (ttftLabel) parts.push(dimFg(ttftLabel));
 			if (speedLabel) parts.push(valFg(speedLabel));
-			parts.push(dimFg(timeLabel));
-			if (this.hovered) {
-				parts.push(accentFg("stats ↗"));
-			}
+			parts.push(dimFg(fullDateLabel));
 			const row = truncateToWidth(`  ${parts.join(sep)}`, usableWidth, "…");
 			lines.push(padFullWidth(row));
 		} else if (variant === "B") {
+			/* Hybrid A + B: left `✓ Worked for Xs`, center `┄` hairline, right `ttft · tok/s · YYYY-MM-DD HH:MM`,
+			   with zero character replacement or width shift on hover. */
+			const leftBlock = `  ${dimFg("✓")} ${valFg(`Worked for ${totalLabel}`)}`;
 			const rightParts: string[] = [];
-			if (speedLabel) rightParts.push(valFg(speedLabel));
 			if (ttftLabel) rightParts.push(dimFg(ttftLabel));
-			rightParts.push(valFg(`turn ${totalLabel}`));
-			rightParts.push(this.hovered ? accentFg("stats ↗") : dimFg(timeLabel));
-			const leadGlyph = this.hovered ? accentFg("❖") : dimFg("❖");
-			const rightBlock = `  ${leadGlyph} ${rightParts.join(sep)}`;
+			if (speedLabel) rightParts.push(valFg(speedLabel));
+			rightParts.push(dimFg(fullDateLabel));
+			const rightBlock = rightParts.join(sep);
+
+			const leftW = visibleWidth(leftBlock);
 			const rightW = visibleWidth(rightBlock);
-			const ruleBudget = Math.max(0, usableWidth - rightW - 2);
+			const gapBudget = usableWidth - leftW - rightW;
 			const ruleColor = (s: string) =>
 				this.hovered
 					? light
 						? fgRgb(147, 197, 253, s)
-						: fgRgb(62, 88, 126, s)
+						: fgRgb(68, 98, 142, s)
 					: light
-						? fgRgb(212, 222, 236, s)
+						? fgRgb(214, 224, 238, s)
 						: fgRgb(46, 56, 74, s);
-			if (ruleBudget >= 6) {
-				const rule = `  ${ruleColor("┄".repeat(ruleBudget))}`;
-				const full = truncateToWidth(`${rule}${rightBlock}`, usableWidth, "…");
+
+			if (gapBudget >= 6) {
+				const rule = ` ${ruleColor("┄".repeat(gapBudget - 2))} `;
+				const full = truncateToWidth(`${leftBlock}${rule}${rightBlock}`, usableWidth, "…");
+				lines.push(padFullWidth(full));
+			} else if (gapBudget >= 2) {
+				const pad = " ".repeat(gapBudget);
+				const full = truncateToWidth(`${leftBlock}${pad}${rightBlock}`, usableWidth, "…");
 				lines.push(padFullWidth(full));
 			} else {
-				const pad = " ".repeat(Math.max(0, usableWidth - rightW));
-				const full = truncateToWidth(`${pad}${rightBlock}`, usableWidth, "…");
-				lines.push(padFullWidth(full));
+				const compact = truncateToWidth(`${leftBlock}${sep}${rightBlock}`, usableWidth, "…");
+				lines.push(padFullWidth(compact));
 			}
 		} else {
 			/* Variant C: two-zone instrument strip with right clearance */
@@ -882,19 +894,25 @@ function extractUsage(message: unknown): {
 	};
 }
 
-function describeToolAction(toolName: string, rawArgs: unknown): string {
-	const args = isRecord(rawArgs) ? rawArgs : {};
-	if (typeof args.toolSummary === "string" && args.toolSummary.trim()) {
-		const s = args.toolSummary.trim();
-		return s.endsWith("…") ? s : `${s}…`;
+function describeToolAction(
+	toolName: string,
+	rawArgs: unknown,
+	toolCallId?: string,
+	sessionEntries?: readonly unknown[],
+	cwd?: string,
+): string {
+	const external = resolveExternalToolSummary(toolCallId, rawArgs, sessionEntries);
+	if (external) {
+		return external.endsWith("…") ? external : `${external}…`;
 	}
+	const args = isRecord(rawArgs) ? rawArgs : {};
 	const rawPath =
 		typeof args.path === "string"
 			? args.path
 			: typeof args.file_path === "string"
 				? args.file_path
 				: "";
-	const shortPath = rawPath ? basename(rawPath) || rawPath : "";
+	const shortPath = rawPath ? formatWorkspacePath(rawPath, cwd) || basename(rawPath) : "";
 
 	switch (toolName) {
 		case "read":
@@ -1022,11 +1040,11 @@ export function registerResponseMetricsFeature(pi: ExtensionAPI): void {
 			if (isMeaningfulAssistantUpdate(subEvent)) {
 				if (subEvent?.type === "thinking_delta" || subEvent?.type === "thinking_end") {
 					const intent = extractLatestThinkingFromMessage(event.message);
-					markWorkingPhase("thinking", { now, summary: intent ?? "Thinking…" });
+					markWorkingPhase("thinking", { now, summary: intent });
 				} else if (subEvent?.type === "toolcall_delta" || subEvent?.type === "toolcall_end") {
 					markWorkingPhase("tool", { now });
 				} else if (subEvent?.type === "text_delta" || subEvent?.type === "text_end") {
-					markWorkingPhase("text", { now, summary: "Responding…" });
+					markWorkingPhase("text", { now, summary: "Drafting…" });
 				}
 			}
 
@@ -1041,9 +1059,25 @@ export function registerResponseMetricsFeature(pi: ExtensionAPI): void {
 			}
 		});
 
-		pi.on("tool_execution_start", (event) => {
+		pi.on("tool_execution_start", (event, ctx) => {
+			if (typeof (event as { parentToolCallId?: unknown }).parentToolCallId === "string") return;
 			const rawArgs = (event as { args?: unknown }).args;
-			markWorkingPhase("tool", { summary: describeToolAction(event.toolName, rawArgs) });
+			const sm = (ctx ?? activeCtx)?.sessionManager;
+			const entries = sm?.getEntries?.() ?? sm?.getBranch?.();
+			markWorkingPhase("tool", {
+				summary: describeToolAction(
+					event.toolName,
+					rawArgs,
+					event.toolCallId,
+					entries,
+					(ctx ?? activeCtx)?.cwd,
+				),
+			});
+		});
+
+		pi.on("tool_execution_end", (event) => {
+			if (typeof (event as { parentToolCallId?: unknown }).parentToolCallId === "string") return;
+			markWorkingPhase("thinking", { lingerPrevious: true });
 		});
 
 		pi.on("message_end", (event, ctx) => {
