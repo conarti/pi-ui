@@ -1,6 +1,9 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+export const EXPECTED_PI_HOST_VERSION = "1.6.1";
 
 export const HOST_PEER_PACKAGES = [
 	"@earendil-works/pi-coding-agent",
@@ -98,6 +101,27 @@ export function resolveHostPiPeers() {
 	return { codingAgentDir, packages };
 }
 
+export function readHostPiVersion(codingAgentDir = findHostPiCodingAgentDir()) {
+	const pkg = JSON.parse(readFileSync(join(codingAgentDir, "package.json"), "utf8"));
+	return String(pkg.version ?? "");
+}
+
+export function compareSemver(a, b) {
+	const parse = (v) =>
+		String(v)
+			.replace(/^v/, "")
+			.split("-")[0]
+			.split(".")
+			.map((n) => Number.parseInt(n, 10) || 0);
+	const pa = parse(a);
+	const pb = parse(b);
+	for (let i = 0; i < 3; i += 1) {
+		const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
+		if (diff !== 0) return diff;
+	}
+	return 0;
+}
+
 function pickExportTarget(target) {
 	if (typeof target === "string") return target;
 	if (target && typeof target === "object") {
@@ -154,4 +178,23 @@ export function buildHostPeerAliases() {
 	}
 
 	return aliases;
+}
+
+const isMain =
+	process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+
+if (isMain) {
+	const arg = process.argv[2];
+	if (arg === "--print-expected-version") {
+		console.log(EXPECTED_PI_HOST_VERSION);
+	} else if (arg === "--print-installed-version") {
+		console.log(readHostPiVersion());
+	} else {
+		const { codingAgentDir, packages } = resolveHostPiPeers();
+		if (arg === "--print-dir") {
+			console.log(codingAgentDir);
+		} else {
+			console.log(JSON.stringify({ expectedVersion: EXPECTED_PI_HOST_VERSION, installedVersion: readHostPiVersion(codingAgentDir), packages }, null, 2));
+		}
+	}
 }

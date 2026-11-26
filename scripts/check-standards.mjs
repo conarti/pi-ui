@@ -2,7 +2,12 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { HOST_PEER_PACKAGES } from "./resolve-host-pi.mjs";
+import {
+	compareSemver,
+	EXPECTED_PI_HOST_VERSION,
+	HOST_PEER_PACKAGES,
+	readHostPiVersion,
+} from "./resolve-host-pi.mjs";
 
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -595,6 +600,13 @@ export function findTestAntiMockViolations(sourceText, options = {}) {
 					"do not access private .overlayStack in tests (use hasBlockingModalOverlay(tui) or terminal screen assertions)",
 			});
 		}
+		if (prop.value === "hasOverlayEntries") {
+			violations.push({
+				line: prop.line,
+				message:
+					"do not access .hasOverlayEntries; use hasBlockingModalOverlay(tui) from src/shared/modal-card.ts",
+			});
+		}
 	}
 
 	for (const match of codeText.matchAll(BANNED_TEST_SYMBOL_RE)) {
@@ -628,6 +640,14 @@ export function findTestAntiMockViolations(sourceText, options = {}) {
 		});
 	}
 
+	for (const match of codeText.matchAll(/\.\s*hasOverlayEntries\b/g)) {
+		violations.push({
+			line: lineAtOffset(match.index ?? 0),
+			message:
+				"do not access .hasOverlayEntries; use hasBlockingModalOverlay(tui) from src/shared/modal-card.ts",
+		});
+	}
+
 	if (!isPureUnit) {
 		for (const match of codeText.matchAll(/\.\s*handleMouse\s*(?:\?\.\s*)?\(/g)) {
 			violations.push({
@@ -639,6 +659,83 @@ export function findTestAntiMockViolations(sourceText, options = {}) {
 	}
 
 	return violations.sort((a, b) => a.line - b.line);
+}
+
+/**
+ * Находит строки с нестандартным символом закрытия `✕` (`\u2715`) вне комментариев,
+ * чтобы все модалки, баннеры и попапы использовали единый глиф `×` (`[×]`).
+ */
+export function findDisallowedCloseGlyphLines(sourceText) {
+	const out = Array.from(sourceText);
+	const len = sourceText.length;
+	let i = 0;
+
+	const skipBreak = (idx) => {
+		if (sourceText[idx] === "\r") return sourceText[idx + 1] === "\n" ? 2 : 1;
+		if (sourceText[idx] === "\n") return 1;
+		return 0;
+	};
+
+	while (i < len) {
+		const step = skipBreak(i);
+		if (step > 0) {
+			i += step;
+			continue;
+		}
+		const ch = sourceText[i];
+		const next = sourceText[i + 1];
+		if (ch === "/" && next === "/") {
+			while (i < len && sourceText[i] !== "\n" && sourceText[i] !== "\r") {
+				out[i] = " ";
+				i += 1;
+			}
+			continue;
+		}
+		if (ch === "/" && next === "*") {
+			out[i] = " ";
+			out[i + 1] = " ";
+			i += 2;
+			while (i < len && !(sourceText[i] === "*" && sourceText[i + 1] === "/")) {
+				const br = skipBreak(i);
+				if (br > 0) {
+					i += br;
+					continue;
+				}
+				out[i] = " ";
+				i += 1;
+			}
+			if (i < len) {
+				out[i] = " ";
+				if (i + 1 < len) out[i + 1] = " ";
+				i += 2;
+			}
+			continue;
+		}
+		if (ch === "'" || ch === '"' || ch === "`") {
+			const quote = ch;
+			i += 1;
+			while (i < len && sourceText[i] !== quote) {
+				if (sourceText[i] === "\\") {
+					i += 2;
+					continue;
+				}
+				i += 1;
+			}
+			i += 1;
+			continue;
+		}
+		i += 1;
+	}
+
+	const stripped = out.join("");
+	const lines = stripped.split(/\r?\n/);
+	const badLines = [];
+	for (let idx = 0; idx < lines.length; idx += 1) {
+		if (/\u2715|\\u2715/i.test(lines[idx])) {
+			badLines.push(idx + 1);
+		}
+	}
+	return badLines;
 }
 
 export function validateCommitMessage(rawMessage) {
@@ -706,6 +803,15 @@ function parseAddedLinesFromGitDiff(rootDir) {
 
 export function checkRepositoryStandards(rootDir = ROOT_DIR) {
 	const errors = [];
+
+	if (resolve(rootDir) === ROOT_DIR) {
+		const installedHostVersion = readHostPiVersion();
+		if (compareSemver(installedHostVersion, EXPECTED_PI_HOST_VERSION) < 0) {
+			errors.push(
+				`Host @earendil-works/pi-coding-agent (${installedHostVersion}) is older than CI target ${EXPECTED_PI_HOST_VERSION}; upgrade global pi for CI parity`,
+			);
+		}
+	}
 
 	/* 1. Изоляция host peer пакетов и ресурсов пакета */
 	if (existsSync(join(rootDir, "node_modules", "@earendil-works"))) {
@@ -789,9 +895,9 @@ export function checkRepositoryStandards(rootDir = ROOT_DIR) {
 	for (const file of walkFiles(join(rootDir, "src"))) {
 		if (!file.endsWith(".ts")) continue;
 		const rel = relative(rootDir, file).replaceAll("\\", "/");
-		const { codeText, moduleSpecifiers, lineAtOffset } = scanTypeScriptCode(
-			readFileSync(file, "utf8"),
-		);
+		const rawSrc = readFileSync(file, "utf8");
+		const { codeText, moduleSpecifiers, bracketProperties, lineAtOffset } =
+			scanTypeScriptCode(rawSrc);
 		for (const spec of moduleSpecifiers) {
 			if (BANNED_FAKE_MODULE_RE.test(spec.value)) {
 				errors.push(`${rel}:${spec.line}: do not import fake-host module "${spec.value}" in src/`);
@@ -800,6 +906,23 @@ export function checkRepositoryStandards(rootDir = ROOT_DIR) {
 		for (const match of codeText.matchAll(BANNED_SRC_SYMBOL_RE)) {
 			errors.push(
 				`${rel}:${lineAtOffset(match.index ?? 0)}: do not reintroduce test-adapter backdoor or fake-host symbol "${match[1]}" in src/ (ADR-0006)`,
+			);
+		}
+		for (const match of codeText.matchAll(/\.\s*hasOverlayEntries\b/g)) {
+			errors.push(
+				`${rel}:${lineAtOffset(match.index ?? 0)}: do not access .hasOverlayEntries; use hasBlockingModalOverlay(tui) from src/shared/modal-card.ts`,
+			);
+		}
+		for (const prop of bracketProperties) {
+			if (prop.value === "hasOverlayEntries") {
+				errors.push(
+					`${rel}:${prop.line}: do not access .hasOverlayEntries; use hasBlockingModalOverlay(tui) from src/shared/modal-card.ts`,
+				);
+			}
+		}
+		for (const badLine of findDisallowedCloseGlyphLines(rawSrc)) {
+			errors.push(
+				`${rel}:${badLine}: use standardized close glyph "×" ("[×]") instead of "✕"`,
 			);
 		}
 	}

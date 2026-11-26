@@ -20,8 +20,10 @@ jobs:
           mkdir -p "$RUNNER_TEMP/pi-bin"
           ln -s "$(command -v fdfind)" "$RUNNER_TEMP/pi-bin/fd"
           echo "$RUNNER_TEMP/pi-bin" >> "$GITHUB_PATH"
-      - name: Install host Pi runtime outside project node_modules
-        run: npm install -g @earendil-works/pi-coding-agent
+      - name: Install pinned host Pi runtime outside project node_modules
+        run: |
+          PI_HOST_VERSION="$(node scripts/resolve-host-pi.mjs --print-expected-version)"
+          npm install -g "@earendil-works/pi-coding-agent@${PI_HOST_VERSION}"
       - name: Install dev dependencies with peer isolation
         run: npm ci --legacy-peer-deps
       - name: Run standards lint, typecheck, and test suite

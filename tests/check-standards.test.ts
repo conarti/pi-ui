@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	checkRepositoryStandards,
+	findDisallowedCloseGlyphLines,
 	findSingleLineCommentLines,
 	findTestAntiMockViolations,
 	validateCommitMessage,
@@ -64,7 +65,8 @@ describe("check-standards mechanical guardrails", () => {
 			"component.handleMouse?.(event);",
 			'vi.mock("./harness/fake-theme.ts");',
 			"optionalTarget?.handleMouse(event);",
-			"/* FakeTui tui.overlayStack comp.handleMouse(ev) raw as unknown as TUI */",
+			"const legacyOverlayCheck = tui.hasOverlayEntries;",
+			"/* FakeTui tui.overlayStack tui.hasOverlayEntries comp.handleMouse(ev) raw as unknown as TUI */",
 			'const safeLiteral = "FakeTui tui.overlayStack comp.handleMouse(ev) as unknown as TUI";',
 			"const safeTemplate = `createExtensionHarness ${1 + 1} tui.overlayStack`;",
 			"const safeRegex = /tui\\.overlayStack|comp\\.handleMouse\\(/g;",
@@ -90,10 +92,11 @@ describe("check-standards mechanical guardrails", () => {
 		expect(byLine.get(9)?.some((m) => m.includes("handleMouse"))).toBe(true);
 		expect(byLine.get(10)?.some((m) => m.includes("fake-theme"))).toBe(true);
 		expect(byLine.get(11)?.some((m) => m.includes("handleMouse"))).toBe(true);
-		expect(byLine.has(12)).toBe(false);
+		expect(byLine.get(12)?.some((m) => m.includes("hasOverlayEntries"))).toBe(true);
 		expect(byLine.has(13)).toBe(false);
 		expect(byLine.has(14)).toBe(false);
 		expect(byLine.has(15)).toBe(false);
+		expect(byLine.has(16)).toBe(false);
 
 		const pureUnitViolations = findTestAntiMockViolations("widget.handleMouse(ev);\nconst bad = x as unknown as TUI;", {
 			isPureUnit: true,
@@ -123,7 +126,7 @@ describe("check-standards mechanical guardrails", () => {
 			writeFileSync(join(tmpRoot, "tests", "harness", "fake-tui.ts"), "export const x = 1;\n", "utf8");
 			writeFileSync(
 				join(tmpRoot, "src", "shared", "host-runtime.ts"),
-				"export function setHostRuntimeAdapter() {}\n",
+				'export function setHostRuntimeAdapter(tui: { hasOverlayEntries?: boolean }) { return tui.hasOverlayEntries ? "[✕]" : "[×]"; }\n',
 				"utf8",
 			);
 			writeFileSync(
@@ -135,6 +138,9 @@ describe("check-standards mechanical guardrails", () => {
 			const errors = checkRepositoryStandards(tmpRoot);
 			expect(errors.some((e) => e.includes("tests/harness/fake-tui.ts"))).toBe(true);
 			expect(errors.some((e) => e.includes("setHostRuntimeAdapter"))).toBe(true);
+			expect(errors.some((e) => e.includes("hasOverlayEntries"))).toBe(true);
+			expect(errors.some((e) => e.includes('standardized close glyph "×"'))).toBe(true);
+			expect(findDisallowedCloseGlyphLines('/* ✕ allowed in comment */\nconst ok = "[×]";\nconst bad = "[✕]";')).toEqual([3]);
 			expect(errors.some((e) => e.includes("tests/sample-integration.test.ts:1:"))).toBe(true);
 			expect(errors.some((e) => e.includes("tests/sample-integration.test.ts:2:"))).toBe(true);
 		} finally {

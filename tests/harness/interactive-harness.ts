@@ -421,6 +421,8 @@ interface InteractiveModeInternals {
 		setThemeName?: (themeName: string, showError?: boolean) => { success: boolean; error?: string };
 		setThemeSetting?: (setting: string) => void;
 	};
+	registerSignalHandlers?: () => void;
+	unregisterSignalHandlers?: () => void;
 	handleReloadCommand(): Promise<void>;
 	switchTuiMode(mode: TuiMode, restoreProgress?: boolean, startRenderer?: boolean): boolean;
 }
@@ -996,8 +998,11 @@ export async function createInteractiveHarness(
 		initialThemeSetting: resolvedThemeName,
 	});
 	const internals = mode as unknown as InteractiveModeInternals;
+	/* Отключаем глобальные обработчики TTY-сигналов и uncaughtCrash -> process.exit(1), чтобы Vitest видел реальный стектрейс */
+	internals.registerSignalHandlers = () => {};
 
 	await mode.init();
+	internals.unregisterSignalHandlers?.();
 	await flushMicrotasksAndTicks(4);
 
 	/* Перенаправляем copyOnSelect в виртуальный терминал и изолированный буфер обмена вместо системного pbcopy */
