@@ -346,6 +346,11 @@ export class WorkingStatusController {
 			this.contextualExpiresAt = undefined;
 		}
 
+		if (this.phase === "tool") {
+			const active = [...this.activeTools.values()].at(-1);
+			if (active) this.tryAdoptContextualSummary(active, now);
+		}
+
 		const elapsedMs =
 			this.turnStartedAt !== undefined ? Math.max(0, now - this.turnStartedAt) : 0;
 		const label =

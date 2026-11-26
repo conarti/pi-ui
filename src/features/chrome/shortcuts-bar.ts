@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { FooterComponent, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import {
 	truncateToWidth,
 	visibleWidth,
@@ -10,7 +10,8 @@ import { fgRgb, isLightTheme, type HitBox, type RgbTuple } from "../../shared/an
 import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { t } from "../../shared/i18n.ts";
 import { loadPiUiUserConfig } from "../../shared/pi-ui-config.ts";
-import { claimHover } from "../../shared/runtime-hooks.ts";
+import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
+import { isSlotOwnedByPiUi } from "../../shared/slot-arbitration.ts";
 import { runAppAction } from "../../shared/ui-action-bridge.ts";
 import { showCommandPalette } from "../command-palette/index.ts";
 import { cycleSessionMode } from "../plan-approval/index.ts";
@@ -47,7 +48,7 @@ export function getParkedAskUserController(): ParkedAskUserController | undefine
 }
 
 interface ShortcutsBarSlotState {
-	ownsFooter: boolean;
+	registered: boolean;
 	pi?: ExtensionAPI;
 	ctx?: ExtensionContext;
 }
@@ -55,7 +56,7 @@ interface ShortcutsBarSlotState {
 function getBarSlotState(): ShortcutsBarSlotState {
 	const g = globalThis as Record<symbol, ShortcutsBarSlotState | undefined>;
 	if (!g[SHORTCUTS_BAR_STATE_KEY]) {
-		g[SHORTCUTS_BAR_STATE_KEY] = { ownsFooter: false };
+		g[SHORTCUTS_BAR_STATE_KEY] = { registered: false };
 	}
 	return g[SHORTCUTS_BAR_STATE_KEY]!;
 }
@@ -355,10 +356,22 @@ export function mountShortcutsBar(pi: ExtensionAPI, ctx: ExtensionContext): void
 	const state = getBarSlotState();
 	state.pi = pi;
 	state.ctx = ctx;
+	/* После снятия фабрики хост возвращает штатный футер; скрываем только его, не стороннюю фабрику. */
+	hookMethod(FooterComponent.prototype, "render", "shortcutsBar.hideNativeFooter", (self, args, original) => {
+		const state = getBarSlotState();
+		return state.ctx && !state.registered && isSlotOwnedByPiUi("footer") ? [] : original.apply(self, args);
+	});
+	syncShortcutsBar();
+}
 
-	/* Всегда регистрируем фабрику через Slot Arbitration, чтобы она кэшировалась для мгновенного live-переключения */
-	state.ownsFooter = true;
-	ctx.ui.setFooter((tui, _theme) => {
+export function syncShortcutsBar(): void {
+	const state = getBarSlotState();
+	const { pi, ctx } = state;
+	if (!pi || !ctx) return;
+	const enabled = loadPiUiUserConfig().showShortcutsBar;
+	if (state.registered === enabled) return;
+	state.registered = enabled;
+	ctx.ui.setFooter(!enabled ? undefined : (tui) => {
 		return new ShortcutsBarComponent(
 			pi,
 			ctx,
@@ -370,7 +383,7 @@ export function mountShortcutsBar(pi: ExtensionAPI, ctx: ExtensionContext): void
 
 export function disposeShortcutsBar(): void {
 	const state = getBarSlotState();
-	state.ownsFooter = false;
+	state.registered = false;
 	state.pi = undefined;
 	state.ctx = undefined;
 }

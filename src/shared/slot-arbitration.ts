@@ -12,6 +12,7 @@ import {
 	neutralizeRunnerExtensions,
 } from "./extension-superseder.ts";
 import { getActiveHostRuntime } from "./host-runtime.ts";
+import { hasBlockingModalOverlay } from "./modal-card.ts";
 import { loadPiUiUserConfig, updatePiUiUserConfig } from "./pi-ui-config.ts";
 import { hookMethod } from "./runtime-hooks.ts";
 import { requestRender } from "./ui-action-bridge.ts";
@@ -55,6 +56,7 @@ export type SlotArbitrationModalOpener = (
 	ctx: ExtensionContext,
 	slots: ContendedSlotSnapshot[],
 	mode: SlotArbitrationPromptMode,
+	onShown: () => void,
 ) => Promise<void>;
 
 export type SlotOwnershipChangeListener = (slotId: string, ownerId: string) => void;
@@ -688,9 +690,6 @@ class SessionArbitrationController {
 			if (candidates.has(saved)) {
 				return { ownerId: saved, value: candidates.get(saved) };
 			}
-			if (slot === "footer" && candidates.size <= 1 && saved !== PI_UI_OWNER_ID) {
-				return { ownerId: saved, value: undefined };
-			}
 		}
 
 		if (candidates.has(PI_UI_OWNER_ID)) {
@@ -708,6 +707,10 @@ class SessionArbitrationController {
 			fallbackValue = val;
 		}
 		return { ownerId: fallbackOwner, value: fallbackValue };
+	}
+
+	getAppliedSingletonOwner(slot: SingletonUiSlot): string {
+		return this.appliedSingletonOwners[slot] ?? PI_UI_OWNER_ID;
 	}
 
 	applySingletonSlot(slot: SingletonUiSlot, force: boolean): void {
@@ -997,7 +1000,7 @@ class SessionArbitrationController {
 		});
 	}
 
-	private schedulePromptIfUnsettled(): void {
+	private schedulePromptIfUnsettled(delay = 0): void {
 		if (this.disposed || this.modalOpen) return;
 		if (this.runner.mode !== "tui" || !this.runner.hasUI?.()) return;
 		const unsettled = this.getUnsettledCollisions();
@@ -1009,7 +1012,7 @@ class SessionArbitrationController {
 		this.pendingPromptTimer = setTimeout(() => {
 			this.pendingPromptTimer = undefined;
 			void this.openBatchedStartupModal();
-		}, 0);
+		}, delay);
 	}
 
 	private async openBatchedStartupModal(): Promise<void> {
@@ -1021,19 +1024,25 @@ class SessionArbitrationController {
 		const unsettled = this.getUnsettledCollisions();
 		if (unsettled.length === 0) return;
 
-		for (const slot of unsettled) {
-			this.promptedSlots.add(slot.slotId);
-		}
-
 		const ctx = this.runner.createContext?.();
 		if (!ctx || ctx.mode !== "tui" || !ctx.hasUI) return;
+		const tui = getActiveHostRuntime()?.tui;
+		if (tui && hasBlockingModalOverlay(tui)) {
+			this.schedulePromptIfUnsettled(100);
+			return;
+		}
 
 		this.modalOpen = true;
+		let shown = false;
 		try {
-			await opener(ctx, unsettled, "startup");
+			await opener(ctx, unsettled, "startup", () => {
+				shown = true;
+				for (const slot of unsettled) this.promptedSlots.add(slot.slotId);
+			});
 		} finally {
 			this.modalOpen = false;
 		}
+		if (!shown) this.schedulePromptIfUnsettled(100);
 	}
 
 	resolveCommandsHook(original: () => unknown[]): unknown[] {
@@ -1482,6 +1491,7 @@ export function getContendedSlots(): ContendedSlotSnapshot[] {
 export function getActiveSlotOwner(slotId: string): string {
 	const ctrl = getGlobalState().activeController;
 	if (ctrl) {
+		if (isSingletonSlot(slotId)) return ctrl.getAppliedSingletonOwner(slotId);
 		const slots = ctrl.getContendedSlots();
 		const match = slots.find((s) => s.slotId === slotId);
 		if (match) return match.activeOwnerId;

@@ -21,6 +21,7 @@ import {
 } from "../../shared/ansi.ts";
 import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
+import { t } from "../../shared/i18n.ts";
 import {
 	claimHover,
 	copyToClipboard,
@@ -56,6 +57,7 @@ export interface PromptPillDescriptor {
 	readonly id: string;
 	readonly label: string;
 	readonly onClick?: (screenX: number, screenY: number) => void;
+	readonly onHover?: (screenX: number, screenY: number) => void;
 }
 
 export interface PromptPillFormatContext {
@@ -86,6 +88,7 @@ export interface PromptCardHitBox {
 export interface PromptPillHitTarget extends PromptCardHitBox {
 	readonly id: string;
 	readonly onClick?: (screenX: number, screenY: number) => void;
+	readonly onHover?: (screenX: number, screenY: number) => void;
 }
 
 export interface RenderUserPromptCardOptions {
@@ -384,6 +387,7 @@ function extractAndStripPillHits(
 					xStart: prefixWidth + activePill.startCol,
 					xEnd: prefixWidth + col,
 					onClick: desc.onClick,
+					onHover: desc.onHover,
 				});
 			}
 			activePill = undefined;
@@ -414,6 +418,7 @@ function extractAndStripPillHits(
 				xStart: prefixWidth + activePill.startCol,
 				xEnd: prefixWidth + col,
 				onClick: desc.onClick,
+				onHover: desc.onHover,
 			});
 		}
 	}
@@ -502,10 +507,10 @@ export function renderUserPromptCardLines(
 
 	const outerPad = computeOuterCanvasMargin(width);
 	const outerMargin = " ".repeat(outerPad);
-	const cardWidth = Math.max(12, width - outerPad * 2);
+	const cardWidth = width - outerPad * 2;
 
-	const leftPad = cardWidth >= 28 ? "  " : " ";
-	const rightPad = cardWidth >= 28 ? "  " : " ";
+	const leftPad = "  ";
+	const rightPad = "  ";
 	const firstPrefix = `${leftPad}${themeFgRgb(theme, chevronRgb, "› ")}`;
 	const prefixWidth = leftPad.length + 2;
 	const nextPrefix = " ".repeat(prefixWidth);
@@ -546,7 +551,7 @@ export function renderUserPromptCardLines(
 			const trimmedLast = visibleRows[lastIdx]!.replace(/\s+$/, "");
 			const foldHint =
 				options.surface === "sticky"
-					? ` · +${hidden} ${hidden === 1 ? "line" : "lines"} (Alt+s)`
+					? t(hidden === 1 ? "sticky.foldLine" : "sticky.foldLines", { count: hidden })
 					: "…";
 			const hintWidth = visibleWidth(foldHint);
 			const styledHint = themeFgRgb(theme, options.hovered ? chevronRgb : dimRgb, foldHint);
@@ -585,7 +590,7 @@ export function renderUserPromptCardLines(
 		let rightStyled = "";
 		if (i === 0 && rightGutterWidth > 0) {
 			if (options.showCopyBadge && (options.hovered || options.copied)) {
-				const rawLabel = options.copied ? "✓ Copied" : "Copy";
+				const rawLabel = t(options.copied ? "transcript.prompt.copied" : "transcript.prompt.copy");
 				const labelRgb: RgbTuple = options.copied
 					? palette.success
 					: light
@@ -711,8 +716,13 @@ export function installUserPromptCards(): void {
 		"transcript.userPromptMouse",
 		(self, args) => {
 			const event = args[0] as TuiMouseEvent;
+			const pillHits = (self.__conartiPillHits as readonly PromptPillHitTarget[] | undefined) ?? [];
+			const matchedPill = pillHits.find(
+				(hit) => event.y === hit.y && event.x >= hit.xStart && event.x < hit.xEnd,
+			);
 
 			if (event.type === "move") {
+				matchedPill?.onHover?.(event.screenX, event.screenY);
 				claimHover(self, () => {
 					if (self.__conartiHovered) {
 						self.__conartiHovered = false;
@@ -727,12 +737,8 @@ export function installUserPromptCards(): void {
 			}
 
 			const copyHit = self.__conartiCopyHit as PromptCardHitBox | undefined;
-			const pillHits = (self.__conartiPillHits as readonly PromptPillHitTarget[] | undefined) ?? [];
 			const matchedCopy =
 				copyHit && event.y === copyHit.y && event.x >= copyHit.xStart && event.x <= copyHit.xEnd;
-			const matchedPill = pillHits.find(
-				(hit) => event.y === hit.y && event.x >= hit.xStart && event.x < hit.xEnd,
-			);
 
 			if (event.type === "press" && event.button === "left" && (matchedCopy || matchedPill)) {
 				return { handled: true, render: false };

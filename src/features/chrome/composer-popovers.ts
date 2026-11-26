@@ -15,11 +15,11 @@ import {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
-import { bgRgb, fgRgb, getThemeSurfacePalette, paintThemeSurfaceRow } from "../../shared/ansi.ts";
+import { blueBgRgb, themeFgRgb, getThemeSurfacePalette, paintThemeSurfaceRow } from "../../shared/ansi.ts";
 import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { getActiveHostRuntime, unwrapHostTui } from "../../shared/host-runtime.ts";
 import { t } from "../../shared/i18n.ts";
-import { matchesLayoutChord } from "../../shared/keyboard-layout.ts";
+import { createBracketedPasteTracker, matchesLayoutChord } from "../../shared/keyboard-layout.ts";
 import { createSingleLineInput, hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
 import { getSessionWorkflow, MODE_META, type SessionMode } from "../../shared/session-workflow.ts";
@@ -180,6 +180,7 @@ export function openComposerPopover(
 
 	let kind: ComposerPopoverKind = initialKind;
 	const searchInput = createSingleLineInput(options?.initialSearch ?? "");
+	const pasteTracker = createBracketedPasteTracker();
 	let selectedIdx = 0;
 	let scrollOffset = 0;
 	let hoveredIdx: number | null = null;
@@ -334,6 +335,8 @@ export function openComposerPopover(
 			const palette = getThemeSurfacePalette(theme);
 			const safeWidth = Math.max(20, width);
 			const innerWidth = Math.max(12, safeWidth - 4);
+			const fgRgb = (rgb: Parameters<typeof themeFgRgb>[1], text: string) => themeFgRgb(theme, rgb, text);
+			const bgRgb = (rgb: Parameters<typeof blueBgRgb>[1], text: string) => blueBgRgb(theme, rgb, text);
 			const b = (s: string) => fgRgb(palette.border, s);
 
 			const titleText =
@@ -456,10 +459,19 @@ export function openComposerPopover(
 				out.push(`${b("│")} ${clipped}${pad} ${b("│")}`);
 			}
 			out.push(`${b("╰")}${b("─".repeat(Math.max(0, safeWidth - 2)))}${b("╯")}`);
-			return out.map((row) => paintThemeSurfaceRow(theme, row, safeWidth, palette.popupSurfaceBg));
+			return out.map((row) => paintThemeSurfaceRow(theme, row, safeWidth, palette.popupSurfaceBg, true));
 		},
 		handleInput(data: string): void {
-			if (!data || isKeyRelease(data)) return;
+			if (!data) return;
+			if (pasteTracker.split(data).some((segment) => segment.inPaste || (data !== "\x1b" && segment.trailingStartPrefixLength > 0))) {
+				if (kind === "model" && searchInput.handleInput(data).changed) {
+					selectedIdx = 0;
+					scrollOffset = 0;
+					tui.requestRender();
+				}
+				return;
+			}
+			if (isKeyRelease(data)) return;
 
 			if (matchesKey(data, "escape") || data === "\x1b") {
 				close();

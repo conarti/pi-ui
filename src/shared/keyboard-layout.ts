@@ -15,6 +15,7 @@ export interface KeyboardLayoutNormalizeOptions {
 
 export interface KeyboardLayoutNormalizer {
 	normalize(data: string): string;
+	readonly isInPaste: boolean;
 	reset(): void;
 }
 
@@ -537,6 +538,9 @@ export function createKeyboardLayoutNormalizer(options?: KeyboardLayoutNormalize
 	const pasteTracker = createBracketedPasteTracker();
 
 	return {
+		get isInPaste() {
+			return pasteTracker.isInPaste;
+		},
 		normalize(data: string): string {
 			if (!data) return data;
 			let out = "";
@@ -680,7 +684,7 @@ export function registerOptionShortcutChord(keyId: string): () => void {
 	};
 }
 
-export function installKeyboardLayoutSupport(pi: ExtensionAPI): void {
+export function installKeyboardLayoutSupport(pi: ExtensionAPI, dispatchShortcut?: (data: string) => boolean): void {
 	installRunnerShortcutObserver();
 	if (WRAPPED_APIS.has(pi as unknown as object)) return;
 	WRAPPED_APIS.add(pi as unknown as object);
@@ -714,7 +718,11 @@ export function installKeyboardLayoutSupport(pi: ExtensionAPI): void {
 		if (ctx.mode !== "tui" || !ctx.hasUI) return;
 
 		unsubscribeInput = ctx.ui.onTerminalInput((data) => {
+			const wasPasting = normalizer.isInPaste;
 			const normalized = normalizer.normalize(data);
+			if (!wasPasting && !normalizer.isInPaste && !data.includes(BRACKETED_PASTE_START) && dispatchShortcut?.(normalized)) {
+				return { consume: true };
+			}
 			if (normalized !== data) {
 				return { data: normalized };
 			}

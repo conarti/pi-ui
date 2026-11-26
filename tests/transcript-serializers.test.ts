@@ -59,6 +59,15 @@ describe("extractSkillInvocations", () => {
 		expect(res.previewText).toBe("/tdd · Implement the parser cleanly");
 	});
 
+	it("preserves literal skill XML in a fenced example after a leading invocation", () => {
+		const example = 'Show this example:\n```xml\n<skill name="demo">literal</skill>\n```';
+		expect(extractSkillInvocations(example).cleanCopyText).toBe(example);
+		const prompt = `<skill name="tdd">Use tests</skill>\n\n${example}`;
+		const extracted = extractSkillInvocations(prompt);
+		expect(extracted.skills.map(({ name }) => name)).toEqual(["tdd"]);
+		expect(extracted.cleanCopyText).toBe(`/skill:tdd ${example}`);
+	});
+
 	it("handles skill-only invocations and multiple skills without leaving XML wrappers", () => {
 		const single = '<skill name="grilling" location="/tmp/grilling/SKILL.md">\nAsk hard questions.\n</skill>';
 		const resSingle = extractSkillInvocations(single, { cwd: "/repo" });

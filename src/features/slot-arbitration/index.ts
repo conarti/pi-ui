@@ -68,6 +68,7 @@ export async function showSlotArbitrationModal(
 	ctx: ExtensionContext,
 	explicitSlots?: readonly ContendedSlotSnapshot[],
 	mode: SlotArbitrationPromptMode = "manage",
+	onShown?: () => void,
 ): Promise<void> {
 	if (ctx.mode !== "tui" || !ctx.hasUI) return;
 
@@ -82,6 +83,7 @@ export async function showSlotArbitrationModal(
 	const outcome = await openModalCard<ModalOutcome>(
 		ctx,
 		(tui, theme, _kb, done) => {
+			onShown?.();
 			const card = createModalCard();
 			let focusedIndex = 0;
 			let scrollOffset = 0;
@@ -386,8 +388,8 @@ export async function showSlotArbitrationModal(
 export function registerSlotArbitrationFeature(pi: ExtensionAPI): void {
 	installSlotArbitration(pi);
 
-	registerSlotArbitrationModalOpener(async (ctx, slots, mode) => {
-		await showSlotArbitrationModal(ctx, slots, mode);
+	registerSlotArbitrationModalOpener(async (ctx, slots, mode, onShown) => {
+		await showSlotArbitrationModal(ctx, slots, mode, onShown);
 	});
 
 	const slotsHandler = markPiUiCommandHandler(async (args: string, ctx: ExtensionContext) => {

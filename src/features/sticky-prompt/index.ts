@@ -140,8 +140,12 @@ export class StickyPromptBar implements Component {
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		if (!this.active || event.y < 0 || event.y >= this.lastRenderedHeight) return undefined;
+		const matchedPill = this.pillHits.find(
+			(hit) => event.y === hit.y && event.x >= hit.xStart && event.x < hit.xEnd,
+		);
 
 		if (event.type === "move") {
+			matchedPill?.onHover?.(event.screenX, event.screenY);
 			claimHover(this, () => {
 				if (this.hovered) {
 					this.hovered = false;
@@ -163,9 +167,6 @@ export class StickyPromptBar implements Component {
 			return undefined;
 		}
 
-		const matchedPill = this.pillHits.find(
-			(hit) => event.y === hit.y && event.x >= hit.xStart && event.x < hit.xEnd,
-		);
 		if (matchedPill) {
 			matchedPill.onClick?.(event.screenX, event.screenY);
 			return { handled: true, render: true };

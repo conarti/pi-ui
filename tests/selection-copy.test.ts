@@ -7,6 +7,7 @@ import {
 } from "../src/shared/ansi.ts";
 import {
 	extractCleanSelectionText,
+	markSelectionChrome,
 	type SelectedTranscriptLine,
 } from "../src/shared/selection-copy.ts";
 import { renderUserPromptCardLines } from "../src/features/transcript/user-prompt.ts";
@@ -55,7 +56,7 @@ describe("Clean selection text extractor (pure seam over real package themes)", 
 
 			const lines = [
 				`${pad}✦ › Thought for 4s`,
-				`${pad}✦ Inspect repo state (200ms) · bash 1 · read 6`,
+				markSelectionChrome(`${pad}✦ Inspect repo state (200ms) · bash 1 · read 6`),
 				`${pad}Run ${theme.fg("mdCode", "npm run check")} after updating the config`,
 				`${pad}file so every invariant stays green.`,
 				"",

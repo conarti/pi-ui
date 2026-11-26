@@ -17,7 +17,13 @@ const GUARDED_APIS = new WeakSet<object>();
 const GUARDED_UIS = new WeakSet<object>();
 
 export function isSupersededQuoteBlocksExtension(ext: unknown): boolean {
-	return matchesExtensionSourcePath(ext, QUOTE_BLOCKS_PATH_RE);
+	if (!matchesExtensionSourcePath(ext, QUOTE_BLOCKS_PATH_RE)) return false;
+	const { commands, shortcuts } = ext as {
+		commands?: Map<string, { description?: string }>;
+		shortcuts?: Map<string, { description?: string }>;
+	};
+	return [...(commands ?? [])].some(([name, command]) => isExternalQuoteBlocksCommand(name, command.description)) &&
+		[...(shortcuts ?? [])].some(([key, shortcut]) => isExternalQuoteBlocksShortcut(key, shortcut.description));
 }
 
 function clearExternalQuoteBlocksSharedStore(): void {

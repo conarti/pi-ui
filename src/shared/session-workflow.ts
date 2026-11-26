@@ -1,18 +1,7 @@
-import { randomUUID } from "node:crypto";
-import {
-	chmodSync,
-	existsSync,
-	lstatSync,
-	mkdirSync,
-	readFileSync,
-	realpathSync,
-	renameSync,
-	rmSync,
-	statSync,
-	writeFileSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { resolveConfigWritePath, writeConfigJsonAtomically } from "./atomic-config-file.ts";
 import { t } from "./i18n.ts";
 import type { CanonicalSessionMode } from "./pi-ui-config.ts";
 import { classifyShellEffect, type ShellDialect } from "./shell-analysis.ts";
@@ -173,20 +162,7 @@ function isShiftTabBinding(value: unknown): boolean {
  * чтобы `Shift+Tab` переключал только `Session Mode` без двойного срабатывания thinking.
  */
 export function syncThinkingCycleKeybinding(agentDir = getAgentDir()): boolean {
-	let targetPath = join(agentDir, "keybindings.json");
-	let linked = false;
-	try {
-		linked = lstatSync(targetPath).isSymbolicLink();
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-	}
-	if (linked) {
-		try {
-			targetPath = realpathSync(targetPath);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		}
-	}
+	const targetPath = resolveConfigWritePath(join(agentDir, "keybindings.json"));
 
 	let existing: Record<string, unknown> = {};
 	let mode = 0o600;
@@ -223,18 +199,7 @@ export function syncThinkingCycleKeybinding(agentDir = getAgentDir()): boolean {
 	}
 	payload["app.thinking.cycle"] = "alt+t";
 
-	mkdirSync(dirname(targetPath), { recursive: true });
-	const temporary = join(dirname(targetPath), `.keybindings-${randomUUID()}.tmp`);
-	try {
-		writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, {
-			mode: 0o600,
-			flag: "wx",
-		});
-		chmodSync(temporary, mode);
-		renameSync(temporary, targetPath);
-	} finally {
-		rmSync(temporary, { force: true });
-	}
+	writeConfigJsonAtomically(targetPath, payload, mode);
 	return true;
 }
 

@@ -883,8 +883,6 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		expect(narrow.findText("✦ Auditing")?.col).toBe(4);
 		await harness.resize(100, 32);
 
-		/* Переход на toolSummary после >= 4.5s */
-		vi.advanceTimersByTime(4600);
 		const callMsg = makeStreamMessage(
 			[
 				{ type: "thinking", thinking: "**Auditing parser edge cases**\nChecking tokens" },
@@ -901,6 +899,9 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		s1.end(callMsg);
 		await harness.flush();
 		expect(releaseTool).toBeDefined();
+		expect(harness.screen().rowText(stopPos!.row)).toContain("✦ Auditing parser edge cases…");
+		vi.advanceTimersByTime(4600);
+		await harness.flush();
 		expect(harness.screen().rowText(stopPos!.row)).toContain("✦ Checking module imports…");
 
 		/* Завершение инструмента -> Drafting… на финальном тексте */
@@ -966,12 +967,22 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		const streamTurn = harness.submitInput("Deep multi-line thought");
 		const sLive = await queue.nextStream();
 		const tsLive = Date.now();
-		const twelveLines = Array.from({ length: 12 }, (_, idx) => `ThoughtStep_${idx + 1}`).join("\n");
+		const lines = Array.from({ length: 12 }, (_, idx) => `ThoughtStep_${idx + 1}`);
+		const twelveLines = lines.join("\n");
 		const partialLive = makeStreamMessage([{ type: "thinking", thinking: twelveLines }], {
 			timestamp: tsLive,
 		});
 		sLive.push({ type: "start", partial: makeStreamMessage([], { timestamp: tsLive }) });
-		sLive.push({ type: "thinking_start", contentIndex: 0, partial: partialLive });
+		for (const count of [6, 7]) {
+			const thinking = lines.slice(0, count).join("\n");
+			const partial = makeStreamMessage([{ type: "thinking", thinking }], { timestamp: tsLive });
+			if (count === 6) sLive.push({ type: "thinking_start", contentIndex: 0, partial });
+			sLive.push({ type: "thinking_delta", contentIndex: 0, delta: thinking, partial });
+			await harness.flush();
+			const snap = harness.screen();
+			const header = snap.findText("✦ Thinking…")!;
+			for (let row = 1; row <= 6; row++) expect(snap.rowText(header.row + row)).toContain("▎");
+		}
 		sLive.push({ type: "thinking_delta", contentIndex: 0, delta: twelveLines, partial: partialLive });
 		await harness.flush();
 

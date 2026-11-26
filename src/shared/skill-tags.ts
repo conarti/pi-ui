@@ -7,9 +7,6 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 	type Component,
-	type OverlayHandle,
-	type OverlayOptions,
-	type TUI,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
@@ -21,13 +18,8 @@ import {
 	themeBgRgb,
 	themeFgRgb,
 } from "./ansi.ts";
-import {
-	getActiveHostRuntime,
-	installClickedHoverPopupDismissHooks,
-	registerTransientHoverDismisser,
-	unwrapHostTui,
-} from "./host-runtime.ts";
-import { hasBlockingModalOverlay } from "./modal-card.ts";
+import { createClickedHoverPopup } from "./clicked-hover-popup.ts";
+import { getActiveHostRuntime } from "./host-runtime.ts";
 import { t } from "./i18n.ts";
 
 export interface ParsedSkillInvocation {
@@ -50,7 +42,7 @@ export interface ExtractSkillOptions {
 	readonly cwd?: string;
 }
 
-const SKILL_TAG_RE = /<skill\s+([^>]+)>([\s\S]*?)<\/skill>/gi;
+const LEADING_SKILL_TAG_RE = /^\s*<skill\s+([^>]+)>([\s\S]*?)<\/skill>/i;
 const ATTR_RE = /\b(name|location)="([^"]*)"/gi;
 
 export function shortenSkillPath(filePath: string | undefined, cwd = process.cwd()): string | undefined {
@@ -106,9 +98,10 @@ export function extractSkillInvocations(
 
 	const cwd = options?.cwd ?? process.cwd();
 	const skills: ParsedSkillInvocation[] = [];
-	let index = 0;
+	let remaining = rawText;
 
-	const stripped = rawText.replace(SKILL_TAG_RE, (full, attrText: string, rawBody: string) => {
+	for (let tag = LEADING_SKILL_TAG_RE.exec(remaining); tag; tag = LEADING_SKILL_TAG_RE.exec(remaining)) {
+		const [full, attrText = "", rawBody = ""] = tag;
 		let rawName = "";
 		let rawLoc = "";
 		ATTR_RE.lastIndex = 0;
@@ -119,21 +112,20 @@ export function extractSkillInvocations(
 			else if (key === "location") rawLoc = match[2] ?? "";
 		}
 		const name = rawName.trim();
-		if (!name) return full;
+		if (!name) break;
 
-		const body = cleanSkillBody(rawBody ?? "");
+		const body = cleanSkillBody(rawBody);
 		const lines = body ? body.split(/\r?\n/) : [];
 		skills.push({
-			id: `skill:${index}:${name}`,
+			id: `skill:${skills.length}:${name}`,
 			name,
 			location: rawLoc.trim() || undefined,
 			shortLocation: shortenSkillPath(rawLoc, cwd),
 			body,
 			lineCount: lines.length,
 		});
-		index += 1;
-		return "";
-	});
+		remaining = remaining.slice(full.length);
+	}
 
 	if (skills.length === 0) {
 		const trimmed = rawText.trim();
@@ -145,10 +137,7 @@ export function extractSkillInvocations(
 		};
 	}
 
-	const userText = stripped
-		.replace(/^\s*\n+/, "")
-		.replace(/\n{3,}/g, "\n\n")
-		.trim();
+	const userText = remaining.trim();
 
 	const slashTokens = skills.map((s) => `/skill:${s.name}`).join(" ");
 	const shortTokens = skills.map((s) => `/${s.name}`).join(" ");
@@ -362,129 +351,31 @@ class SkillPreviewPopup implements Component {
 
 const SKILL_POPUP_SLOT_KEY = Symbol.for("conarti.pi-ui.skill-preview-popup.v1");
 
-interface SkillPopupState {
-	popup?: SkillPreviewPopup;
-	handle?: OverlayHandle;
-	options?: OverlayOptions;
-	visible: boolean;
-	activeKey?: string;
-	activeTui?: TUI;
-	activeRenderer?: object;
-	markOpened?: () => void;
+function createSkillPopupController() {
+	return createClickedHoverPopup("skillChips.preview", (dismiss) => {
+		const popup = new SkillPreviewPopup(() => getActiveGlobalTheme(getActiveHostRuntime()?.theme()));
+		popup.onDismiss = dismiss;
+		return popup;
+	}, { x: 4, y: 2 });
 }
 
-function getSkillPopupState(): SkillPopupState {
-	const g = globalThis as Record<symbol, SkillPopupState | undefined>;
-	if (!g[SKILL_POPUP_SLOT_KEY]) {
-		const state: SkillPopupState = {
-			visible: false,
-		};
-		g[SKILL_POPUP_SLOT_KEY] = state;
-		registerTransientHoverDismisser("skillChips.preview", () => hideSkillPreviewPopup());
-	}
-	return g[SKILL_POPUP_SLOT_KEY]!;
+function getSkillPopupController() {
+	const g = globalThis as Record<symbol, ReturnType<typeof createSkillPopupController> | undefined>;
+	return g[SKILL_POPUP_SLOT_KEY] ??= createSkillPopupController();
 }
 
 export function isSkillPreviewPopupVisible(): boolean {
-	const state = getSkillPopupState();
-	return state.visible && Boolean(state.handle);
+	return getSkillPopupController().isVisible();
 }
 
 export function hideSkillPreviewPopup(): void {
-	const state = getSkillPopupState();
-	if (!state.visible && !state.handle) return;
-	state.visible = false;
-	state.activeKey = undefined;
-	state.activeRenderer = undefined;
-	const handle = state.handle;
-	state.handle = undefined;
-	if (handle) {
-		try {
-			handle.hide();
-		} catch {
-			/* Уже скрыто хостом */
-		}
-	}
+	getSkillPopupController().hide();
 }
 
-export function toggleSkillPreviewPopup(
-	skill: ParsedSkillInvocation,
-	screenX: number,
-	screenY: number,
-): void {
-	const runtime = getActiveHostRuntime();
-	const tui = runtime?.tui;
-	if (!tui || hasBlockingModalOverlay(tui)) {
-		hideSkillPreviewPopup();
-		return;
-	}
-
-	const state = getSkillPopupState();
-	state.markOpened ??= installClickedHoverPopupDismissHooks(
-		"skillChips", () => state.visible ? state.popup : undefined, hideSkillPreviewPopup,
-	);
-
+export function toggleSkillPreviewPopup(skill: ParsedSkillInvocation, screenX: number, screenY: number): void {
 	const key = `${skill.id}:${skill.location ?? ""}`;
-	if (state.visible && state.activeKey === key) {
-		hideSkillPreviewPopup();
-		tui.requestRender();
-		return;
-	}
-
-	const renderer = unwrapHostTui(tui);
-	if (state.activeRenderer && state.activeRenderer !== renderer) {
-		hideSkillPreviewPopup();
-	}
-	state.activeTui = tui;
-	state.activeRenderer = renderer;
-
-	if (!state.popup) {
-		state.popup = new SkillPreviewPopup(() => getActiveGlobalTheme(getActiveHostRuntime()?.theme()));
-		state.popup.onDismiss = () => {
-			hideSkillPreviewPopup();
-			getActiveHostRuntime()?.requestRender();
-		};
-	}
-
-	state.popup.skill = skill;
-	state.popup.scrollOffset = 0;
-
-	const termCols = Math.max(24, tui.terminal?.columns ?? 80);
-	const termRows = Math.max(8, tui.terminal?.rows ?? 30);
-	const { width, height } = state.popup.computeDimensions(termCols, termRows);
-
-	const col = Math.max(2, Math.min(screenX - 4, Math.max(2, termCols - width - 2)));
-	const belowRow = screenY + 2;
-	const aboveRow = screenY - height;
-	const row =
-		belowRow + height <= termRows
-			? belowRow
-			: aboveRow >= 1
-				? aboveRow
-				: Math.max(1, Math.min(belowRow, termRows - height));
-
-	state.visible = true;
-	state.activeKey = key;
-	state.markOpened();
-
-	if (!state.options) {
-		state.options = {
-			nonCapturing: true,
-			width,
-			col,
-			row,
-			visible: () =>
-				state.visible && Boolean(state.activeTui) && !hasBlockingModalOverlay(state.activeTui!),
-		};
-	} else {
-		state.options.width = width;
-		state.options.col = col;
-		state.options.row = row;
-	}
-
-	if (!state.handle) {
-		state.handle = tui.showOverlay(state.popup, state.options);
-	} else {
-		tui.requestRender();
-	}
+	getSkillPopupController().toggle(getActiveHostRuntime()?.tui, key, screenX, screenY, (popup) => {
+		popup.skill = skill;
+		popup.scrollOffset = 0;
+	});
 }

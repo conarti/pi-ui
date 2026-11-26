@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import {
 	resetCapabilitiesCache,
 	setCapabilityOverrides,
@@ -28,6 +29,8 @@ import {
 	type AssistantMessage,
 	type InteractiveHarness,
 } from "./harness/index.ts";
+
+const TINY_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAIAAAA2iEnWAAAAEklEQVR4nGOwbvpm3fSNAYUCAGbACjPC8yHSAAAAAElFTkSuQmCC";
 
 describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips & cursors (real InteractiveMode)", () => {
 	let harness: InteractiveHarness | undefined;
@@ -232,6 +235,26 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 		expect(harness.screen().rowText(findComposerTopRow(harness) + 2)).toContain("Auto");
 	});
 
+	it("uses blue-safe indexed backgrounds in Model search", async () => {
+		harness = await createInteractiveHarness({ theme: "dark", trueColor: false, width: 100, height: 28 });
+		await harness.pressKey("\x0c");
+		const screen = harness.screen();
+		const selected = screen.findText("✓ Faux Reasoning")!;
+		const bg = screen.cellAt(selected.row, selected.col + 3)?.bg;
+		expect(bg?.kind).toBe("palette256");
+		expect(bg).not.toEqual({ kind: "palette256", index: 23 });
+	});
+
+	it("treats a split bracketed paste as literal Model search text", async () => {
+		harness = await createInteractiveHarness({ width: 100, height: 28 });
+		await harness.pressKey("\x0c");
+		await harness.pressKey("\x1b[200~");
+		await harness.pressKey("†");
+		await harness.pressKey("\x1b[201~");
+		expect(harness.screen().text()).toContain("No matching models");
+		expect(harness.screen().text()).toContain("⌕ †");
+	});
+
 	it("handles single Esc without aborting active turn, Esc×2 draft+chip undoable clear, Esc×2 /tree on empty draft, and Ctrl+Z/Ctrl+Shift+Z/Ctrl+Y Undo/Redo without SIGTSTP", async () => {
 		const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
 		try {
@@ -425,7 +448,7 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 		await harness.flush();
 		expect(harness.session.getSteeringMessages()).toEqual(["Steer item beta"]);
 
-		const queuedImage = { type: "image" as const, mimeType: "image/png", data: "iVBORw0KGgo=" };
+		const queuedImage = { type: "image" as const, mimeType: "image/png", data: TINY_PNG_BASE64 };
 		await harness.session.steer("Steer item with image", [queuedImage]);
 		await harness.flush();
 		const betaHit = harness.screen().findText("Steer item beta")!;
@@ -439,8 +462,14 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 		]);
 		expect(harness.session.getFollowUpMessages()).toEqual(["Queued item alpha"]);
 		const imageHit = harness.screen().findText("Steer item with image")!;
-		await harness.mouseClick(harness.screen().rowText(imageHit.row).indexOf("[×]") + 1, imageHit.row);
-		await harness.flush();
+		await harness.mouseClick(harness.screen().rowText(imageHit.row).indexOf("[Edit · Alt+↑]") + 2, imageHit.row);
+		expect(harness.screen().findText("Steer item with image [🖼 Image #1]")).toBeDefined();
+		await harness.pressKey("\x1b\r");
+		expect(harness.session.agent.peekQueuedMessages()).toEqual([
+			expect.objectContaining({ content: [expect.objectContaining({ text: expect.stringContaining("Steer item with image") }), queuedImage] }),
+		]);
+		const editedImageHit = harness.screen().findText("Steer item with image")!;
+		await harness.mouseClick(harness.screen().rowText(editedImageHit.row).indexOf("[×]") + 1, editedImageHit.row);
 
 		/* Клик по [Edit · Alt+↑] возвращает элемент в Composer для редактирования */
 		const alphaHit = harness.screen().findText("Queued item alpha")!;
@@ -490,6 +519,48 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 		await turn1;
 		await harness.waitForIdle();
 		expect(callCount).toBe(3);
+	});
+
+	it("restores a queued draft and its image into a third-party editor", async () => {
+		harness = await createInteractiveHarness({ width: 104, height: 30, extensionFactories: [(pi) => {
+			pi.on("session_start", (_event, ctx) => {
+				ctx.ui.setEditorComponent((tui, theme, kb) => new CustomEditor(tui, theme, kb));
+			});
+		}] });
+		await waitForCondition(() => harness!.screen().text().includes("Slot Arbitration"));
+		await harness.pressKey("\r");
+		await harness.submitInput("/slots editor inline-1");
+		const stream = createAssistantMessageEventStream();
+		const done = fauxAssistantMessage("Turn done");
+		let firstCall = true;
+		harness.setStreamSimple(() => {
+			if (firstCall) {
+				firstCall = false;
+				return stream;
+			}
+			const next = createAssistantMessageEventStream();
+			next.push({ type: "done", reason: "stop", message: done });
+			next.end(done);
+			return next;
+		});
+		const turn = harness.submitInput("Keep the turn open");
+		const image = { type: "image" as const, mimeType: "image/png", data: TINY_PNG_BASE64 };
+		try {
+			await waitForCondition(() => !firstCall);
+			await harness.session.followUp("Restore this draft", [image]);
+			const edit = harness.screen().findText("[Edit · Alt+↑]")!;
+			await harness.mouseClick(edit.col + 2, edit.row);
+			expect(harness.screen().text()).toContain("Restore this draft [🖼 Image #1]");
+			expect(harness.session.getFollowUpMessages()).toEqual([]);
+		} finally {
+			stream.push({ type: "done", reason: "stop", message: done });
+			stream.end(done);
+			await turn;
+		}
+		await harness.submitDraft();
+		await harness.waitForIdle();
+		const user = harness.sessionManager.getBranch().findLast((entry) => entry.type === "message" && entry.message.role === "user");
+		expect(user).toMatchObject({ message: { content: expect.arrayContaining([image]) } });
 	});
 
 	it("mounts 1-row clickable Shortcuts Bar by default, accepts Prompt Suggestion on click, and collapses to 0 rows with inline zero-shift transient hints when showShortcutsBar = false", async () => {
@@ -569,8 +640,6 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 	});
 
 	it("auto-spaces Prompt Chips, collapses duplicate spaces on atomic delete, renders Kitty thumbnails on mouse hover only, and wraps/scrolls Quote & Paste popups with [Remove]/[Edit]/[Copy]", async () => {
-		const TINY_PNG_BASE64 =
-			"iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAIAAAA2iEnWAAAAEklEQVR4nGOwbvpm3fSNAYUCAGbACjPC8yHSAAAAAElFTkSuQmCC";
 		const TINY_PNG_BYTES = Uint8Array.from(Buffer.from(TINY_PNG_BASE64, "base64"));
 
 		harness = await createInteractiveHarness({
@@ -587,51 +656,50 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 			},
 		});
 
-		const editor = getActiveComposerEditor()!;
+		const draftBody = () => harness!.screen().rowText(findComposerTopRow(harness!) + 1);
+		const clearDraft = async () => {
+			await harness!.pressKey("\x1b");
+			await harness!.pressKey("\x1b");
+		};
 		const flushClipboard = async () => {
 			for (let i = 0; i < 6; i += 1) await Promise.resolve();
 			await new Promise<void>((resolve) => setTimeout(resolve, 0));
 			harness!.flushFrame();
 		};
 
-		/* 1. Автопробелы вокруг чипов и схлопывание двойных пробелов при атомарном Backspace/Delete */
 		await harness.typeText("Look");
 		await harness.pressKey("\x16");
 		await flushClipboard();
-		expect(editor.getText()).toBe("Look [🖼 Image #1]");
+		expect(draftBody()).toContain("Look [🖼 Image #1]");
 
 		await harness.pressKey("\x16");
 		await flushClipboard();
-		expect(editor.getText()).toBe("Look [🖼 Image #1] [🖼 Image #2]");
+		expect(draftBody()).toContain("Look [🖼 Image #1] [🖼 Image #2]");
 
-		editor.setText("foobar");
+		await clearDraft();
+		await harness.typeText("foobar");
 		await harness.pressKey("\x1b[D");
 		await harness.pressKey("\x1b[D");
 		await harness.pressKey("\x1b[D");
 		await harness.paste("row-1\nrow-2\nrow-3\nrow-4", true);
-		expect(editor.getText()).toBe("foo [📋 Pasted #1 · 4 lines] bar");
-
-		/* Атомарный Backspace на чипе между двумя пробелами схлопывает двойной пробел в один */
+		expect(draftBody()).toContain("foo [📋 Pasted #1 · 4 lines] bar");
 		await harness.pressKey("\x7f");
-		expect(editor.getText()).toBe("foo bar");
+		expect(draftBody()).toContain("foo bar");
 
-		/* То же для атомарного Delete */
 		await harness.paste("row-a\nrow-b\nrow-c\nrow-d", true);
-		expect(editor.getText()).toBe("foo [📋 Pasted #1 · 4 lines] bar");
+		expect(draftBody()).toContain("foo [📋 Pasted #1 · 4 lines] bar");
 		await harness.pressKey("\x1b[D");
 		await harness.pressKey("\x1b[3~");
-		expect(editor.getText()).toBe("foo bar");
+		expect(draftBody()).toContain("foo bar");
 
-		/* 2. Kitty-миниатюра в [🖼 Image #N] только по hover мыши и чистый fallback без графики */
-		editor.setText("");
+		await clearDraft();
 		await harness.pressKey("\x16");
 		await flushClipboard();
-		expect(editor.getText()).toBe("[🖼 Image #1]");
+		expect(draftBody()).toContain("[🖼 Image #1]");
 
 		try {
 			setCapabilityOverrides({ images: "kitty" });
 			harness.flushFrame(true);
-			/* Каретка рядом с image-чипом не открывает попап */
 			expect(harness.renderFrame().join("\n")).not.toContain("\x1b_G");
 
 			const imgChip = harness.screen().findText("[🖼 Image #1]")!;
@@ -641,11 +709,9 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 			expect(harness.screen().text()).toContain("thumb-shot.png");
 			expect(harness.screen().text()).toContain("2×3");
 
-			/* Отводим курсор — попап скрывается */
 			await harness.mouseMove(90, 2);
 			expect(harness.renderFrame().join("\n")).not.toContain("\x1b_G");
 
-			/* Без поддержки графики — чистый текстовый fallback без Kitty/iTerm2 */
 			setCapabilityOverrides({ images: null });
 			await harness.mouseMove(imgChip.col + 2, imgChip.row);
 			const fallbackFrame = harness.renderFrame().join("\n");
@@ -658,8 +724,7 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 			resetCapabilitiesCache();
 		}
 
-		/* 3. Перенос строк без горизонтального «…», 14-строчный скролл и [Copy]/[Edit]/[Remove] для Quote & Paste */
-		editor.setText("");
+		await clearDraft();
 		const longWrappedLine =
 			"LONG_START alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho LONG_END";
 		const twentyLines = [
@@ -676,24 +741,20 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 		expect(pastePopup.text()).toContain("[Copy]");
 		expect(pastePopup.text()).toContain("[Remove]");
 
-		/* Колесо внутри попапа прокручивает до 20-й строки */
 		const bodyInsidePopup = pastePopup.findText("paste-detail-line-5")!;
 		await harness.mouseWheel("down", bodyInsidePopup.col + 2, bodyInsidePopup.row, 10);
 		expect(harness.screen().text()).toContain("paste-detail-line-20");
 
-		/* Клик по [Copy] копирует полный текст чипа в буфер обмена */
 		const quoteClipboardBackup = await getActiveHostRuntime()!.clipboard.readText?.();
 		const copyBtn = harness.screen().findText("[Copy]")!;
 		await harness.mouseClick(copyBtn.col + 1, copyBtn.row);
 		expect(await getActiveHostRuntime()!.clipboard.readText?.()).toBe(twentyLines);
 
-		/* Клик по [Remove] удаляет чип из черновика */
 		await harness.mouseMove(pasteChipHit.col + 3, pasteChipHit.row);
 		const removeBtn = harness.screen().findText("[Remove]")!;
 		await harness.mouseClick(removeBtn.col + 2, removeBtn.row);
-		expect(editor.getText()).toBe("");
+		expect(draftBody()).toContain("Ask or describe a task…");
 
-		/* Quote chip: перенос + [Edit] открывает редактор цитаты */
 		harness.setClipboard({ text: quoteClipboardBackup ?? null });
 		await harness.pressKey("\x1b[113;3u");
 		await flushClipboard();
@@ -709,6 +770,23 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 		await harness.mouseClick(editBtn.col + 1, editBtn.row);
 		expect(harness.screen().text()).toContain("Quote #1");
 		await harness.pressKey("\x1b");
+	});
+
+	it("copies a Prompt Chip through the terminal when the clipboard has no custom writer", async () => {
+		harness = await createInteractiveHarness({ width: 104, height: 30, clipboard: { async readText() { return null; } } });
+		const text = "first\nsecond\nthird\nfourth";
+		await harness.paste(text, true);
+		const pill = harness.screen().findText("Pasted #1")!;
+		await harness.mouseMove(pill.col + 2, pill.row);
+		const copy = harness.screen().findText("[Copy]")!;
+		const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+		try {
+			Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+			await harness.mouseClick(copy.col + 2, copy.row);
+		} finally {
+			Object.defineProperty(process, "platform", originalPlatform);
+		}
+		expect(harness.terminal.writes.join("")).toContain(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
 	});
 
 	it("renders explicit block cursors across all inputs with host Input editing/Undo and makes bottom-docked ask_user_question 100% mouse-operable with Esc park + Tab return", async () => {

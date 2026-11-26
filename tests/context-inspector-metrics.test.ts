@@ -353,6 +353,18 @@ export default function (pi) {
 		expect(tsOnlyRow.slice(width - 2)).toBe("  ");
 	});
 
+	it("includes cache-warming usage in session token and cost totals", async () => {
+		harness = await createInteractiveHarness({ width: 100, height: 34 });
+		harness.sessionManager.appendUsage("cache_warm", "faux", "faux-1", {
+			input: 1000, output: 4, cacheRead: 200, cacheWrite: 60, totalTokens: 1264,
+			cost: { input: 0.1, output: 0, cacheRead: 0, cacheWrite: 0.025, total: 0.125 },
+		});
+		await openSlashWithoutWaiting(harness, "/stats");
+		expect(harness.screen().text()).toMatch(/Total tokens:\s+1,264/);
+		expect(harness.screen().text()).toMatch(/Cost:\s+\$0\.1250/);
+		await harness.pressKey("\x1b");
+	});
+
 	it("opens unified 3-tab Context Inspector via /context, Header click, /stats, and /metrics with full keyboard and mouse interaction across all 3 tabs", async () => {
 		const now = new Date();
 		const t0 = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 11, 20, 0).getTime();

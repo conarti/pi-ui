@@ -1,5 +1,5 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import { sliceByColumn, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	getThemeSurfacePalette,
 	parseAnsiColorRgb,
@@ -32,11 +32,27 @@ interface ParsedItem {
 	readonly screenWidth: number;
 	readonly wrapWidth: number;
 	readonly singleWord?: boolean;
+	readonly codeJoinWith?: string;
+}
+
+const COPY_CHROME_MARK = "\x1b]9999;pi-ui-copy;chrome\x07";
+const COPY_CODE_ROW_RE = /\x1b\]9999;pi-ui-copy;code;(\d+);(-?\d+)\x07/u;
+const COPY_METADATA_RE = /\x1b\]9999;pi-ui-copy;(?:chrome|code;\d+;-?\d+)\x07/gu;
+
+export function stripSelectionCopyMetadata(line: string): string {
+	return line.replace(COPY_METADATA_RE, "");
+}
+
+export function markSelectionChrome(line: string): string {
+	return line.replace(/^ */u, (padding) => padding + COPY_CHROME_MARK);
+}
+
+export function markSelectionCodeRow(line: string, contentWidth: number, gapBefore: number | undefined): string {
+	return `\x1b]9999;pi-ui-copy;code;${contentWidth};${gapBefore ?? -1}\x07${line}`;
 }
 
 const COLLAPSED_THINKING_RE =
 	/^(?:[✦◆❙┃•]\s*(?:›\s*)?)?(?:Thought(?:\s+for\s+\S+(?:\s+\S+)?)?|Thinking…)(?:\s+›)?$/u;
-const COLLAPSED_TOOL_RE = /^✦\s+\S/u;
 const RESPONSE_METRICS_RE =
 	/^Worked for\s+\S+(?:\s+\S+)?(?:\s+·.*)?(?:\s+\d{1,2}\s+[A-Z][a-z]{2}(?:\s+\d{4})?,\s*\d{2}:\d{2}|\s+\d{2}:\d{2})?$/u;
 const COPY_ACTION_ROW_RE =
@@ -88,7 +104,6 @@ export function isCollapsedChromeRow(plainTrimmed: string): boolean {
 	if (!plainTrimmed) return false;
 	return (
 		COLLAPSED_THINKING_RE.test(plainTrimmed) ||
-		COLLAPSED_TOOL_RE.test(plainTrimmed) ||
 		RESPONSE_METRICS_RE.test(plainTrimmed) ||
 		COPY_ACTION_ROW_RE.test(plainTrimmed) ||
 		BOX_HORIZONTAL_BORDER_RE.test(plainTrimmed)
@@ -311,7 +326,10 @@ export function extractCleanSelectionText(
 	let promptWrapWidth: number | undefined;
 
 	for (const entry of lines) {
-		const surface = detectRowSurfaceKind(entry.fullLine, theme);
+		const codeRow = COPY_CODE_ROW_RE.exec(entry.fullLine);
+		const markedChrome = entry.fullLine.includes(COPY_CHROME_MARK);
+		if (isMultiLineSelection && markedChrome) continue;
+		const surface = codeRow ? "code-body" : detectRowSurfaceKind(entry.fullLine, theme);
 		const plainSelected = stripTerminalSequences(entry.selectedAnsi);
 		const plainTrimmed = plainSelected.trim();
 		const fullPlainTrimmed = stripTerminalSequences(entry.fullLine).trim();
@@ -321,9 +339,16 @@ export function extractCleanSelectionText(
 			/* Две ячейки внутри цветного фона принадлежат карточке, а не коду. */
 			const bgStart = entry.fullLine.search(/\x1b\[48;(?:2;\d+;\d+;\d+|5;\d+)m/u);
 			const codeStart = visibleWidth(entry.fullLine.slice(0, bgStart)) + 2;
+			const contentEnd = codeStart + Number(codeRow?.[1] ?? 0);
+			const start = Math.max(codeStart, entry.startCol);
+			const end = Math.min(contentEnd, entry.endCol);
+			const gap = Number(codeRow?.[2] ?? -1);
 			parsed.push({
 				kind: "code",
-				text: plainSelected.slice(Math.max(0, codeStart - entry.startCol)).trimEnd(),
+				text: codeRow
+					? sliceByColumn(plainSelected, start - entry.startCol, Math.max(0, end - start), true)
+					: plainSelected.slice(Math.max(0, codeStart - entry.startCol)).trimEnd(),
+				codeJoinWith: gap < 0 ? undefined : " ".repeat(Math.min(gap, 100_000)),
 				screenWidth: 0,
 				wrapWidth: 0,
 			});
@@ -352,7 +377,7 @@ export function extractCleanSelectionText(
 			const tail = firstRow ? USER_CARD_TRAILING_TIME_RE.exec(fullPlainTrimmed) : null;
 			const margin = /^ */u.exec(entry.fullLine)?.[0].length ?? 0;
 			const cardWidth = contentW - 2 * margin;
-			const pad = cardWidth >= 28 ? 2 : 1;
+			const pad = 2;
 			const innerWidth = cardWidth - pad - 2;
 			if (firstRow) {
 				const gutter = Math.max(8, visibleWidth(tail?.[1] ?? "")) + pad + 1;
@@ -417,12 +442,13 @@ export function extractCleanSelectionText(
 		}
 
 		if (item.kind === "code") {
-			const codeChunk: string[] = [];
+			const codeChunk: string[] = [item.text];
+			i += 1;
 			while (i < parsed.length && parsed[i]!.kind === "code") {
-				codeChunk.push(parsed[i]!.text);
-				i += 1;
+				const row = parsed[i++]!;
+				codeChunk.push(row.codeJoinWith ?? "\n", row.text);
 			}
-			outputBlocks.push(codeChunk.join("\n"));
+			outputBlocks.push(codeChunk.join(""));
 			continue;
 		}
 

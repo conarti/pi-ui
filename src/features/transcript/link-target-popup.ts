@@ -4,9 +4,6 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 	type Component,
-	type OverlayHandle,
-	type OverlayOptions,
-	type TUI,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
@@ -17,16 +14,10 @@ import {
 	themeBgRgb,
 	themeFgRgb,
 } from "../../shared/ansi.ts";
-import {
-	getActiveHostRuntime,
-	installClickedHoverPopupDismissHooks,
-	registerTransientHoverDismisser,
-	resolveActiveExternalOpener,
-	unwrapHostTui,
-} from "../../shared/host-runtime.ts";
+import { getActiveHostRuntime, resolveActiveExternalOpener } from "../../shared/host-runtime.ts";
+import { createClickedHoverPopup } from "../../shared/clicked-hover-popup.ts";
 import { t } from "../../shared/i18n.ts";
 import type { InspectableLinkTarget } from "../../shared/link-targets.ts";
-import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import { copyToClipboard } from "../../shared/runtime-hooks.ts";
 
 interface PopupActionHit {
@@ -186,147 +177,44 @@ class LinkTargetPopup implements Component {
 
 const LINK_POPUP_SLOT_KEY = Symbol.for("conarti.pi-ui.link-target-popup.v1");
 
-interface LinkPopupState {
-	popup?: LinkTargetPopup;
-	handle?: OverlayHandle;
-	options?: OverlayOptions;
-	visible: boolean;
-	activeKey?: string;
-	activeTui?: TUI;
-	activeRenderer?: object;
-	markOpened?: () => void;
+function createLinkPopupController() {
+	return createClickedHoverPopup("linkTarget.popup", (dismiss) => {
+		const popup = new LinkTargetPopup(() => getActiveGlobalTheme(getActiveHostRuntime()?.theme()));
+		popup.onOpen = (target) => {
+			dismiss();
+			const opener = resolveActiveExternalOpener();
+			if (target.kind === "url") {
+				void opener.openUrl(target.url);
+			} else {
+				void opener.openPath(target.resolvedPath, { line: target.line, column: target.column });
+			}
+		};
+		popup.onCopy = (target) => {
+			copyToClipboard(target.copyText);
+			dismiss();
+		};
+		return popup;
+	}, { x: 2, y: 1 });
 }
 
-function getLinkPopupState(): LinkPopupState {
-	const g = globalThis as Record<symbol, LinkPopupState | undefined>;
-	if (!g[LINK_POPUP_SLOT_KEY]) {
-		const state: LinkPopupState = {
-			visible: false,
-		};
-		g[LINK_POPUP_SLOT_KEY] = state;
-		registerTransientHoverDismisser("linkTarget.popup", () => hideLinkTargetPopup());
-	}
-	return g[LINK_POPUP_SLOT_KEY]!;
+function getLinkPopupController() {
+	const g = globalThis as Record<symbol, ReturnType<typeof createLinkPopupController> | undefined>;
+	return g[LINK_POPUP_SLOT_KEY] ??= createLinkPopupController();
 }
 
 export function isLinkTargetPopupVisible(): boolean {
-	const state = getLinkPopupState();
-	return state.visible && Boolean(state.handle);
+	return getLinkPopupController().isVisible();
 }
 
 export function hideLinkTargetPopup(): void {
-	const state = getLinkPopupState();
-	if (!state.visible && !state.handle) return;
-	state.visible = false;
-	state.activeKey = undefined;
-	state.activeRenderer = undefined;
-	if (state.popup) {
-		state.popup.hoveredAction = undefined;
-	}
-	const handle = state.handle;
-	state.handle = undefined;
-	if (handle) {
-		try {
-			handle.hide();
-		} catch {
-			/* Уже скрыто хостом */
-		}
-	}
+	getLinkPopupController().hide();
 }
 
-export function toggleLinkTargetPopup(
-	target: InspectableLinkTarget,
-	screenX: number,
-	screenY: number,
-): void {
-	const runtime = getActiveHostRuntime();
-	const tui = runtime?.tui;
-	if (!tui || hasBlockingModalOverlay(tui)) {
-		hideLinkTargetPopup();
-		return;
-	}
-
-	const state = getLinkPopupState();
-	state.markOpened ??= installClickedHoverPopupDismissHooks(
-		"linkTarget", () => state.visible ? state.popup : undefined, hideLinkTargetPopup,
-	);
-
+export function toggleLinkTargetPopup(target: InspectableLinkTarget, screenX: number, screenY: number): void {
 	const key = `${target.kind}:${target.copyText}`;
-	if (state.visible && state.activeKey === key) {
-		hideLinkTargetPopup();
-		tui.requestRender();
-		return;
-	}
-
-	const renderer = unwrapHostTui(tui);
-	if (state.activeRenderer && state.activeRenderer !== renderer) {
-		hideLinkTargetPopup();
-	}
-	state.activeTui = tui;
-	state.activeRenderer = renderer;
-
-	if (!state.popup) {
-		state.popup = new LinkTargetPopup(() => getActiveGlobalTheme(getActiveHostRuntime()?.theme()));
-		state.popup.onOpen = (item) => {
-			hideLinkTargetPopup();
-			getActiveHostRuntime()?.requestRender();
-			const opener = resolveActiveExternalOpener();
-			if (item.kind === "url") {
-				void opener.openUrl(item.url);
-			} else {
-				void opener.openPath(item.resolvedPath, {
-					line: item.line,
-					column: item.column,
-				});
-			}
-		};
-		state.popup.onCopy = (item) => {
-			copyToClipboard(item.copyText);
-			hideLinkTargetPopup();
-			getActiveHostRuntime()?.requestRender();
-		};
-	}
-
-	state.popup.target = target;
-	state.popup.hoveredAction = undefined;
-	state.popup.scrollOffset = 0;
-
-	const termCols = Math.max(24, tui.terminal?.columns ?? 80);
-	const termRows = Math.max(8, tui.terminal?.rows ?? 30);
-	const { width, height } = state.popup.computeDimensions(termCols, termRows);
-
-	const col = Math.max(2, Math.min(screenX - 2, Math.max(2, termCols - width - 2)));
-	const belowRow = screenY + 1;
-	const aboveRow = screenY - height;
-	const row =
-		belowRow + height <= termRows
-			? belowRow
-			: aboveRow >= 1
-				? aboveRow
-				: Math.max(1, Math.min(belowRow, termRows - height));
-
-	state.visible = true;
-	state.activeKey = key;
-	state.markOpened();
-
-	if (!state.options) {
-		state.options = {
-			nonCapturing: true,
-			width,
-			col,
-			row,
-			visible: () =>
-				state.visible && Boolean(state.activeTui) && !hasBlockingModalOverlay(state.activeTui!),
-		};
-	} else {
-		state.options.width = width;
-		state.options.col = col;
-		state.options.row = row;
-	}
-
-	if (!state.handle) {
-		state.handle = tui.showOverlay(state.popup, state.options);
-	} else {
-		tui.requestRender();
-	}
+	getLinkPopupController().toggle(getActiveHostRuntime()?.tui, key, screenX, screenY, (popup) => {
+		popup.target = target;
+		popup.hoveredAction = undefined;
+		popup.scrollOffset = 0;
+	});
 }

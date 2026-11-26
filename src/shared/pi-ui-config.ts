@@ -1,18 +1,7 @@
-import { randomUUID } from "node:crypto";
-import {
-	chmodSync,
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	readlinkSync,
-	realpathSync,
-	renameSync,
-	rmSync,
-	statSync,
-	writeFileSync,
-} from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { resolveConfigWritePath, writeConfigJsonAtomically } from "./atomic-config-file.ts";
 
 const PI_UI_CONFIG_FILE = "pi-ui.json";
 const LEGACY_TOOL_DISPLAY_FILE = "tool-display.json";
@@ -191,20 +180,13 @@ export function loadPiUiUserConfig(): PiUiUserConfig {
 	return parsePiUiUserConfig(rawObject);
 }
 
-function resolveConfigWritePath(path: string): string {
-	const seen = new Set<string>();
-	while (!seen.has(path)) {
-		seen.add(path);
-		try {
-			const target = readlinkSync(path);
-			path = resolve(realpathSync(dirname(path)), target);
-		} catch (error) {
-			const code = (error as NodeJS.ErrnoException).code;
-			if (code === "EINVAL" || code === "ENOENT") return path;
-			throw error;
-		}
+export function loadExplicitToolDensity(): ToolDensityPreset | undefined {
+	try {
+		const raw: unknown = JSON.parse(readFileSync(getPiUiConfigPath(), "utf8"));
+		return isJsonObject(raw) ? parseChoice(raw.toolDensity, TOOL_DENSITY_PRESETS) : undefined;
+	} catch {
+		return undefined;
 	}
-	throw new Error(`Symlink cycle in configuration path: ${path}`);
 }
 
 /**
@@ -212,7 +194,7 @@ function resolveConfigWritePath(path: string): string {
  * и соседние ключи будущей `Settings Modal`.
  */
 export function updatePiUiUserConfig(patch: Partial<PiUiUserConfig>): PiUiUserConfig {
-	const targetPath = resolveConfigWritePath(resolve(getPiUiConfigPath()));
+	const targetPath = resolveConfigWritePath(getPiUiConfigPath());
 
 	let existing: Record<string, unknown> = {};
 	let mode = 0o600;
@@ -271,18 +253,7 @@ export function updatePiUiUserConfig(patch: Partial<PiUiUserConfig>): PiUiUserCo
 		...nextPatch,
 	};
 
-	mkdirSync(dirname(targetPath), { recursive: true });
-	const temporary = join(dirname(targetPath), `.pi-ui-${randomUUID()}.tmp`);
-	try {
-		writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, {
-			mode: 0o600,
-			flag: "wx",
-		});
-		chmodSync(temporary, mode);
-		renameSync(temporary, targetPath);
-	} finally {
-		rmSync(temporary, { force: true });
-	}
+	writeConfigJsonAtomically(targetPath, payload, mode);
 
 	return parsePiUiUserConfig(payload);
 }

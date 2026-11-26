@@ -1,4 +1,5 @@
 import { realpathSync } from "node:fs";
+import { ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
 import type {
 	AgentToolResult,
 	ExtensionAPI,
@@ -7,8 +8,9 @@ import type {
 	ToolDefinition,
 	ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
-import type { Component } from "@earendil-works/pi-tui";
+import type { Component, TuiMouseEvent } from "@earendil-works/pi-tui";
 import { acquireHostRuntime, getActiveHostRuntime, type HostRuntimeHandle } from "../../shared/host-runtime.ts";
+import { hookMethod } from "../../shared/runtime-hooks.ts";
 import { classifyCallStatus, formatDurationMs, normalizeLineEndings, type RowStatus } from "./core.ts";
 import { paletteOf } from "./color.ts";
 import { hasAuthorRenderers, syncNativeToolTimer } from "./rendering.ts";
@@ -796,6 +798,16 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 	publicRendering = typeof rendererAPI.registerToolRenderer === "function";
 	const customRowsAvailable = publicRendering || installToolRowPatch();
 	if (publicRendering) {
+		/* Хост сам переключает раскрытие только после первого результата. */
+		hookMethod(ToolExecutionComponent.prototype, "handleMouse", "density.pendingCallClick", (self, args, original) => {
+			const event = args[0] as TuiMouseEvent;
+			if (sessionReady && isDensity() && !self.result && self.getRenderShell() === "self" &&
+				event.y === 1 && event.type === "click" && event.button === "left") {
+				self.setExpanded(!self.expanded);
+				return { handled: true, render: true };
+			}
+			return original.apply(self, args);
+		});
 		setRowResolver(undefined);
 		rendererAPI.registerToolRenderer!((name, next) => {
 			const base = next();

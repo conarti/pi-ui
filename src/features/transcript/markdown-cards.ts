@@ -33,6 +33,7 @@ import {
 	createCopyFeedbackTimerRegistry,
 	hookMethod,
 } from "../../shared/runtime-hooks.ts";
+import { markSelectionCodeRow } from "../../shared/selection-copy.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
 import { toggleLinkTargetPopup } from "./link-target-popup.ts";
 
@@ -131,7 +132,7 @@ function renderCodeBodyLines(
 	rawCode: string,
 	lang: string,
 	codeInnerW: number,
-): string[] {
+): { ansi: string; width: number; gapBefore?: number }[] {
 	let highlighted: string[];
 	if (typeof self.theme?.highlightCode === "function") {
 		const cacheKey = `${lang}\0${rawCode}`;
@@ -144,15 +145,21 @@ function renderCodeBodyLines(
 		highlighted = rawCode.split("\n").map((l: string) => self.theme.codeBlock(l));
 	}
 
-	const wrappedOut: string[] = [];
+	const wrappedOut: { ansi: string; width: number; gapBefore?: number }[] = [];
 	for (const hlLine of highlighted) {
 		const expandedTabs = hlLine.replace(/\t/g, "  ");
-		const wrapped = wrapTextWithAnsi(expandedTabs, codeInnerW);
-		for (const wLine of wrapped.length > 0 ? wrapped : [""]) {
-			wrappedOut.push(wLine);
+		const source = stripTerminalSequences(expandedTabs);
+		let offset = 0;
+		for (const [index, ansi] of wrapTextWithAnsi(expandedTabs, codeInnerW).entries()) {
+			const text = stripTerminalSequences(ansi);
+			const start = source.indexOf(text, offset);
+			/* Перенос не выводит пробелы на границе строк; сохраняем их для копирования. */
+			const gapBefore = index === 0 ? undefined : Math.max(0, start - offset);
+			offset = Math.max(offset, start) + text.length;
+			wrappedOut.push({ ansi, width: visibleWidth(text), gapBefore });
 		}
 	}
-	return wrappedOut.length > 0 ? wrappedOut : [""];
+	return wrappedOut.length > 0 ? wrappedOut : [{ ansi: "", width: 0 }];
 }
 
 function buildCodeFooterRow(
@@ -252,6 +259,21 @@ function spliceActionRowBeforeTrailingBlank(lines: string[], actionRow: string):
 	} else {
 		lines.push(actionRow);
 	}
+}
+
+function tagFilePaths(line: string, targets: InspectableLinkTarget[], cwd: string): string {
+	if (line.includes("\x1b]8;")) return line;
+	const spans = findFilePathSpansInLine(stripTerminalSequences(line), { cwd });
+	if (spans.length === 0) return line;
+	let out = "";
+	let col = 0;
+	for (const { xStart, xEnd, target } of spans) {
+		out += sliceByColumn(line, col, xStart - col, true);
+		const index = targets.push(target) - 1;
+		out += `${LINK_OSC8_PREFIX}${index}\x07${sliceByColumn(line, xStart, xEnd - xStart, true)}${LINK_OSC8_CLOSE}`;
+		col = xEnd;
+	}
+	return out + sliceByColumn(line, col, visibleWidth(line) - col, true);
 }
 
 function extractLineLinkHits(
@@ -390,13 +412,16 @@ export function installMarkdownCardsAndHeadings(): void {
 			if (
 				!Array.isArray(tokens) ||
 				!Array.isArray(self.__conartiPendingLinks) ||
-				!isEligibleAssistantMarkdown(self) ||
-				!tokens.some((tok) => tok?.type === "link")
+				!isEligibleAssistantMarkdown(self)
 			) {
 				return original.apply(self, args);
 			}
 
 			const cwd = getActiveHostRuntime()?.ctx?.cwd ?? process.cwd();
+			const targets: InspectableLinkTarget[] = self.__conartiPendingLinks;
+			/* До переноса строк связываем весь путь с одной целью, как обычную ссылку OSC 8. */
+			const renderPathAware = (slice: any[]) =>
+				tagFilePaths(String(original.apply(self, [slice, styleContext]) ?? ""), targets, cwd);
 			let out = "";
 			let sliceStart = 0;
 
@@ -405,7 +430,7 @@ export function installMarkdownCardsAndHeadings(): void {
 				if (tok?.type !== "link") continue;
 
 				if (idx > sliceStart) {
-					out += String(original.apply(self, [tokens.slice(sliceStart, idx), styleContext]) ?? "");
+					out += renderPathAware(tokens.slice(sliceStart, idx));
 				}
 
 				const renderedLink = String(original.apply(self, [[tok], styleContext]) ?? "");
@@ -423,7 +448,7 @@ export function installMarkdownCardsAndHeadings(): void {
 			}
 
 			if (sliceStart < tokens.length) {
-				out += String(original.apply(self, [tokens.slice(sliceStart), styleContext]) ?? "");
+				out += renderPathAware(tokens.slice(sliceStart));
 			}
 			return out;
 		},
@@ -495,9 +520,11 @@ export function installMarkdownCardsAndHeadings(): void {
 				const codeInnerW = Math.max(6, cardW - 4);
 				const bodyLines = renderCodeBodyLines(self, rawCode, lang, codeInnerW);
 
-				const out: string[] = bodyLines.map((wLine) =>
-					paintThemeSurfaceRow(activeTheme, `  ${wLine}`, cardW, palette.codeBodyBg),
-				);
+				const markCodeRows = getActiveHostRuntime()?.isFullscreen;
+				const out = bodyLines.map(({ ansi, width: textWidth, gapBefore }) => {
+					const row = paintThemeSurfaceRow(activeTheme, `  ${ansi}`, cardW, palette.codeBodyBg);
+					return markCodeRows ? markSelectionCodeRow(row, textWidth, gapBefore) : row;
+				});
 
 				/* Нижняя панель codeFooterBg только после завершения стриминга и только для >= 3 строк или с языком */
 				if (

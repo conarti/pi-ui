@@ -213,7 +213,7 @@ class SessionHeaderView implements Component {
 	isVisible = (viewport: { width: number; height: number }): boolean => {
 		if (!isSlotOwnedByPiUi("header")) return false;
 		if (!this.pinnedMode) return true;
-		return viewport.width >= 24 && viewport.height >= 8;
+		return viewport.height >= 8;
 	};
 
 	invalidate(): void {}
@@ -225,7 +225,7 @@ class SessionHeaderView implements Component {
 
 	render(width: number): string[] {
 		this.hits = [];
-		if (width < 24 || !isSlotOwnedByPiUi("header")) return [];
+		if (width <= 0 || !isSlotOwnedByPiUi("header")) return [];
 
 		if (!this.pinnedMode && getActiveHostRuntime()?.isFullscreen) {
 			return [];
@@ -251,11 +251,15 @@ class SessionHeaderView implements Component {
 		const usedStr = formatCompactTokens(usedTokens);
 		const winStr = formatCompactTokens(contextWindow);
 		const restPlain = `${usedStr} / ${winStr}`;
-		const slotWidth = Math.max(11, visibleWidth(restPlain));
+		const available = width - outerPad * 2;
+		const gapWidth = 2;
+		const slotWidth = available < 14 ? 0 : Math.min(available - gapWidth - 1, Math.max(11, visibleWidth(restPlain)));
 		const isCtxHov = this.hoveredId === "context";
 
 		let ctxRendered: string;
-		if (isCtxHov) {
+		if (slotWidth === 0) {
+			ctxRendered = "";
+		} else if (isCtxHov) {
 			const barRgb =
 				percent >= 85 ? palette.danger : percent >= 70 ? palette.warning : palette.accentBright;
 			ctxRendered = renderHeaderContextHoverBar(
@@ -268,17 +272,18 @@ class SessionHeaderView implements Component {
 		} else {
 			const rawStyled = `${theme.fg("text", usedStr)} ${themeFgRgb(theme, palette.codeMetaFg, `/ ${winStr}`)}`;
 			const padLead = " ".repeat(Math.max(0, slotWidth - visibleWidth(rawStyled)));
-			ctxRendered = `${padLead}${rawStyled}`;
+			ctxRendered = truncateToWidth(`${padLead}${rawStyled}`, slotWidth, "…");
 		}
 
 		const rightTotalW = visibleWidth(ctxRendered) + outerPad;
-		const maxLeftW = Math.max(8, width - outerPad - rightTotalW - 2);
+		const minGap = slotWidth > 0 ? gapWidth : 0;
+		const maxLeftW = width - outerPad - rightTotalW - minGap;
 		const clippedLeft =
 			visibleWidth(leftContent) > maxLeftW
 				? truncateToWidth(leftContent, maxLeftW, "…")
 				: leftContent;
 		const leftW = visibleWidth(clippedLeft);
-		const middleSpaces = Math.max(2, width - outerPad - leftW - rightTotalW);
+		const middleSpaces = Math.max(minGap, width - outerPad - leftW - rightTotalW);
 
 		this.hits.push({
 			id: "workspace",
@@ -293,7 +298,7 @@ class SessionHeaderView implements Component {
 
 		const ctxX = outerPad + leftW + middleSpaces;
 		const ctxW = visibleWidth(ctxRendered);
-		this.hits.push({
+		if (ctxW > 0) this.hits.push({
 			id: "context",
 			xStart: ctxX,
 			xEnd: ctxX + Math.max(0, ctxW - 1),

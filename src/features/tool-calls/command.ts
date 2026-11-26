@@ -1,17 +1,6 @@
-import {
-	chmodSync,
-	existsSync,
-	lstatSync,
-	mkdirSync,
-	readFileSync,
-	realpathSync,
-	renameSync,
-	rmSync,
-	statSync,
-	writeFileSync,
-} from "node:fs";
-import { randomUUID } from "node:crypto";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { resolveConfigWritePath, writeConfigJsonAtomically } from "../../shared/atomic-config-file.ts";
 import {
 	CONFIG_DIR_NAME,
 	getAgentDir,
@@ -26,6 +15,7 @@ import {
 	type ToolDensity,
 } from "./types.ts";
 import {
+	getPiUiConfigPath,
 	TOOL_DENSITY_PRESETS,
 	updatePiUiUserConfig,
 	type ToolDensityPreset,
@@ -127,13 +117,7 @@ function fileDefinesStyleOrDensity(path: string): boolean {
 }
 
 export function saveStyle(path: string, style: DisplayStyle): void {
-	let linked = false;
-	try {
-		linked = lstatSync(path).isSymbolicLink();
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-	}
-	if (linked) path = realpathSync(path);
+	path = resolveConfigWritePath(path);
 	let data: Record<string, unknown> = {};
 	let mode = 0o600;
 	try {
@@ -146,20 +130,12 @@ export function saveStyle(path: string, style: DisplayStyle): void {
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
-	mkdirSync(dirname(path), { recursive: true });
 	const payload: Record<string, unknown> = isToolDensityValue(style)
 		? { ...data, style, density: style }
 		: style === "density"
 			? { ...data, style: "density", density: "balanced" }
 			: { ...data, style };
-	const temporary = join(dirname(path), `.compact-tools-${randomUUID()}.tmp`);
-	try {
-		writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-		chmodSync(temporary, mode);
-		renameSync(temporary, path);
-	} finally {
-		rmSync(temporary, { force: true });
-	}
+	writeConfigJsonAtomically(path, payload, mode);
 }
 
 function projectSetsStyle(cwd: string, trusted: boolean): boolean {
@@ -184,7 +160,7 @@ function formatStatus(config: CompactToolsConfig, ctx: ExtensionContext): string
 	return [
 		t("density.status.main", { density: config.density, active: activePreset, mode: config.mode, lines: config.previewLines }),
 		t("density.status.thinking", { thinking: String(config.thinking), working: String(config.working) }),
-		t("density.status.global", { path: describePath(configPath(ctx.cwd, "global")) }),
+		t("density.status.global", { path: describePath(getPiUiConfigPath()) }),
 		t(ctx.isProjectTrusted() ? "density.status.projectTrusted" : "density.status.projectUntrusted", {
 			path: describePath(configPath(ctx.cwd, "project")),
 		}),
@@ -219,9 +195,11 @@ function applySelection(
 		explicitScope ?? (hasProjectFile ? "project" : hasGlobalFile ? "global" : undefined);
 
 	if (targetScope) {
-		const path = configPath(ctx.cwd, targetScope);
+		const unified = targetScope === "global" && isToolDensityValue(selection);
+		const path = unified ? getPiUiConfigPath() : configPath(ctx.cwd, targetScope);
 		try {
-			saveStyle(path, selection);
+			if (unified) updatePiUiUserConfig({ toolDensity: selection });
+			else saveStyle(path, selection);
 		} catch (error) {
 			ctx.ui.notify(t("density.saveFailed", { path, error: errorMessage(error) }), "error");
 			return;
@@ -266,6 +244,7 @@ function applySelection(
 
 	/* Без явного scope и без существующего файла настроек переключаем плотность на лету в сессии. */
 	if (isToolDensityValue(selection)) {
+		if (commandName === "density") updatePiUiUserConfig({ toolDensity: selection });
 		setSessionStyleOverride({ style: "density", density: selection });
 	} else if (selection === "density") {
 		setSessionStyleOverride({ style: "density", density: "balanced" });
@@ -335,9 +314,6 @@ export function registerDensityCommand(
 				if (!preset) return;
 			}
 
-			if (explicitScope !== "project") {
-				updatePiUiUserConfig({ toolDensity: preset });
-			}
 			await applySelection(preset, explicitScope, ctx, applyStyle, "density");
 		},
 	});

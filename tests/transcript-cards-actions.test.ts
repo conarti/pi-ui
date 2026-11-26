@@ -560,6 +560,36 @@ describe("Link [text](url) and file path:line [Open] [Copy] Hover Popups", () =>
 		expect(harness.screen().text()).not.toContain("[Open]");
 	});
 
+	it("copies and opens the complete file target from either wrapped fragment", async () => {
+		const path = `src/${"deeply-nested-folder/".repeat(4)}component.ts`;
+		const target = `${path}:42:7`;
+		const opened: Array<{ path: string; line?: number; column?: number }> = [];
+		harness = await createInteractiveHarness({
+			width: 60, height: 25,
+			externalOpener: {
+				async openUrl() { return { ok: true }; },
+				async openPath(filePath, options) {
+					opened.push({ path: filePath, line: options?.line, column: options?.column });
+					return { ok: true };
+				},
+			},
+			responses: [fauxAssistantMessage(`Inspect \`${target}\` for details.`)],
+		});
+		await harness.submitInput("Inspect the file");
+		const first = harness.screen().findText("src/deeply")!;
+		const last = harness.screen().findText("7 for details.");
+		expect(last, harness.screen().text()).toBeDefined();
+		expect(first.row).toBeLessThan(last!.row);
+		await harness.mouseClick(first.col + 2, first.row);
+		const copy = harness.screen().findText("[Copy]")!;
+		await harness.mouseClick(copy.col + 2, copy.row);
+		expect(await getActiveHostRuntime()!.clipboard.readText?.()).toBe(target);
+		await harness.mouseClick(last!.col, last!.row);
+		const open = harness.screen().findText("[Open]")!;
+		await harness.mouseClick(open.col + 2, open.row);
+		expect(opened).toEqual([{ path: join(harness.cwd, path), line: 42, column: 7 }]);
+	});
+
 	it("scrolls to the complete hidden link target without moving the transcript, and dismisses on pointer leave", async () => {
 		const target = `https://pi.dev/${"long-path-segment/".repeat(45)}inspectable-final-suffix`;
 		setCapabilities({ images: null, trueColor: true, hyperlinks: true });
