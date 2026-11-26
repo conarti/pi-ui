@@ -1,9 +1,35 @@
-import { fgRgb, getActiveGlobalTheme, isLightTheme, type RgbTuple } from "./ansi.ts";
+import {
+	clampHueOutsideForbiddenBands,
+	fgRgb,
+	fgRgbPrefix,
+	getActiveGlobalTheme,
+	isLightTheme,
+	type RgbTuple,
+} from "./ansi.ts";
+
+export const POLARIS_STAR = "✦";
+export const POLARIS_SECONDARY = "•";
 
 export const BREATHING_FPS = 30;
 export const BREATHING_TICK_MS = 33;
 export const BREATHING_PERIOD_MS = 2400;
 export const WAVE_ROWS = 32;
+
+const glimmerSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+const LIGHT_CAUSTIC_STOPS: readonly [RgbTuple, RgbTuple, RgbTuple, RgbTuple] = [
+	[29, 78, 216],
+	[37, 99, 235],
+	[24, 146, 246],
+	[118, 204, 255],
+];
+
+const DARK_CAUSTIC_STOPS: readonly [RgbTuple, RgbTuple, RgbTuple, RgbTuple] = [
+	[84, 122, 184],
+	[104, 164, 242],
+	[148, 210, 255],
+	[228, 245, 255],
+];
 
 export const DARK_WAVE_STOPS: readonly [RgbTuple, RgbTuple, RgbTuple] = [
 	[64, 82, 112],
@@ -186,10 +212,208 @@ export function paintBreathingWaveGlyph(
 	return fgRgb(sampleBreathingWaveRgb(row, options), glyph);
 }
 
+export interface GlimmerSweepOptions extends WaveSampleOptions {
+	readonly totalSpanChars?: number;
+	readonly startIndex?: number;
+	readonly charsPerSecond?: number;
+	readonly leadPad?: number;
+	readonly trailPad?: number;
+	readonly baseRgb?: RgbTuple;
+	readonly shimmerRgb?: RgbTuple;
+}
+
+function interpolateFourStops(
+	stops: readonly [RgbTuple, RgbTuple, RgbTuple, RgbTuple],
+	level: number,
+): RgbTuple {
+	const t = Math.max(0, Math.min(1, level));
+	let a: RgbTuple;
+	let b: RgbTuple;
+	let u: number;
+	if (t < 0.32) {
+		a = stops[0];
+		b = stops[1];
+		u = t / 0.32;
+	} else if (t < 0.7) {
+		a = stops[1];
+		b = stops[2];
+		u = (t - 0.32) / 0.38;
+	} else {
+		a = stops[2];
+		b = stops[3];
+		u = (t - 0.7) / 0.3;
+	}
+	return clampHueOutsideForbiddenBands([
+		Math.round(a[0] + (b[0] - a[0]) * u),
+		Math.round(a[1] + (b[1] - a[1]) * u),
+		Math.round(a[2] + (b[2] - a[2]) * u),
+	]);
+}
+
+function resolveGlimmerStops(
+	light: boolean,
+	options?: GlimmerSweepOptions,
+): readonly [RgbTuple, RgbTuple, RgbTuple, RgbTuple] {
+	if (options?.baseRgb && options?.shimmerRgb) {
+		const base = options.baseRgb;
+		const peak = options.shimmerRgb;
+		return [
+			base,
+			[
+				Math.round(base[0] * 0.82 + peak[0] * 0.18),
+				Math.round(base[1] * 0.82 + peak[1] * 0.18),
+				Math.round(base[2] * 0.82 + peak[2] * 0.18),
+			],
+			[
+				Math.round(base[0] * 0.38 + peak[0] * 0.62),
+				Math.round(base[1] * 0.38 + peak[1] * 0.62),
+				Math.round(base[2] * 0.38 + peak[2] * 0.62),
+			],
+			peak,
+		];
+	}
+	return light ? LIGHT_CAUSTIC_STOPS : DARK_CAUSTIC_STOPS;
+}
+
+function resolveGlimmerTiming(
+	spanChars: number,
+	options?: GlimmerSweepOptions,
+): {
+	readonly cycleLen: number;
+	readonly leadPad: number;
+	readonly periodMs: number;
+} {
+	const safeSpan = Math.max(1, Math.floor(spanChars));
+	const leadPad = options?.leadPad ?? 9;
+	const trailPad = options?.trailPad ?? 15;
+	const cycleLen = safeSpan + leadPad + trailPad;
+	const charsPerSecond = Math.max(1, options?.charsPerSecond ?? 17);
+	const periodSec = Math.max(1.9, cycleLen / charsPerSecond);
+	return {
+		cycleLen,
+		leadPad,
+		periodMs: Math.round(periodSec * 1000),
+	};
+}
+
+export function computeGlimmerPeriodMs(
+	textOrSpan: string | number,
+	options?: GlimmerSweepOptions,
+): number {
+	const count =
+		typeof textOrSpan === "number"
+			? textOrSpan
+			: [...glimmerSegmenter.segment(textOrSpan)].length;
+	const startIdx = options?.startIndex ?? 0;
+	const totalSpan = Math.max(count, options?.totalSpanChars ?? startIdx + count);
+	return resolveGlimmerTiming(totalSpan, options).periodMs;
+}
+
+function evaluateGlimmerLevel(
+	x: number,
+	totalSpan: number,
+	elapsedMs: number,
+	options?: GlimmerSweepOptions,
+): number {
+	const { cycleLen, leadPad, periodMs } = resolveGlimmerTiming(totalSpan, options);
+	const safeElapsed = Number.isFinite(elapsedMs) ? Math.max(0, elapsedMs) : 0;
+	/* Строго периодическая фаза rawU в [0, 1) обеспечивает C∞-гладкость на стыке цикла */
+	const rawU = ((safeElapsed / periodMs) % 1 + 1) % 1;
+	const tau = rawU * Math.PI * 2;
+	/* Ускоряется при выходе из ✦ (rawU = 0) и замедляется/расширяется над текстом (rawU ≈ 0.5) */
+	const easedU = rawU + (0.088 * Math.sin(tau));
+	const headPos = easedU * cycleLen - leadPad;
+
+	const breathScale = 1 - 0.22 * Math.cos(tau);
+	const sigmaFront = 3.4 * breathScale;
+	const sigmaTail = 8.4 * breathScale;
+
+	/* Периодическая обёртка гауссианы гарантирует равенство интенсивностей при t = 0 и t = periodMs */
+	let comet = 0;
+	for (let shift = -1; shift <= 1; shift += 1) {
+		const delta = x - (headPos + shift * cycleLen);
+		const sigma = delta > 0 ? sigmaFront : sigmaTail;
+		const energy = Math.exp(-(delta * delta) / (2 * sigma * sigma));
+		if (energy > comet) comet = energy;
+	}
+
+	/* Двухгармоническая встречная каустическая рябь, синхронизированная с периодом цикла */
+	const swellA = (Math.sin(x * 0.21 - tau) + 1) * 0.5;
+	const swellB = (Math.sin(x * 0.36 + tau) + 1) * 0.5;
+	const caustic = Math.pow(swellA * 0.64 + swellB * 0.36, 1.5);
+
+	return Math.min(1, 0.14 + comet * 0.74 + caustic * 0.28);
+}
+
+export function sampleGlimmerSweepRgb(
+	charIndex: number,
+	totalSpanChars: number,
+	options?: GlimmerSweepOptions,
+): RgbTuple {
+	const light =
+		options?.light !== undefined
+			? options.light
+			: isLightTheme(options?.theme ?? getActiveGlobalTheme());
+	const elapsed = Number.isFinite(options?.elapsedMs)
+		? options!.elapsedMs!
+		: getAnimationElapsedMs();
+	const stops = resolveGlimmerStops(light, options);
+	const level = evaluateGlimmerLevel(charIndex, totalSpanChars, elapsed, options);
+	return interpolateFourStops(stops, level);
+}
+
+/**
+ * Рисует широкую асимметричную каустическую волну (`30 fps`, 12–16 колонок) напрямую через ANSI-префиксы
+ * без внутренних сбросов `\x1b[39m` между символами (только один завершающий `\x1b[39m`).
+ */
+export function paintGlimmerSweepText(
+	text: string,
+	options?: GlimmerSweepOptions,
+): string {
+	if (!text) return "";
+	const theme = options?.theme ?? getActiveGlobalTheme();
+	const light = options?.light !== undefined ? options.light : isLightTheme(theme);
+	const elapsed = Number.isFinite(options?.elapsedMs)
+		? options!.elapsedMs!
+		: getAnimationElapsedMs();
+
+	const segments = [...glimmerSegmenter.segment(text)].map((s) => s.segment);
+	const startIdx = options?.startIndex ?? 0;
+	const totalSpan = Math.max(segments.length, options?.totalSpanChars ?? startIdx + segments.length);
+	const stops = resolveGlimmerStops(light, options);
+
+	let out = "";
+	let lastPrefix = "";
+	let paintedAny = false;
+	for (let i = 0; i < segments.length; i += 1) {
+		const ch = segments[i]!;
+		if (ch === " ") {
+			out += " ";
+			continue;
+		}
+		const level = evaluateGlimmerLevel(startIdx + i, totalSpan, elapsed, options);
+		const rgb = interpolateFourStops(stops, level);
+		const prefix = fgRgbPrefix(rgb, theme);
+		if (prefix !== lastPrefix) {
+			out += prefix;
+			lastPrefix = prefix;
+		}
+		out += ch;
+		paintedAny = true;
+	}
+	return paintedAny ? `${out}\x1b[39m` : out;
+}
+
+export function paintPolarisStar(
+	options?: WaveSampleOptions & { row?: number },
+): string {
+	return paintBreathingWaveGlyph(options?.row ?? 0, POLARIS_STAR, options);
+}
+
 export function paintRunningToolDiamond(
 	options?: WaveSampleOptions & { row?: number },
 ): string {
-	return paintBreathingWaveGlyph(options?.row ?? 0, "◆", options);
+	return paintPolarisStar(options);
 }
 
 export function paintRunningCommandBar(
@@ -200,5 +424,5 @@ export function paintRunningCommandBar(
 }
 
 export function renderComposerWorkingFrame(options?: WaveSampleOptions): string {
-	return paintRunningToolDiamond({ ...options, row: 0 });
+	return paintPolarisStar({ ...options, row: 0 });
 }

@@ -246,7 +246,7 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		}
 	});
 
-	it("renders ◆ diamond indicator and 30 fps streaming command bars across built-in tools, codemode, and MCP tools in dark & light blue-slate tones with 0-timer idle cleanup", async () => {
+	it("renders ✦ diamond indicator and 30 fps streaming command bars across built-in tools, codemode, and MCP tools in dark & light blue-slate tones with 0-timer idle cleanup", async () => {
 		vi.useFakeTimers();
 		expect(DEFAULT_CONFIG.tools).toEqual([
 			"read",
@@ -402,7 +402,7 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		for (const cmdTool of ["bash", "powershell", "codemode"] as const) {
 			await harness.flush();
 			const preText = harness.screen().text();
-			expect(preText).toContain("◆ Running");
+			expect(preText).toContain("✦ Running");
 			expect(preText).toContain("▎ Running…");
 			expect(vi.getTimerCount()).toBe(1);
 
@@ -457,20 +457,20 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		const settledDarkText = harness.screen().text();
 		expect(settledDarkText).toContain("│ codemode-out-1");
 		expect(settledDarkText).toContain("│ codemode-out-10");
-		expect(settledDarkText).toContain("◆ Edited src/auth.ts (+2 -1");
+		expect(settledDarkText).toContain("✦ Edited src/auth.ts (+2 -1");
 		expect(settledDarkText).toContain("-const valid = checkLegacy(header);");
 		expect(settledDarkText).toContain("+const token = parseBearer(header);");
-		expect(settledDarkText).toContain("◆ Wrote src/config.ts (+3 -0");
+		expect(settledDarkText).toContain("✦ Wrote src/config.ts (+3 -0");
 		expect(settledDarkText).toContain("+export const A = 1;");
-		expect(settledDarkText).toContain("◆ mcp__github__search pi-tui");
+		expect(settledDarkText).toContain("✦ mcp__github__search pi-tui");
 
-		const darkDiamond = findRowGlyphRgb(harness, "Edited src/auth.ts", "◆");
+		const darkDiamond = findRowGlyphRgb(harness, "Edited src/auth.ts", "✦");
 		expect(darkDiamond).toBeDefined();
 		expect(darkDiamond![0]).toBeLessThan(darkDiamond![1]);
 		expect(darkDiamond![1]).toBeLessThan(darkDiamond![2]);
 
 		harness.setTheme("light");
-		const lightDiamond = findRowGlyphRgb(harness, "Edited src/auth.ts", "◆");
+		const lightDiamond = findRowGlyphRgb(harness, "Edited src/auth.ts", "✦");
 		expect(lightDiamond).toBeDefined();
 		expect(lightDiamond).not.toEqual(darkDiamond);
 		expect(lightDiamond![0]).toBeLessThan(lightDiamond![1]);
@@ -482,7 +482,7 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		}
 	});
 
-	it("folds consecutive Shell Effect-verified read-only calls into ◆ Explored, never folds mutating commands, toggles groups, member rows, and author custom renderers via real mouse clicks, and respects /silent", async () => {
+	it("folds consecutive Shell Effect-verified read-only calls into ✦ Explored, never folds mutating commands, toggles groups, member rows, and author custom renderers via real mouse clicks, and respects /silent", async () => {
 		vi.useFakeTimers();
 		const projDir = createTempDir();
 		mkdirSync(join(projDir, "src"), { recursive: true });
@@ -551,14 +551,14 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		await harness.flush();
 
 		const runningText = harness.screen().text();
-		expect(runningText).toContain("◆ Exploring 2 files, 1 search");
+		expect(runningText).toContain("✦ Exploring 2 files, 1 search");
 		expect(runningText).not.toContain("Read src/a.ts");
 		expect(vi.getTimerCount()).toBe(1);
 
-		const expDiamond0 = findRowGlyphRgb(harness, "Exploring 2 files", "◆");
+		const expDiamond0 = findRowGlyphRgb(harness, "Exploring 2 files", "✦");
 		vi.advanceTimersByTime(33 * 5);
 		harness.flushFrame();
-		const expDiamond1 = findRowGlyphRgb(harness, "Exploring 2 files", "◆");
+		const expDiamond1 = findRowGlyphRgb(harness, "Exploring 2 files", "✦");
 		expect(expDiamond1).not.toEqual(expDiamond0);
 
 		finishRoBash!();
@@ -567,52 +567,52 @@ describe("Tool Density: real InteractiveMode integration", () => {
 
 		const foldedScreen = harness.screen();
 		const foldedText = foldedScreen.text();
-		expect(foldedText).toContain("◆ Explored 2 files, 1 search");
+		expect(foldedText).toContain("✦ Explored 2 files, 1 search");
 		expect(foldedText).not.toContain("Read src/a.ts");
 		expect(foldedText).not.toContain("(click to expand)");
-		expect(foldedText).toContain("◆ Ran sed -i 's/111/999/' src/a.ts");
-		expect(foldedText).toContain("◆ custom_diagram arch");
+		expect(foldedText).toContain("✦ Ran sed -i 's/111/999/' src/a.ts");
+		expect(foldedText).toContain("✦ custom_diagram arch");
 		expect(foldedText).not.toContain("AUTHOR_FULL_DIAGRAM_VIEW");
 
-		const groupPos = foldedScreen.findText("◆ Explored 2 files, 1 search")!;
+		const groupPos = foldedScreen.findText("✦ Explored 2 files, 1 search")!;
 		if (groupPos.row > 1) {
 			await harness.mouseClick(groupPos.col + 2, groupPos.row - 1);
-			expect(harness.screen().text()).not.toContain("◆ Read src/a.ts");
+			expect(harness.screen().text()).not.toContain("✦ Read src/a.ts");
 		}
 
 		vi.advanceTimersByTime(500);
 		await harness.mouseClick(groupPos.col + 2, groupPos.row);
 		const openedGroupScreen = harness.screen();
-		expect(openedGroupScreen.text()).toContain("◆ Read src/a.ts");
-		expect(openedGroupScreen.text()).toContain("◆ Read src/b.ts");
+		expect(openedGroupScreen.text()).toContain("✦ Read src/a.ts");
+		expect(openedGroupScreen.text()).toContain("✦ Read src/b.ts");
 
 		vi.advanceTimersByTime(500);
-		const memberPos = openedGroupScreen.findText("◆ Read src/a.ts")!;
+		const memberPos = openedGroupScreen.findText("✦ Read src/a.ts")!;
 		await harness.mouseClick(memberPos.col + 2, memberPos.row);
 		expect(harness.screen().text()).toContain("export const uniqueAlphaBody = 111;");
 
 		vi.advanceTimersByTime(500);
-		const memberOpenPos = harness.screen().findText("◆ Read src/a.ts")!;
+		const memberOpenPos = harness.screen().findText("✦ Read src/a.ts")!;
 		await harness.mouseClick(memberOpenPos.col + 2, memberOpenPos.row);
 		const afterMemberClose = harness.screen().text();
 		expect(afterMemberClose).not.toContain("export const uniqueAlphaBody = 111;");
-		expect(afterMemberClose).toContain("◆ Read src/a.ts");
-		expect(afterMemberClose).toContain("◆ Read src/b.ts");
+		expect(afterMemberClose).toContain("✦ Read src/a.ts");
+		expect(afterMemberClose).toContain("✦ Read src/b.ts");
 
 		vi.advanceTimersByTime(500);
-		const customPos = harness.screen().findText("◆ custom_diagram arch")!;
+		const customPos = harness.screen().findText("✦ custom_diagram arch")!;
 		await harness.mouseClick(customPos.col + 2, customPos.row);
 		expect(harness.screen().text()).toContain("AUTHOR_FULL_DIAGRAM_VIEW");
 
 		await harness.submitInput("/silent on");
 		const silentText = harness.screen().text();
-		expect(silentText).not.toContain("◆ Read src/a.ts");
+		expect(silentText).not.toContain("✦ Read src/a.ts");
 		expect(silentText).not.toContain("AUTHOR_FULL_DIAGRAM_VIEW");
 		expect(silentText).toContain("Exploration summary complete.");
 
 		await harness.submitInput("/silent off");
 		const restoredText = harness.screen().text();
-		expect(restoredText).toContain("◆ Read src/a.ts");
+		expect(restoredText).toContain("✦ Read src/a.ts");
 		expect(restoredText).toContain("AUTHOR_FULL_DIAGRAM_VIEW");
 	});
 
@@ -721,8 +721,8 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		await harness.submitInput("Build density matrix");
 
 		const detailedText = harness.screen().text();
-		expect(detailedText).toContain("◆ Explored 2 files");
-		expect(detailedText).toContain("◆ Edited src/service.ts (+2 -1");
+		expect(detailedText).toContain("✦ Explored 2 files");
+		expect(detailedText).toContain("✦ Edited src/service.ts (+2 -1");
 		expect(detailedText).toContain("+const host = '0.0.0.0';");
 		expect(detailedText).toContain("+export const MAX = 10;");
 		expect(detailedText).toContain("bash-line-1");
@@ -735,10 +735,10 @@ describe("Tool Density: real InteractiveMode integration", () => {
 
 		await harness.submitInput("/density diff-focus");
 		const diffFocusText = harness.screen().text();
-		expect(diffFocusText).toContain("◆ Explored 2 files");
+		expect(diffFocusText).toContain("✦ Explored 2 files");
 		expect(diffFocusText).toContain("+const host = '0.0.0.0';");
 		expect(diffFocusText).toContain("+export const MAX = 10;");
-		expect(diffFocusText).toContain("◆ Ran npm test (8 lines");
+		expect(diffFocusText).toContain("✦ Ran npm test (8 lines");
 		expect(diffFocusText).not.toContain("bash-line-1");
 		expect(diffFocusText).not.toContain("ps-line-1");
 		expect(diffFocusText).not.toContain("cm-line-1");
@@ -751,16 +751,16 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		await selectCmd;
 
 		const compactText = harness.screen().text();
-		expect(compactText).toContain("◆ Explored 2 files");
-		expect(compactText).toContain("◆ Edited src/service.ts (+2 -1");
-		expect(compactText).toContain("◆ Wrote src/constants.ts (+2 -0");
-		expect(compactText).toContain("◆ Ran npm test (8 lines");
-		expect(compactText).toContain("◆ mcp__docs__lookup ScrollView (4 lines");
+		expect(compactText).toContain("✦ Explored 2 files");
+		expect(compactText).toContain("✦ Edited src/service.ts (+2 -1");
+		expect(compactText).toContain("✦ Wrote src/constants.ts (+2 -0");
+		expect(compactText).toContain("✦ Ran npm test (8 lines");
+		expect(compactText).toContain("✦ mcp__docs__lookup ScrollView (4 lines");
 		expect(compactText).not.toContain("+const host = '0.0.0.0';");
 		expect(compactText).not.toContain("+export const MAX = 10;");
 		expect(compactText).not.toContain("bash-line-1");
 
-		const editPos = harness.screen().findText("◆ Edited src/service.ts")!;
+		const editPos = harness.screen().findText("✦ Edited src/service.ts")!;
 		await harness.mouseClick(editPos.col + 2, editPos.row);
 		expect(harness.screen().text()).toContain("+const host = '0.0.0.0';");
 
@@ -851,14 +851,14 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		await harness.submitInput("Execute real codemode script");
 
 		const settledCmText = harness.screen().text();
-		expect(settledCmText).toContain("◆ Ran codemode");
+		expect(settledCmText).toContain("✦ Ran codemode");
 		expect(settledCmText).toContain("read 1");
 		expect(settledCmText).toContain("res-1");
 		expect(settledCmText).toContain("res-2");
 		expect(settledCmText).toContain("res-7");
 		expect(settledCmText).not.toContain("res-4");
 
-		const cmPos = harness.screen().findText("◆ Ran codemode")!;
+		const cmPos = harness.screen().findText("✦ Ran codemode")!;
 		await harness.mouseClick(cmPos.col + 2, cmPos.row);
 		const expandedCmText = harness.screen().text();
 		expect(expandedCmText).toContain("const total = 42;");
@@ -867,7 +867,7 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		expect(expandedCmText).not.toContain("Took ");
 
 		await new Promise((r) => setTimeout(r, 450));
-		const cmOpenPos = harness.screen().findText("◆ Ran codemode")!;
+		const cmOpenPos = harness.screen().findText("✦ Ran codemode")!;
 		await harness.mouseClick(cmOpenPos.col + 2, cmOpenPos.row);
 
 		const buildTurn = harness.submitInput("Run streaming build");
@@ -888,13 +888,13 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		await buildTurn;
 
 		expect(harness.screen().text()).not.toContain("│ b7");
-		expect(harness.screen().text()).toContain("◆ Ran npm run build");
+		expect(harness.screen().text()).toContain("✦ Ran npm run build");
 
 		await harness.submitInput("/compact-tools off");
-		expect(harness.screen().text()).not.toContain("◆ Ran codemode");
+		expect(harness.screen().text()).not.toContain("✦ Ran codemode");
 
 		await harness.submitInput("/density detailed");
-		expect(harness.screen().text()).toContain("◆ Ran codemode");
+		expect(harness.screen().text()).toContain("✦ Ran codemode");
 		expect(harness.screen().text()).toContain("│ b7");
 	});
 
@@ -1042,7 +1042,7 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		await t1;
 
 		const diffFocusScreen = harness.screen().text();
-		expect(diffFocusScreen).toContain("◆ Wrote src/existing.ts (+2 -1");
+		expect(diffFocusScreen).toContain("✦ Wrote src/existing.ts (+2 -1");
 		expect(diffFocusScreen).toContain("-export const PORT = 3000;");
 		expect(diffFocusScreen).toContain("+export const PORT = 8080;");
 		expect(diffFocusScreen).not.toContain("LINE_3 = 3");
@@ -1100,8 +1100,8 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		await t2;
 
 		const afterMutText = harness.screen().text();
-		expect(afterMutText).toContain("◆ Read src/a.ts");
-		expect(afterMutText).toContain("◆ Ran cat src/b.ts > src/out.ts");
+		expect(afterMutText).toContain("✦ Read src/a.ts");
+		expect(afterMutText).toContain("✦ Ran cat src/b.ts > src/out.ts");
 
 		await harness.dispose();
 		harness = undefined;
@@ -1122,7 +1122,7 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		});
 		await harness.submitInput("Check 256color tool row");
 		const screen256 = harness.screen();
-		const pos256 = screen256.findText("◆ Read src/a.ts");
+		const pos256 = screen256.findText("✦ Read src/a.ts");
 		expect(pos256).toBeDefined();
 		let sawPalette256 = false;
 		let sawTrueColor = false;

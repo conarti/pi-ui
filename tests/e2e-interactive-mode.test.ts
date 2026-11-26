@@ -228,15 +228,15 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		await harness.flush();
 
 		expect(vi.getTimerCount()).toBe(1);
-		const spineRgbFrame0 = findRowGlyphRgb(harness, "Thinking…", "┃");
-		const workingRgbFrame0 = findRowGlyphRgb(harness, "Working", "◆");
+		const spineRgbFrame0 = findRowGlyphRgb(harness, "Thinking…", "✦");
+		const workingRgbFrame0 = findRowGlyphRgb(harness, "[stop]", "✦");
 		expect(spineRgbFrame0).toBeDefined();
 		expect(workingRgbFrame0).toBeDefined();
 
 		vi.advanceTimersByTime(33 * 6);
 		harness.flushFrame();
-		const spineRgbFrame1 = findRowGlyphRgb(harness, "Thinking…", "┃");
-		const workingRgbFrame1 = findRowGlyphRgb(harness, "Working", "◆");
+		const spineRgbFrame1 = findRowGlyphRgb(harness, "Thinking…", "✦");
+		const workingRgbFrame1 = findRowGlyphRgb(harness, "[stop]", "✦");
 		expect(spineRgbFrame1).not.toEqual(spineRgbFrame0);
 		expect(workingRgbFrame1).not.toEqual(workingRgbFrame0);
 
@@ -269,13 +269,13 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 
 		await harness.flush();
 
-		const toolDiamondBefore = findRowGlyphRgb(harness, "inspect_bundle", "◆");
-		expect(toolDiamondBefore).toBeDefined();
+		const toolStarBefore = findRowGlyphRgb(harness, "inspect_bundle", "✦");
+		expect(toolStarBefore).toBeDefined();
 		vi.advanceTimersByTime(33 * 6);
 		harness.flushFrame();
-		const toolDiamondAfter = findRowGlyphRgb(harness, "inspect_bundle", "◆");
-		expect(toolDiamondAfter).toBeDefined();
-		expect(toolDiamondAfter).not.toEqual(toolDiamondBefore);
+		const toolStarAfter = findRowGlyphRgb(harness, "inspect_bundle", "✦");
+		expect(toolStarAfter).toBeDefined();
+		expect(toolStarAfter).not.toEqual(toolStarBefore);
 
 		releaseTool();
 		const stream2 = await streamQueue.nextStream();
@@ -627,9 +627,9 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 
 		await harness.submitInput("Inspect and update service timeout");
 		const detailedText = harness.screen().text();
-		expect(detailedText).toContain("◆ Explored 2 files, 1 search");
-		expect(detailedText).not.toContain("◆ Read src/service.ts");
-		expect(detailedText).toContain("◆ Edited src/service.ts");
+		expect(detailedText).toContain("✦ Explored 2 files, 1 search");
+		expect(detailedText).not.toContain("✦ Read src/service.ts");
+		expect(detailedText).toContain("✦ Edited src/service.ts");
 		expect(detailedText).toContain("-export const timeoutMs = 1000;");
 		expect(detailedText).toContain("+export const timeoutMs = 2500;");
 		expect(detailedText).toContain("│ out-1");
@@ -637,13 +637,13 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(detailedText).toContain("│ out-7");
 		expect(detailedText).not.toContain("│ out-4");
 
-		const exploredPos = harness.screen().findText("◆ Explored 2 files, 1 search");
+		const exploredPos = harness.screen().findText("✦ Explored 2 files, 1 search");
 		expect(exploredPos).toBeDefined();
 		await harness.mouseClick(exploredPos!.col + 2, exploredPos!.row);
-		expect(harness.screen().text()).toContain("◆ Read src/service.ts");
-		const exploredOpenPos = harness.screen().findText("◆ Explored 2 files, 1 search");
+		expect(harness.screen().text()).toContain("✦ Read src/service.ts");
+		const exploredOpenPos = harness.screen().findText("✦ Explored 2 files, 1 search");
 		await harness.mouseClick(exploredOpenPos!.col + 2, exploredOpenPos!.row);
-		expect(harness.screen().text()).not.toContain("◆ Read src/service.ts");
+		expect(harness.screen().text()).not.toContain("✦ Read src/service.ts");
 
 		await harness.submitInput("/density diff-focus");
 		const diffFocusText = harness.screen().text();
@@ -652,7 +652,7 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 
 		await harness.submitInput("/density compact");
 		const compactText = harness.screen().text();
-		expect(compactText).toContain("◆ Edited src/service.ts");
+		expect(compactText).toContain("✦ Edited src/service.ts");
 		expect(compactText).not.toContain("+export const timeoutMs = 2500;");
 		expect(compactText).not.toContain("│ out-7");
 

@@ -24,7 +24,7 @@ export function indicatorTone(status: RowStatus, frame = 0): IndicatorTone {
 	return strength >= 0.7 ? "muted" : strength >= 0.35 ? "dim" : "borderMuted";
 }
 
-export const TOOL_DIAMOND = "◆";
+export const TOOL_DIAMOND = "✦";
 
 export function indicatorGlyph(_status: RowStatus, _frame = 0): string {
 	return TOOL_DIAMOND;
