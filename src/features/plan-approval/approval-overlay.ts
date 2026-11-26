@@ -224,6 +224,7 @@ export async function showPlanApproval(pi: ExtensionAPI, ctx: ExtensionContext):
 				},
 				handleInput(data: string): void {
 					if (editingLine !== null) {
+						if (commentInput.handlePaste(data)) return;
 						if (matchesKey(data, "escape")) {
 							editingLine = null;
 							commentInput.clear();

@@ -9,6 +9,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
 	isSupersededExtension,
+	isSupersededWidget,
 	neutralizeRunnerExtensions,
 } from "./extension-superseder.ts";
 import { getActiveHostRuntime } from "./host-runtime.ts";
@@ -98,7 +99,6 @@ const SENTINEL_TOOL_RENDERER = Object.freeze({
 interface RunnerExtensionRecord {
 	path?: string;
 	resolvedPath?: string;
-	hidden?: boolean;
 	sourceInfo?: {
 		source?: string;
 		path?: string;
@@ -184,7 +184,6 @@ function isSingletonSlot(slotId: string): slotId is SingletonUiSlot {
 }
 
 function isBuiltinExtension(ext: RunnerExtensionRecord): boolean {
-	if (ext.hidden === true) return true;
 	if (typeof ext.path === "string" && ext.path.startsWith("builtin:")) return true;
 	return false;
 }
@@ -564,6 +563,14 @@ class SessionArbitrationController {
 		const controller = this;
 		const proxiedUi = new Proxy(baseUi, {
 			get(target, prop) {
+				if (prop === "setWidget") {
+					const setWidget = target.setWidget;
+					return (...args: Parameters<ExtensionUIContext["setWidget"]>) => {
+						if (!isSupersededWidget(controller.extsByOwnerId.get(ownerId), args[0])) {
+							setWidget.apply(target, args);
+						}
+					};
+				}
 				if (prop === "setFooter") {
 					return (factory: Parameters<ExtensionUIContext["setFooter"]>[0]) => {
 						controller.registerSingletonSlot("footer", ownerId, factory);
@@ -894,96 +901,38 @@ class SessionArbitrationController {
 		this.syncExtensionsAndWrap();
 		const savedMap = loadPiUiUserConfig().slotOwners;
 		const snapshots: ContendedSlotSnapshot[] = [];
+		const addSnapshot = (kind: CapabilityKind, owners: Iterable<string>, name?: string): void => {
+			const slotId = name === undefined ? kind : `${kind}:${name}`;
+			const ownerIds = [...owners];
+			const savedOwnerId = normalizeSlotOwnerId(savedMap[slotId]);
+			snapshots.push({
+				slotId,
+				kind,
+				target: kind === "command" ? `/${name}` : name,
+				activeOwnerId: savedOwnerId && ownerIds.includes(savedOwnerId) ? savedOwnerId : PI_UI_OWNER_ID,
+				savedOwnerId,
+				candidates: sortCandidates(ownerIds.map((ownerId) => ({ ownerId, label: ownerId }))),
+			});
+		};
 
 		for (const slot of SINGLETON_UI_SLOTS) {
 			const map = this.singletonCandidates[slot];
-			if (map.size <= 1 || !map.has(PI_UI_OWNER_ID)) continue;
-			const ownerIds = [...map.keys()];
-			const activeOwnerId = this.resolveActiveOwner(slot, ownerIds);
-			snapshots.push({
-				slotId: slot,
-				kind: slot,
-				activeOwnerId,
-				savedOwnerId: normalizeSlotOwnerId(savedMap[slot]),
-				candidates: sortCandidates(
-					ownerIds.map((ownerId) => ({ ownerId, label: ownerId })),
-				),
-			});
+			if (map.size > 1 && map.has(PI_UI_OWNER_ID)) addSnapshot(slot, map.keys());
 		}
-
-		for (const [cmdName, contenders] of this.collectContendedCommandMap()) {
-			const slotId = `command:${cmdName}`;
-			const ownerIds = [...contenders.keys()];
-			snapshots.push({
-				slotId,
-				kind: "command",
-				target: `/${cmdName}`,
-				activeOwnerId: this.resolveActiveOwner(slotId, ownerIds),
-				savedOwnerId: normalizeSlotOwnerId(savedMap[slotId]),
-				candidates: sortCandidates(
-					ownerIds.map((ownerId) => ({ ownerId, label: ownerId })),
-				),
-			});
+		for (const [name, contenders] of this.collectContendedCommandMap()) {
+			addSnapshot("command", contenders.keys(), name);
 		}
-
 		for (const [chord, contenders] of this.collectContendedShortcutMap()) {
-			const slotId = `shortcut:${chord}`;
-			const ownerIds = [...contenders.keys()];
-			snapshots.push({
-				slotId,
-				kind: "shortcut",
-				target: chord,
-				activeOwnerId: this.resolveActiveOwner(slotId, ownerIds),
-				savedOwnerId: normalizeSlotOwnerId(savedMap[slotId]),
-				candidates: sortCandidates(
-					ownerIds.map((ownerId) => ({ ownerId, label: ownerId })),
-				),
-			});
+			addSnapshot("shortcut", contenders.keys(), chord);
 		}
-
-		for (const [customType, contenders] of this.collectContendedRendererMap("messageRenderers")) {
-			const slotId = `messageRenderer:${customType}`;
-			const ownerIds = [...contenders.keys()];
-			snapshots.push({
-				slotId,
-				kind: "messageRenderer",
-				target: customType,
-				activeOwnerId: this.resolveActiveOwner(slotId, ownerIds),
-				savedOwnerId: normalizeSlotOwnerId(savedMap[slotId]),
-				candidates: sortCandidates(
-					ownerIds.map((ownerId) => ({ ownerId, label: ownerId })),
-				),
-			});
+		for (const [type, contenders] of this.collectContendedRendererMap("messageRenderers")) {
+			addSnapshot("messageRenderer", contenders.keys(), type);
 		}
-
-		for (const [customType, contenders] of this.collectContendedRendererMap("entryRenderers")) {
-			const slotId = `entryRenderer:${customType}`;
-			const ownerIds = [...contenders.keys()];
-			snapshots.push({
-				slotId,
-				kind: "entryRenderer",
-				target: customType,
-				activeOwnerId: this.resolveActiveOwner(slotId, ownerIds),
-				savedOwnerId: normalizeSlotOwnerId(savedMap[slotId]),
-				candidates: sortCandidates(
-					ownerIds.map((ownerId) => ({ ownerId, label: ownerId })),
-				),
-			});
+		for (const [type, contenders] of this.collectContendedRendererMap("entryRenderers")) {
+			addSnapshot("entryRenderer", contenders.keys(), type);
 		}
-
-		for (const [toolName, contenders] of this.collectContendedToolRendererMap()) {
-			const slotId = `toolRenderer:${toolName}`;
-			const ownerIds = [...contenders.keys()];
-			snapshots.push({
-				slotId,
-				kind: "toolRenderer",
-				target: toolName,
-				activeOwnerId: this.resolveActiveOwner(slotId, ownerIds),
-				savedOwnerId: normalizeSlotOwnerId(savedMap[slotId]),
-				candidates: sortCandidates(
-					ownerIds.map((ownerId) => ({ ownerId, label: ownerId })),
-				),
-			});
+		for (const [name, contenders] of this.collectContendedToolRendererMap()) {
+			addSnapshot("toolRenderer", contenders.keys(), name);
 		}
 
 		return snapshots.sort((a, b) => {
@@ -1208,9 +1157,13 @@ class SessionArbitrationController {
 			return original(customType);
 		}
 		const prefix = field === "messageRenderers" ? "messageRenderer" : "entryRenderer";
-		const winnerOwner = this.resolveActiveOwner(`${prefix}:${customType}`, contenders.keys());
-		const winnerExt = contenders.get(winnerOwner) ?? contenders.get(PI_UI_OWNER_ID);
-		return winnerExt?.[field]?.get(customType) ?? original(customType);
+		/* Хост хранит callback на карточке. Владелец выбирается при каждой пересборке, а не при создании карточки. */
+		return (...args: unknown[]) => {
+			const winnerOwner = this.resolveActiveOwner(`${prefix}:${customType}`, contenders.keys());
+			const winnerExt = contenders.get(winnerOwner) ?? contenders.get(PI_UI_OWNER_ID);
+			const render = winnerExt?.[field]?.get(customType) ?? original(customType);
+			return typeof render === "function" ? render(...args) : undefined;
+		};
 	}
 
 	resolveToolRenderersHook(
@@ -1264,8 +1217,8 @@ class SessionArbitrationController {
 		updates: Readonly<Record<string, string>>,
 		options?: { readonly replace?: boolean },
 	): void {
-		const existing = options?.replace ? {} : { ...loadPiUiUserConfig().slotOwners };
-		const nextOwners: Record<string, string> = { ...existing };
+		const previous = loadPiUiUserConfig().slotOwners;
+		const nextOwners: Record<string, string> = options?.replace ? {} : { ...previous };
 
 		for (const [slotId, rawOwner] of Object.entries(updates)) {
 			const cleanSlot = slotId.trim();
@@ -1277,33 +1230,23 @@ class SessionArbitrationController {
 		}
 
 		updatePiUiUserConfig({ slotOwners: nextOwners });
-		this.reapplyAllActiveSlots(Object.keys(updates));
+		const changed = [...new Set([...Object.keys(previous), ...Object.keys(nextOwners)])]
+			.filter((slotId) => normalizeSlotOwnerId(previous[slotId]) !== nextOwners[slotId]);
+		let invalidate = false;
+		for (const slotId of changed) {
+			if (isSingletonSlot(slotId)) {
+				this.applySingletonSlot(slotId, false);
+			} else {
+				notifyOwnershipListeners(slotId, nextOwners[slotId] ?? PI_UI_OWNER_ID);
+				invalidate = true;
+			}
+		}
+		if (invalidate) getActiveHostRuntime()?.tui?.invalidate?.();
+		requestRender();
 	}
 
 	clearAllSlotOwners(): void {
-		updatePiUiUserConfig({ slotOwners: {} });
-		this.reapplyAllActiveSlots([...SINGLETON_UI_SLOTS]);
-	}
-
-	private reapplyAllActiveSlots(touchedSlots: readonly string[]): void {
-		const touched = new Set(touchedSlots);
-		for (const slot of SINGLETON_UI_SLOTS) {
-			if (
-				touched.size === 0 ||
-				touched.has(slot) ||
-				this.singletonCandidates[slot].size > 0 ||
-				this.appliedSingletonOwners[slot] !== undefined
-			) {
-				this.applySingletonSlot(slot, true);
-			}
-		}
-		for (const slotId of touched) {
-			if (!isSingletonSlot(slotId)) {
-				notifyOwnershipListeners(slotId, this.resolveActiveOwner(slotId));
-			}
-		}
-		getActiveHostRuntime()?.tui?.invalidate?.();
-		requestRender();
+		this.applySlotOwnershipUpdates({}, { replace: true });
 	}
 
 	dispose(): void {

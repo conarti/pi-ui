@@ -106,7 +106,7 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 		const screen2 = harness.screen();
 		const scroll = getActiveHostRuntime()!.scroll!;
 		expect(scroll.scrollbar).toBe("hidden");
-		scroll.scrollTo(0, { disableFollow: true });
+		await harness.mouseWheel("up", 12, 12, 30);
 		const screen2Top = harness.screen();
 		const promptHit2 = screen2Top.findText("› First turn alignment check");
 		expect(promptHit2).toBeDefined();
@@ -203,8 +203,8 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 			],
 		});
 
-		const scroll = getActiveHostRuntime()!.scroll!;
-		scroll.scrollTo(8, { disableFollow: true });
+		await harness.mouseWheel("up", 12, 12, 30);
+		await harness.mouseWheel("down", 12, 12, 3);
 		const screen = harness.screen();
 
 		expect(screen.rowText(0).trim()).toBe("");
@@ -265,8 +265,8 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 			],
 		});
 
-		const scroll = getActiveHostRuntime()!.scroll!;
-		scroll.scrollTo(10, { disableFollow: true });
+		await harness.mouseWheel("up", 12, 12, 30);
+		await harness.mouseWheel("down", 12, 12, 3);
 		const stickyCollapsed = harness.screen();
 
 		expect(stickyCollapsed.rowText(0).trim()).toBe("");
@@ -391,6 +391,16 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 		expect(await getActiveHostRuntime()!.clipboard.readText?.()).toBe(indented);
 	});
 
+	it("keeps assistant prose named Copy in a mouse selection", async () => {
+		harness = await createInteractiveHarness({ responses: [fauxAssistantMessage("Copy\n\nthe file")] });
+		await harness.submitInput("What should I do?");
+		const start = harness.screen().findText("Copy")!;
+		const end = harness.screen().findText("the file")!;
+		await harness.mouseDrag(start.col, start.row, end.col + "the file".length, end.row);
+		await harness.pressKey("\x03");
+		expect(await getActiveHostRuntime()!.clipboard.readText?.()).toBe("Copy\n\nthe file");
+	});
+
 	it("defaults copyOnSelect to false, mounts [Copy] [Quote · Alt+Q], copies clean text via [Copy] and Ctrl+C/Ctrl+X with ✓ Copied flash, and supports copyOnSelect = true", async () => {
 		harness = await createInteractiveHarness({
 			theme: "dark",
@@ -410,8 +420,7 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 
 		await harness.submitInput("How do I verify?");
 
-		const scroll = getActiveHostRuntime()!.scroll!;
-		scroll.scrollTo(0, { disableFollow: true });
+		await harness.mouseWheel("up", 12, 12, 30);
 
 		const screen = harness.screen();
 		const thoughtHit = screen.findText("Thought");

@@ -35,6 +35,18 @@ describe("i18n catalog (pure seam)", () => {
 		});
 	});
 
+	it("owns the Prompt Chip preview and Context Inspector table labels", () => {
+		expect(EN_MESSAGES).toMatchObject({
+			"chips.popup.file": "File: {name}",
+			"chips.popup.size": "Size: {size}",
+			"chips.popup.path": "Path: {path}",
+			"chips.popup.pasteLines": "📋 Pasted #{number} · {count} lines",
+			"chips.popup.quoteLines": "❝ Quote #{number} · {count} lines",
+			"context.usage.column.calls": "Calls",
+			"context.usage.column.ttft": "TTFT",
+		});
+	});
+
 	it("interpolates named placeholders cleanly and leaves unmatched keys or missing params safe", () => {
 		expect(t("composer.placeholder")).toBe("Ask or describe a task…");
 		expect(t("sessionMode.notification", { icon: "●", label: "Always-approve", desc: "Full access" })).toBe(

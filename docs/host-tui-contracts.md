@@ -60,6 +60,12 @@ Verified runtime behaviors in `@earendil-works/pi-tui` and `@earendil-works/pi-c
   - When Kitty CSI-u includes `:baseLayoutKey` (`\x1b[codepoint:shifted:base;modu`), trust `:baseLayoutKey` before consulting macOS `Option`-composed character tables so non-US physical layouts (`Russian`, `RussianWin`, `QWERTZ`) never misroute chords.
   - Rewrite Cyrillic codepoints and `Option`-composed symbols only when modifier bits (`Alt`, `Ctrl`, `Super`), `ESC` prefixes, or registered `alt+<letter>` Option chords apply, preserving plain printable text entry.
 
+## Session queue, renderer ownership, and summary indexing
+
+- Pi's `app.message.dequeue` normally joins both queues' texts and drops image attachments. The queue strip intercepts `InteractiveMode.handleDequeue` to restore the first visible item using the same attachment-aware path as its `Edit` action.
+- Pi stores the renderer callback on each custom message or entry component. Return a dispatching callback for a contended renderer so an existing component resolves its new owner on rebuild. Do not reinstall singleton factories whose owner and factory are unchanged; Pi's editor setter reconstructs the editor and resets the caret.
+- `SessionManager.getEntries()` filters and copies all entries, even if only one was appended. Seed the step-summary index once, then update it after a successful `appendCustomEntry` without fetching the history again.
+
 ## Real `InteractiveMode` Test Harness & Banned Host Fakes (`ADR-0006`)
 
 - **Real-host acquisition & test seam**:

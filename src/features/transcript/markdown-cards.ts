@@ -33,7 +33,7 @@ import {
 	createCopyFeedbackTimerRegistry,
 	hookMethod,
 } from "../../shared/runtime-hooks.ts";
-import { markSelectionCodeRow } from "../../shared/selection-copy.ts";
+import { markSelectionChrome, markSelectionCodeRow } from "../../shared/selection-copy.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
 import { toggleLinkTargetPopup } from "./link-target-popup.ts";
 
@@ -844,8 +844,19 @@ export function installMarkdownCardsAndHeadings(): void {
 			self.__conartiActionZones = zones;
 			self.__conartiLinkHits = linkHits;
 
+			const markActionRows = (lines: string[]): string[] => {
+				if (getActiveHostRuntime()?.isFullscreen) {
+					for (const zone of zones) {
+						const line = lines[zone.actionRow];
+						if (line !== undefined && zone.kind !== "code-inline-hover") {
+							lines[zone.actionRow] = markSelectionChrome(line);
+						}
+					}
+				}
+				return lines;
+			};
 			if (!hoveredAction && !copiedAction) {
-				return baseLines;
+				return markActionRows([...baseLines]);
 			}
 
 			const out = [...baseLines];
@@ -916,7 +927,7 @@ export function installMarkdownCardsAndHeadings(): void {
 				}
 			}
 
-			return out;
+			return markActionRows(out);
 		},
 		["pi.grok-ui.hook.chat.markdownRender"],
 	);

@@ -14,7 +14,7 @@ import {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
-import { bgRgb, fgRgb } from "../../shared/ansi.ts";
+import { blueBgRgb, fgRgb } from "../../shared/ansi.ts";
 import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
 import { t } from "../../shared/i18n.ts";
 import {
@@ -572,9 +572,9 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 							fullRow += pad;
 
 							if (isSelected) {
-								fullRow = bgRgb(palette.selectedRowBg, fullRow);
+								fullRow = blueBgRgb(theme, palette.selectedRowBg, fullRow);
 							} else if (isHovered) {
-								fullRow = bgRgb(palette.hoveredRowBg, fullRow);
+								fullRow = blueBgRgb(theme, palette.hoveredRowBg, fullRow);
 							}
 
 							rowMap.set(renderRowIdx, itemIndex);
@@ -598,6 +598,14 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 					});
 				},
 				handleInput(data: string): void {
+					const pasted = searchInput.handlePaste(data);
+					if (pasted) {
+						if (pasted.changed) {
+							selectedIdx = 0;
+							scrollOffset = 0;
+						}
+						return;
+					}
 					const filtered = getFiltered();
 					if (matchesKey(data, "escape") || matchesKey(data, "ctrl+k")) {
 						done(null);

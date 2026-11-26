@@ -3,10 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { defineTool } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { getCapabilities, setCapabilities, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { getActiveComposerEditor } from "../src/features/chrome/composer.ts";
+import type { PersistedPromptChipsPayload } from "../src/features/prompt-chips/registry.ts";
 import type { OutlineRailComponent } from "../src/features/outline-rail/rail-view.ts";
 import { getActiveHostRuntime, type HostClipboardProvider } from "../src/shared/host-runtime.ts";
 import { hasBlockingModalOverlay } from "../src/shared/modal-card.ts";
@@ -472,6 +473,68 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 
 		postReloadScroll.scrollTo(postReloadRail.offsetOf(1), { disableFollow: true });
 		expect(harness.screen().text()).toContain("Steer with [📋 Pasted #1 · 4 lines]");
+	});
+
+	it.each(["current", "legacy"])("copies the full original paste from a reopened %s session despite draft chip ID reuse", async (format) => {
+		let copied = "";
+		const original = "original ".repeat(500).trimEnd() + " SENT END";
+		harness = await createInteractiveHarness({ responses: [fauxAssistantMessage("Got it.")] });
+		await harness.paste(original, true);
+		await harness.submitDraft();
+		await harness.waitForIdle();
+		const initialEntries = harness.sessionManager.getEntries().map((entry) => {
+			if (format !== "legacy" || entry.type !== "custom" || entry.customType !== "conarti-prompt-chips") return entry;
+			const data = entry.data as PersistedPromptChipsPayload;
+			return { ...entry, data: { ...data, chips: data.chips.map((chip) => chip.kind === "image"
+				? chip : { ...chip, previewText: chip.previewText.slice(0, 4000) }) } };
+		});
+		await harness.dispose();
+		harness = await createInteractiveHarness({
+			initialEntries, persistSession: true,
+			clipboard: { async readText() { return copied; }, async writeText(text) { copied = text; } },
+		});
+		const copyOriginal = async () => {
+			const pill = harness!.screen().findText(`Pasted #1 · ${original.length} chars`)!;
+			await harness!.mouseClick(pill.col + 2, pill.row);
+			const copy = harness!.screen().findText("[Copy]")!;
+			await harness!.mouseClick(copy.col + 1, copy.row);
+			expect(copied).toBe(original);
+			await harness!.pressKey("\x1b");
+		};
+		await copyOriginal();
+		await harness.paste("New draft ".repeat(40), true);
+		await copyOriginal();
+	});
+
+	it("renders the saved image thumbnail when hovering a reopened clipboard-image Prompt Chip", async () => {
+		harness = await createInteractiveHarness({
+			clipboard: { image: { bytes: TINY_PNG_BYTES, mimeType: "image/png", fileName: "clipboard.png" } },
+			responses: [fauxAssistantMessage("Got it.")],
+		});
+		await harness.pressKey("\x16");
+		await flushClipboardAction(harness);
+		await harness.submitDraft();
+		await harness.waitForIdle();
+		const initialEntries = harness.sessionManager.getEntries();
+		for (const entry of initialEntries) {
+			if (entry.type === "custom" && entry.customType === "conarti-prompt-chips") {
+				for (const chip of (entry.data as PersistedPromptChipsPayload).chips) {
+					if (chip.kind === "image" && chip.filePath) rmSync(chip.filePath, { force: true });
+				}
+			}
+		}
+		await harness.dispose();
+		harness = await createInteractiveHarness({ initialEntries, persistSession: true });
+		const capabilities = getCapabilities();
+		try {
+			setCapabilities({ ...capabilities, images: "kitty" });
+			const pill = harness.screen().findText("Image #1")!;
+			await harness.mouseMove(pill.col + 2, pill.row);
+			expect(harness.screen().text()).toContain("File: clipboard.png");
+			expect(harness.terminal.writes.join("")).toContain(`;${TINY_PNG_BASE64}\x1b\\`);
+		} finally {
+			setCapabilities(capabilities);
+		}
 	});
 
 	it("contains wheel scrolling inside a sent Prompt Chip preview", async () => {

@@ -463,8 +463,10 @@ export function openComposerPopover(
 		},
 		handleInput(data: string): void {
 			if (!data) return;
-			if (pasteTracker.split(data).some((segment) => segment.inPaste || (data !== "\x1b" && segment.trailingStartPrefixLength > 0))) {
-				if (kind === "model" && searchInput.handleInput(data).changed) {
+			const pasteChunk = pasteTracker.split(data).some((segment) => segment.inPaste || (data !== "\x1b" && segment.trailingStartPrefixLength > 0));
+			const pasted = kind === "model" ? searchInput.handlePaste(data) : undefined;
+			if (pasteChunk || pasted) {
+				if (pasted?.changed) {
 					selectedIdx = 0;
 					scrollOffset = 0;
 					tui.requestRender();

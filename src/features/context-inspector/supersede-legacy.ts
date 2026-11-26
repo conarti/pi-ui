@@ -1,6 +1,7 @@
 import {
 	matchesExtensionSourcePath,
 	registerSupersededExtensionPredicate,
+	registerSupersededWidgetPredicate,
 } from "../../shared/extension-superseder.ts";
 import { LEGACY_STAMP_ENTRY_TYPE, METRICS_ENTRY_TYPE } from "./telemetry.ts";
 
@@ -50,11 +51,7 @@ export function isSupersededLegacyTelemetryExtension(ext: unknown): boolean {
 			commands.every((key) => LEGACY_METRICS_COMMANDS.has(key)) &&
 			[...(rec.handlers?.keys() ?? [])].every((key) => LEGACY_METRICS_EVENTS.has(key));
 	}
-	return matchesExtensionSourcePath(ext, LEGACY_WORKING_STATUS_PATH_RE) &&
-		!rec.commands?.size && !rec.entryRenderers?.size &&
-		Boolean(rec.handlers?.has("session_start") && [...rec.handlers.keys()].every((key) =>
-			key === "session_start" || key === "agent_start",
-		));
+	return false;
 }
 
 /**
@@ -65,5 +62,9 @@ export function installLegacyMetricsAndWorkingSuperseder(): void {
 	registerSupersededExtensionPredicate(
 		"contextInspector.legacyTelemetry",
 		isSupersededLegacyTelemetryExtension,
+	);
+	/* Имя файла само по себе не подтверждает, что обработчик рисует старый статус. */
+	registerSupersededWidgetPredicate("contextInspector.legacyWorkingStatus", (ext, key) =>
+		key === "embed-working-status" && matchesExtensionSourcePath(ext, LEGACY_WORKING_STATUS_PATH_RE),
 	);
 }

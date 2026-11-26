@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { runQuestionnaire } from "../src/features/ask-user/questionnaire.ts";
 import { showContextInspector } from "../src/features/context-inspector/index.ts";
 import { showPlanApproval } from "../src/features/plan-approval/approval-overlay.ts";
+import { parseAnsiColorRgb, rgbHueDegrees } from "../src/shared/ansi.ts";
 import { hasBlockingModalOverlay } from "../src/shared/modal-card.ts";
 import { getSessionWorkflow } from "../src/shared/session-workflow.ts";
 import {
@@ -250,6 +251,37 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 		expect(harness.screen().text()).not.toContain("⌘ Command Palette");
 		expect(harness.screen().text()).toContain("keep my draft");
+	});
+
+	it("paints One Blue Pro's Command Palette surface without turquoise in 256 colors", async () => {
+		harness = await createInteractiveHarness({ theme: "one-blue-pro", trueColor: false, width: 100, height: 28 });
+		await harness.pressKey("\x0b");
+		const screen = harness.screen();
+		const { top, bottom, left, right } = findModalBounds(screen);
+		const paletteIndexes = new Set<number>();
+		for (let row = top; row <= bottom; row++) {
+			for (let col = left; col <= right; col++) {
+				const bg = screen.cellAt(row, col)?.bg;
+				if (bg?.kind === "palette256") paletteIndexes.add(bg.index);
+			}
+		}
+		expect(paletteIndexes.size).toBeGreaterThan(0);
+		for (const index of paletteIndexes) {
+			const { hue, saturation } = rgbHueDegrees(parseAnsiColorRgb(`\x1b[48;5;${index}m`)!);
+			expect(saturation > 0.04 && hue >= 165 && hue <= 198, `palette index ${index}`).toBe(false);
+		}
+	});
+
+	it("treats Enter inside a split Command Palette paste as filter text", async () => {
+		harness = await createInteractiveHarness({ width: 100, height: 28 });
+		await harness.pressKey("\x0b");
+		await harness.sendInput("\x1b[20");
+		await harness.sendInput("0~a");
+		await harness.sendInput("\r");
+		await harness.sendInput("b\x1b[20");
+		await harness.sendInput("1~");
+		expect(harness.screen().text()).toContain("Command Palette");
+		expect(harness.screen().text()).toContain("⌕ ab");
 	});
 
 	it("tracks split-chunk and back-to-back bracketed pastes statefully and opens Command Palette on post-paste Ctrl+K", async () => {

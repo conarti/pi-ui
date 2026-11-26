@@ -55,7 +55,7 @@ describe("Clean selection text extractor (pure seam over real package themes)", 
 				paintThemeSurfaceRow(theme, "    return total;", codeCardW, palette.codeBodyBg);
 
 			const lines = [
-				`${pad}✦ › Thought for 4s`,
+				markSelectionChrome(`${pad}✦ › Thought for 4s`),
 				markSelectionChrome(`${pad}✦ Inspect repo state (200ms) · bash 1 · read 6`),
 				`${pad}Run ${theme.fg("mdCode", "npm run check")} after updating the config`,
 				`${pad}file so every invariant stays green.`,
@@ -66,7 +66,7 @@ describe("Clean selection text extractor (pure seam over real package themes)", 
 				codeLine1,
 				codeLine2,
 				"",
-				`${pad}Worked for 4.2s                                10:15`,
+				markSelectionChrome(`${pad}Worked for 4.2s                                10:15`),
 			];
 
 			const extracted = extractCleanSelectionText(
@@ -85,6 +85,11 @@ describe("Clean selection text extractor (pure seam over real package themes)", 
 				].join("\n"),
 			);
 		}
+	});
+
+	it("preserves prose paragraphs that happen to match chrome labels", () => {
+		const lines = makeFullLineSelection(["    Copy", "", "    the file", "", "    Thought for 4s"]);
+		expect(extractCleanSelectionText(lines)).toBe("Copy\n\nthe file\n\nThought for 4s");
 	});
 
 	it("copies code with consecutive empty lines and preserves indentation in a partial selection", async () => {

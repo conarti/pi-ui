@@ -8,9 +8,11 @@ import {
 } from "@earendil-works/pi-tui";
 import { fgRgb, getThemeSurfacePalette, isLightTheme, themeFgRgb } from "../../shared/ansi.ts";
 import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
+import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
 import { t } from "../../shared/i18n.ts";
 import { loadPiUiUserConfig } from "../../shared/pi-ui-config.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
+import { markSelectionChrome } from "../../shared/selection-copy.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
 import {
 	computeStepMetrics,
@@ -125,7 +127,8 @@ export class ResponseMetricsRowComponent implements Component {
 		const gapWidth = Math.max(0, width - leftStart - leftRenderedWidth - timeWidth - rightPad);
 		const row = `${" ".repeat(leftStart)}${leftStyled}${" ".repeat(gapWidth)}${timeStyled}${" ".repeat(rightPad)}`;
 		const finalPad = Math.max(0, width - visibleWidth(row));
-		return [`${row}${" ".repeat(finalPad)}`];
+		const padded = `${row}${" ".repeat(finalPad)}`;
+		return [getActiveHostRuntime()?.isFullscreen ? markSelectionChrome(padded) : padded];
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
