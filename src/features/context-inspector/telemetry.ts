@@ -482,7 +482,10 @@ export function aggregateSessionTelemetry(
 					? finalStep.data.completedAt - userTs
 					: steps.reduce((acc, s) => acc + s.computed.totalMs, 0);
 
-		const ttftMs = finalStep.computed.ttftMs ?? firstStep.computed.ttftMs;
+		const firstContentStep = steps.find((step) => step.computed.ttftMs !== undefined);
+		const ttftMs = firstContentStep
+			? firstContentStep.data.timestamp - firstStep.data.timestamp + firstContentStep.computed.ttftMs!
+			: undefined;
 		const tps =
 			finalStep.computed.streamTps ??
 			finalStep.computed.effectiveTps ??

@@ -6,14 +6,14 @@ import {
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text, stripTerminalSequences, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
-import { CLAUDE_RESULT_PREFIX, claudeFailure, lookHint, lookKind, pathOf, type LookKind } from "./claude.ts";
+import { CLASSIC_RESULT_PREFIX, classicFailure, lookHint, lookKind, pathOf, type LookKind } from "./classic-rows.ts";
 import {
-	CODEX_BULLET,
-	CODEX_INDENT,
-	CODEX_MARGIN,
-	CODEX_PREVIEW_ROWS,
-	CODEX_RESULT_PREFIX,
-	codexDisclosure,
+	TAIL_BULLET,
+	TAIL_INDENT,
+	TAIL_MARGIN,
+	TAIL_PREVIEW_ROWS,
+	TAIL_RESULT_PREFIX,
+	tailDisclosure,
 	exploreActions,
 	exploreFailure,
 	exploreLines,
@@ -23,7 +23,7 @@ import {
 	wrapSegments,
 	type ExploreAction,
 	type Segment,
-} from "./codex.ts";
+} from "./exploration-tail.ts";
 import { getActiveHostRuntime, type HostRuntimeHandle } from "../../shared/host-runtime.ts";
 import { hookMethod } from "../../shared/runtime-hooks.ts";
 import { formatDurationMs, type RowStatus } from "./core.ts";
@@ -96,7 +96,7 @@ function kindOf(row: ToolRowLike): LookKind | undefined {
 	return kind;
 }
 
-// Codex parses a command into what it does, once for each set of arguments as they stream in.
+/* Кэш привязан к версии аргументов, потому что команда может измениться во время стриминга. */
 const explorations = new WeakMap<object, { args: unknown; actions: ExploreAction[] | undefined }>();
 
 function exploreOf(row: ToolRowLike): ExploreAction[] | undefined {
@@ -162,7 +162,7 @@ export function groupHint(rows: readonly ToolRowLike[], canRun: CanRun = ALWAYS_
 /** Claude Code keeps a failure in view beneath the folded group. */
 export function groupFailures(rows: readonly ToolRowLike[]): string[] {
 	return rows.filter((row) => memberStatus(row) === "error")
-		.map((row) => claudeFailure(row.toolName, getTextResult(row.result!)).headline);
+		.map((row) => classicFailure(row.toolName, getTextResult(row.result!)).headline);
 }
 
 /**
@@ -313,7 +313,7 @@ export class ToolGroupComponent extends Container {
 	}
 }
 
-export type GroupStyle = "density" | "claude" | "codex";
+export type GroupStyle = "density" | "classic-rows" | "exploration-tail";
 export type GroupBucket = "all" | "explore" | "edit" | "command" | "custom";
 
 function resolveRowGroupBucket(
@@ -326,10 +326,10 @@ function resolveRowGroupBucket(
 	/* Строки с инлайн-изображениями никогда не складываем в свёрнутую текстовую группу. */
 	if (hasImageContent(row.result)) return undefined;
 
-	if (style === "codex") {
+	if (style === "exploration-tail") {
 		return exploreOf(row) !== undefined ? "explore" : undefined;
 	}
-	if (style === "claude") {
+	if (style === "classic-rows") {
 		return kindOf(row) !== undefined ? "explore" : undefined;
 	}
 	if (density === "compact") {
@@ -393,7 +393,7 @@ function isFoldable(child: unknown): boolean {
 export function groupChildren(
 	children: readonly unknown[],
 	makeGroup: (rows: ToolRowLike[], members: unknown[]) => Component,
-	style: GroupStyle = "claude",
+	style: GroupStyle = "classic-rows",
 	density: ToolDensity = "balanced",
 ): unknown[] {
 	const grouped: unknown[] = [];
@@ -465,8 +465,8 @@ export class ToolGroupController {
 		const chat = resolvedHost?.chatContainer ?? (resolvedHost ? findChat(resolvedHost.tui) : undefined);
 		if (chat && resolvedHost) {
 			const isGroupStyle = (style: string): style is GroupStyle =>
-				style === "density" || style === "claude" || style === "codex";
-			hookMethod(chat, "render", "claude.groups", (self, args, original) => {
+				style === "density" || style === "classic-rows" || style === "exploration-tail";
+			hookMethod(chat, "render", "classic.groups", (self, args, original) => {
 				const style = this.runtime.config.style;
 				if (!this.context || isSilent() || !isGroupStyle(style)) return original.apply(self, args);
 				const children = self.children as unknown[];
@@ -522,7 +522,7 @@ export class ToolGroupController {
 				pad,
 			);
 		};
-		if (this.runtime.config.style !== "codex") {
+		if (this.runtime.config.style !== "exploration-tail") {
 			return new ToolGroupComponent(
 				rows,
 				members,
@@ -533,7 +533,7 @@ export class ToolGroupController {
 				this.runtime.config.style === "density",
 			);
 		}
-		// Codex opens a group to the whole of each call, and closes it from one "− Show less" beneath them.
+		/* Общая кнопка сворачивания заменяет кнопки отдельных вызовов в раскрытой группе. */
 		const toggle = (expanded: boolean) => {
 			for (const row of rows) row.setExpanded?.(expanded);
 			tui.requestRender();
@@ -542,11 +542,10 @@ export class ToolGroupController {
 			const theme = this.paint?.theme ?? this.context?.ui.theme;
 			const pad = rows[0]?.outputPad;
 			const available = width + (pad === 0 ? 1 : 0);
-			return theme ? outputPadLines([truncateToWidth(theme.fg("dim", codexDisclosure(available, true)), Math.max(1, available), "…")], width, pad) : [];
+			return theme ? outputPadLines([truncateToWidth(theme.fg("dim", tailDisclosure(available, true)), Math.max(1, available), "…")], width, pad) : [];
 		};
 		const group = new ToolGroupComponent(rows, members, state, draw, toggle, footer);
-		// Read once the group has followed Ctrl+O, which it does as it is made. A call that joins an
-		// opened group opens with it, as every call in an opened Codex group shows whole.
+		/* Вызов, добавленный в уже раскрытую группу, наследует её состояние. */
 		if (state.expanded) {
 			for (const row of rows) {
 				openExplorations.add(row.toolCallId);
@@ -616,9 +615,8 @@ export class ToolGroupController {
 		if (this.runtime.config.style === "density") {
 			return this.drawDensity(rows, width, expanded, paint, members);
 		}
-		if (this.runtime.config.style === "codex") return this.drawCodex(rows, width, expanded, paint);
-		// Ctrl+O replaces the summary with individual calls, as Claude's transcript
-		// does. A locally clicked group retains its header as a collapse target.
+		if (this.runtime.config.style === "exploration-tail") return this.drawTail(rows, width, expanded, paint);
+		/* При раскрытии мышью сохраняем заголовок как точку для обратного клика. */
 		if (expanded && rows[0]?.expanded) return [];
 		const { theme, chrome } = paint;
 		const fit = (line: string) => truncateToWidth(line, Math.max(1, width), "…");
@@ -641,8 +639,8 @@ export class ToolGroupController {
 		if (!expanded) title += chrome(` ${EXPAND_HINT}`);
 		const lines = ["", fit(title)];
 		const hintText = groupHint(rows, this.canRun);
-		if (hintText) lines.push(fit(chrome(`${CLAUDE_RESULT_PREFIX}${hintText}`)));
-		if (!expanded) for (const failure of groupFailures(rows)) lines.push(fit(chrome(CLAUDE_RESULT_PREFIX) + theme.fg("error", failure)));
+		if (hintText) lines.push(fit(chrome(`${CLASSIC_RESULT_PREFIX}${hintText}`)));
+		if (!expanded) for (const failure of groupFailures(rows)) lines.push(fit(chrome(CLASSIC_RESULT_PREFIX) + theme.fg("error", failure)));
 		return lines;
 	}
 
@@ -651,14 +649,14 @@ export class ToolGroupController {
 	 * then a line for what each call did, three rows of them until the group opens.
 	 * A failed call says so at the end of its line and in the head's count.
 	 */
-	private drawCodex(rows: readonly ToolRowLike[], width: number, expanded: boolean, paint: Paint): string[] {
+	private drawTail(rows: readonly ToolRowLike[], width: number, expanded: boolean, paint: Paint): string[] {
 		const { theme } = paint;
 		const fit = (line: string) => truncateToWidth(line, Math.max(1, width), "…");
 		const running = lastRunning(rows, this.canRun);
 		const statuses = rows.map((row) => memberStatus(row, this.canRun));
 		if (running) this.runtime.keepAnimating(running.toolCallId);
-		const bullet = running ? paintIndicator(theme, "running", this.runtime.frame, CODEX_BULLET)
-			: statuses.includes("pending") ? paintIndicator(theme, "pending", 0, CODEX_BULLET) : theme.fg("dim", CODEX_BULLET);
+		const bullet = running ? paintIndicator(theme, "running", this.runtime.frame, TAIL_BULLET)
+			: statuses.includes("pending") ? paintIndicator(theme, "pending", 0, TAIL_BULLET) : theme.fg("dim", TAIL_BULLET);
 		let nonzeroExits = 0;
 		let failed = 0;
 		rows.forEach((row, index) => {
@@ -669,10 +667,10 @@ export class ToolGroupController {
 				if (exitCode !== 0) nonzeroExits++;
 			} else if (statuses[index] === "error") failed++;
 		});
-		let head = `${CODEX_MARGIN}${bullet} ${theme.bold(running ? "Exploring" : "Explored")}`;
+		let head = `${TAIL_MARGIN}${bullet} ${theme.bold(running ? "Exploring" : "Explored")}`;
 		if (nonzeroExits > 0) head += theme.bold(` · ${nonzeroExits} ${nonzeroExits === 1 ? "nonzero exit" : "nonzero exits"}`);
 		if (failed > 0) head += theme.bold(theme.fg("error", ` · ${failed} failed`));
-		// Opened, Codex lists the calls themselves in place of the summary; each brings its own blank line.
+		/* Пустые строки уже входят в вывод отдельных вызовов. */
 		if (expanded) return [];
 		const lines = ["", fit(head)];
 		const calls = rows.map((row) => {
@@ -686,15 +684,15 @@ export class ToolGroupController {
 			const verb = `${line.verb} `;
 			const segments: Segment[] = line.parts.map((part) => ({ text: part.text, color: part.dim ? "dim" : undefined }));
 			if (line.failure) segments.push({ text: line.failure.text, color: line.failure.quiet ? "dim" : "error" });
-			const available = Math.max(1, width - visibleWidth(CODEX_INDENT) - verb.length);
+			const available = Math.max(1, width - visibleWidth(TAIL_INDENT) - verb.length);
 			wrapSegments(segments, available, available).forEach((row, index) => {
 				details.push((index === 0 ? theme.fg("accent", verb) : " ".repeat(verb.length)) + paintSegments(row, theme));
 			});
 		}
-		details.slice(0, CODEX_PREVIEW_ROWS).forEach((row, index) => {
-			lines.push(fit(theme.fg("dim", index === 0 ? CODEX_RESULT_PREFIX : CODEX_INDENT) + row));
+		details.slice(0, TAIL_PREVIEW_ROWS).forEach((row, index) => {
+			lines.push(fit(theme.fg("dim", index === 0 ? TAIL_RESULT_PREFIX : TAIL_INDENT) + row));
 		});
-		lines.push(fit(theme.fg("dim", codexDisclosure(width, false))));
+		lines.push(fit(theme.fg("dim", tailDisclosure(width, false))));
 		return lines;
 	}
 

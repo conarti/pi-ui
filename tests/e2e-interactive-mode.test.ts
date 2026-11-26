@@ -703,7 +703,7 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(roBashRes?.isError).toBe(false);
 		expect(mutBashRes?.isError).toBe(true);
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
-		expect(harness.screen().text()).toContain("Plan Studio");
+		expect(harness.screen().text()).toContain("Plan Approval");
 		expect(harness.suggestionCalls).toHaveLength(suggestionCallsBeforePlan);
 
 		await harness.pressKey("\x1b");

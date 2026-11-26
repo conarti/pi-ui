@@ -15,7 +15,7 @@ import {
 } from "../../shared/session-workflow.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
 import { openComposerPopover } from "../chrome/composer-popovers.ts";
-import { confirmSafeToolCall, showPlanStudio } from "./studio-overlay.ts";
+import { confirmSafeToolCall, showPlanApproval } from "./approval-overlay.ts";
 
 export { extractPlanSteps };
 
@@ -132,7 +132,7 @@ export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void 
 						xStart: 1,
 						xEnd: 1 + visibleWidth(btnOpen),
 						y: 0,
-						onClick: () => void showPlanStudio(pi, ctx),
+						onClick: () => void showPlanApproval(pi, ctx),
 					});
 					const prefix = ` ${btnOpen}  ${bar} `;
 					const availPreview = Math.max(0, width - visibleWidth(prefix) - visibleWidth(btnClear) - 3);
@@ -168,7 +168,7 @@ export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void 
 
 					let x = 1;
 					const wRev = visibleWidth(btnReview);
-					boxes.push({ id: "review", xStart: x, xEnd: x + wRev, y: 0, onClick: () => void showPlanStudio(pi, ctx) });
+					boxes.push({ id: "review", xStart: x, xEnd: x + wRev, y: 0, onClick: () => void showPlanApproval(pi, ctx) });
 					x += wRev + 2;
 					const wRun = visibleWidth(btnRun);
 					boxes.push({ id: "run", xStart: x, xEnd: x + wRun, y: 0, onClick: () => approveAndExecutePlan(pi, ctx) });
@@ -282,7 +282,7 @@ export function revisePlanWithComments(pi: ExtensionAPI, ctx: ExtensionContext):
 	pi.sendUserMessage(result.prompt);
 }
 
-export function registerPlanStudioFeature(pi: ExtensionAPI): void {
+export function registerPlanApprovalFeature(pi: ExtensionAPI): void {
 	pi.on("agent_start", async () => {
 		getSessionWorkflow().beginAgentTurn();
 	});
@@ -377,7 +377,7 @@ export function registerPlanStudioFeature(pi: ExtensionAPI): void {
 				updatePlanWidget(pi, ctx);
 
 				if (ctx.mode === "tui" && ctx.hasUI && lastAssistant.stopReason === "stop") {
-					void showPlanStudio(pi, ctx);
+					void showPlanApproval(pi, ctx);
 				}
 			}
 		} else if (wf.executingPlan && wf.planSteps.length > 0) {
@@ -420,7 +420,7 @@ export function registerPlanStudioFeature(pi: ExtensionAPI): void {
 				return;
 			}
 			if (sub === "review" || wf.hasPlan()) {
-				await showPlanStudio(pi, ctx);
+				await showPlanApproval(pi, ctx);
 				return;
 			}
 			setSessionMode(pi, ctx, wf.mode === "plan" ? "always-approve" : "plan");

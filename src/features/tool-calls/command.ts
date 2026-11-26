@@ -20,7 +20,6 @@ import {
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
-	DISPLAY_STYLES,
 	TOOL_DENSITIES,
 	type CompactToolsConfig,
 	type DisplayStyle,
@@ -41,7 +40,7 @@ const DENSITY_HELP =
 	"Usage: /density [balanced|compact|grouped|diff-focus|detailed] [global|project]\n/density status · /density help\nSwitches Tool Density live without reload. Ctrl+O or click expands rows; /silent toggles quiet mode.";
 
 const COMPACT_HELP =
-	"Usage: /compact-tools [balanced|compact|grouped|diff-focus|detailed|claude|codex|off] [global|project]\nWithout a scope the preset applies live (and updates active settings when configured).\n/compact-tools status · /compact-tools help\nCtrl+O expands rows; /silent toggles quiet mode.";
+	"Usage: /compact-tools [balanced|compact|grouped|diff-focus|detailed|off] [global|project]\nWithout a scope the preset applies live (and updates active settings when configured).\n/compact-tools status · /compact-tools help\nCtrl+O expands rows; /silent toggles quiet mode.";
 
 const BUSY = "Wait for the current response to finish before changing tool styles.";
 
@@ -53,14 +52,13 @@ const DENSITY_CHOICES: Record<ToolDensity, string> = {
 	detailed: "Detailed - inline diffs + 2 head + 3 tail command output previews",
 };
 
-const STYLE_CHOICES: Record<Exclude<DisplayStyle, "density">, string> = {
+type SelectableStyle = ToolDensity | "off";
+const STYLE_CHOICES: Record<SelectableStyle, string> = {
 	balanced: DENSITY_CHOICES.balanced,
 	compact: DENSITY_CHOICES.compact,
 	grouped: DENSITY_CHOICES.grouped,
 	"diff-focus": DENSITY_CHOICES["diff-focus"],
 	detailed: DENSITY_CHOICES.detailed,
-	claude: "Claude - legacy grouped exploration rows",
-	codex: "Codex - legacy explored groups and output tails",
 	off: "Off - restore Pi's native UI",
 };
 
@@ -357,13 +355,13 @@ export function registerCompactToolsCommand(
 	getConfig: () => CompactToolsConfig,
 	applyStyle?: ApplyStyle,
 ): void {
-	const selectableStyles = Object.keys(STYLE_CHOICES) as Array<Exclude<DisplayStyle, "density">>;
+	const selectableStyles = Object.keys(STYLE_CHOICES) as SelectableStyle[];
 	pi.registerCommand("compact-tools", {
-		description: "Choose Tool Density preset or legacy/native tool rendering",
+		description: "Choose Tool Density or restore Pi’s native tool rendering",
 		getArgumentCompletions: (prefix) => {
 			const typed = prefix.trimStart().toLowerCase();
 			const parts = typed.split(/\s+/);
-			const scoped = parts.length === 2 && DISPLAY_STYLES.includes(parts[0] as DisplayStyle);
+			const scoped = parts.length === 2 && selectableStyles.includes(parts[0] as SelectableStyle);
 			const values = scoped
 				? SCOPES.map((scope) => `${parts[0]} ${scope}`)
 				: [...selectableStyles, "status", "help"];
@@ -388,14 +386,14 @@ export function registerCompactToolsCommand(
 			}
 			if (
 				parts.length > 2 ||
-				(parts.length > 0 && !DISPLAY_STYLES.includes(parts[0] as DisplayStyle)) ||
+				(parts.length > 0 && !selectableStyles.includes(parts[0] as SelectableStyle)) ||
 				(parts[1] !== undefined && !SCOPES.includes(parts[1] as Scope))
 			) {
 				ctx.ui.notify(COMPACT_HELP, "warning");
 				return;
 			}
 
-			let style = parts[0] as DisplayStyle | undefined;
+			let style = parts[0] as SelectableStyle | undefined;
 			let explicitScope = parts[1] as Scope | undefined;
 			if (!style) {
 				if (ctx.mode !== "tui") {

@@ -2,16 +2,16 @@ import type { AgentToolResult, Theme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { analyzeShell, type ShellDialect, type ShellTokenKind } from "../../shared/shell-analysis.ts";
 import {
-	CODEX_BULLET,
-	CODEX_COMMAND_INDENT,
-	CODEX_INDENT,
-	CODEX_MARGIN,
-	CODEX_PREVIEW_ROWS,
-	CODEX_RESULT_PREFIX,
-	CODEX_TAB,
-	codexDisclosure,
-	codexPath,
-	formatCodexDuration,
+	TAIL_BULLET,
+	TAIL_COMMAND_INDENT,
+	TAIL_INDENT,
+	TAIL_MARGIN,
+	TAIL_PREVIEW_ROWS,
+	TAIL_RESULT_PREFIX,
+	TAIL_TAB,
+	tailDisclosure,
+	tailPath,
+	formatTailDuration,
 	isEmptyOutput,
 	openExplorations,
 	paintSegments,
@@ -21,14 +21,14 @@ import {
 	wrapSegments,
 	type Segment,
 	type ThemeColor,
-} from "./codex.ts";
+} from "./exploration-tail.ts";
 import { normalizeLineEndings, type RowStatus } from "./core.ts";
 import { countEditChanges, getEditDiff, getEditPatch, splitReadFooter } from "./invocation.ts";
-import { parseCodeDiff, renderCodexDiff, type CodeDiffLine } from "./layout.ts";
+import { parseCodeDiff, renderTailDiff, type CodeDiffLine } from "./layout.ts";
 import type { RowState, ToolArgs } from "./types.ts";
 
 /** How a row is drawn: a file tool's result is code, a shell's is output, a custom tool's is its author's. */
-export type CodexRowKind = "file" | "shell" | "custom";
+export type TailRowKind = "file" | "shell" | "custom";
 
 /** Lines drawn from state read as they are drawn, laid out again only when that state or the width changes. */
 class LiveLines implements Component {
@@ -104,8 +104,8 @@ function prefixedRows(lines: readonly Segment[][], first: string, rest: string, 
 }
 
 function durationOf(state: RowState): string | undefined {
-	if (state.durationMs !== undefined) return formatCodexDuration(state.durationMs);
-	return state.startedAt !== undefined && state.endedAt !== undefined ? formatCodexDuration(state.endedAt - state.startedAt) : undefined;
+	if (state.durationMs !== undefined) return formatTailDuration(state.durationMs);
+	return state.startedAt !== undefined && state.endedAt !== undefined ? formatTailDuration(state.endedAt - state.startedAt) : undefined;
 }
 
 /** What each status reads as at the head of a row. */
@@ -120,7 +120,7 @@ const settled = (status: RowStatus) => status === "success" || status === "error
 
 /** An exploration tool's verb and what it looked at, as a lone row names them. */
 function lookTitle(name: string, args: ToolArgs, theme: Theme): { verb: string; target: string } {
-	const path = codexPath(args);
+	const path = tailPath(args);
 	if (name === "read") return { verb: "Read", target: path };
 	if (name === "ls") return { verb: "List", target: path || "." };
 	const pattern = typeof args.pattern === "string" ? normalizeLineEndings(args.pattern).split("\n")[0]!.trim() : "";
@@ -149,7 +149,7 @@ function invocation(name: string, args: ToolArgs): Segment[] {
 
 /** Where a custom tool's opened header starts its invocation: beside the verb when it fits, else beneath it. */
 function invocationInline(verb: string, call: readonly Segment[], width: number): boolean {
-	return visibleWidth(call.map((segment) => segment.text).join("")) <= width - visibleWidth(`${CODEX_MARGIN}${CODEX_BULLET} ${verb} `);
+	return visibleWidth(call.map((segment) => segment.text).join("")) <= width - visibleWidth(`${TAIL_MARGIN}${TAIL_BULLET} ${verb} `);
 }
 
 /**
@@ -157,9 +157,9 @@ function invocationInline(verb: string, call: readonly Segment[], width: number)
  * verb follows the call from running to its outcome, and an edit's counts and a
  * command's exit code arrive with the result.
  */
-export function renderCodexCall(
+export function renderTailCall(
 	name: string,
-	kind: CodexRowKind,
+	kind: TailRowKind,
 	args: ToolArgs,
 	theme: Theme,
 	state: RowState,
@@ -172,31 +172,31 @@ export function renderCodexCall(
 	const segments = kind === "shell" ? commandSegments(command, name === "powershell" ? "powershell" : "bash") : [];
 	let current: RowStatus = "pending";
 	let dot = "";
-	// Opened, a command reads as its transcript; one with nothing left out keeps its preview, as in Codex.
+	/* Если предпросмотр уже полон, раскрытие не меняет представление команды. */
 	const opened = (width: number) => expanded && kind === "shell" && (openExplorations.has(toolCallId)
-		|| (state.codex?.opens?.(width) ?? headerCut(command, VERBS.shell.running, width)));
+		|| (state.tail?.opens?.(width) ?? headerCut(command, VERBS.shell.running, width)));
 	return new LiveLines((width) => {
 		dot = indicator();
 		current = status();
-		const outcome = state.codex;
+		const outcome = state.tail;
 		return `${dot}|${current}|${outcome?.exitCode ?? ""}|${outcome?.changes?.added ?? ""}/${outcome?.changes?.removed ?? ""}|${opened(width)}`;
 	}, (width) => {
 		const phase = settled(current);
 		// 0.165.0 compact.rs leaves a shell's nonzero-exit marker neutral; MCP failures stay red.
 		// Pi failures without an exit code retain their explicit Failed title and error color.
-		const bullet = phase === "success" ? theme.bold(theme.fg("success", CODEX_BULLET))
-			: phase === "error" ? theme.bold(kind === "shell" && state.codex?.exitCode !== undefined
-				? CODEX_BULLET : theme.fg("error", CODEX_BULLET)) : dot;
-		const head = (verb: string, rest: string) => `${CODEX_MARGIN}${bullet} ${theme.bold(verb)}${rest ? ` ${rest}` : ""}`;
+		const bullet = phase === "success" ? theme.bold(theme.fg("success", TAIL_BULLET))
+			: phase === "error" ? theme.bold(kind === "shell" && state.tail?.exitCode !== undefined
+				? TAIL_BULLET : theme.fg("error", TAIL_BULLET)) : dot;
+		const head = (verb: string, rest: string) => `${TAIL_MARGIN}${bullet} ${theme.bold(verb)}${rest ? ` ${rest}` : ""}`;
 		if (kind === "shell") {
 			if (opened(width)) {
 				const prompt = theme.fg("bashMode", "$ ");
-				const first = width - visibleWidth(CODEX_MARGIN + "$ ");
-				const rest = Math.max(1, width - visibleWidth(CODEX_COMMAND_INDENT));
+				const first = width - visibleWidth(TAIL_MARGIN + "$ ");
+				const rest = Math.max(1, width - visibleWidth(TAIL_COMMAND_INDENT));
 				return segments.flatMap((line, index) => wrapSegments(line, index === 0 ? first : rest, rest)
-					.map((row, position) => index === 0 && position === 0 ? `${CODEX_MARGIN}${prompt}${paintSegments(row, theme)}` : `${CODEX_COMMAND_INDENT}${paintSegments(row, theme)}`));
+					.map((row, position) => index === 0 && position === 0 ? `${TAIL_MARGIN}${prompt}${paintSegments(row, theme)}` : `${TAIL_COMMAND_INDENT}${paintSegments(row, theme)}`));
 			}
-			const exitCode = state.codex?.exitCode;
+			const exitCode = state.tail?.exitCode;
 			const verb = phase === "error" && exitCode !== undefined ? `Exited (status ${exitCode})` : VERBS.shell[phase];
 			// Painted as it is drawn, so a theme switched since the row was made colors it too.
 			return [clip(head(verb, paintSegments(segments[0] ?? [], theme) + (segments.length > 1 ? " …" : "")), width)];
@@ -206,15 +206,15 @@ export function renderCodexCall(
 			if (!expanded) return [clip(head(verb, theme.fg("accent", name)), width)];
 			const call = invocation(name, args);
 			if (invocationInline(verb, call, width)) return [head(verb, paintSegments(call, theme))];
-			return [head(verb, ""), ...prefixedRows([call], theme.fg("dim", CODEX_RESULT_PREFIX), CODEX_INDENT, width, theme)];
+			return [head(verb, ""), ...prefixedRows([call], theme.fg("dim", TAIL_RESULT_PREFIX), TAIL_INDENT, width, theme)];
 		}
-		const path = codexPath(args);
+		const path = tailPath(args);
 		if (name === "edit" || name === "write") {
 			const verbs = VERBS[name];
-			if (phase === "error") return [clip(`${CODEX_MARGIN}${theme.fg("error", theme.bold(`✘ ${verbs.error}${path ? ` ${path}` : ""}`))}`, width)];
+			if (phase === "error") return [clip(`${TAIL_MARGIN}${theme.fg("error", theme.bold(`✘ ${verbs.error}${path ? ` ${path}` : ""}`))}`, width)];
 			if (phase === "running") return [clip(head(verbs.running, path), width)];
-			const changes = name === "write" ? { added: writeLineCount(args), removed: 0 } : state.codex?.changes ?? { added: 0, removed: 0 };
-			return [clip(`${CODEX_MARGIN}${theme.fg("dim", CODEX_BULLET)} ${theme.bold(verbs.success)} ${path} ${changeCount(theme, changes.added, changes.removed)}`, width)];
+			const changes = name === "write" ? { added: writeLineCount(args), removed: 0 } : state.tail?.changes ?? { added: 0, removed: 0 };
+			return [clip(`${TAIL_MARGIN}${theme.fg("dim", TAIL_BULLET)} ${theme.bold(verbs.success)} ${path} ${changeCount(theme, changes.added, changes.removed)}`, width)];
 		}
 		const { verb, target } = lookTitle(name, args, theme);
 		return [clip(head(verb, target), width)];
@@ -223,7 +223,7 @@ export function renderCodexCall(
 
 type ResultInput = {
 	name: string;
-	kind: CodexRowKind;
+	kind: TailRowKind;
 	args: ToolArgs;
 	result: AgentToolResult<unknown>;
 	output: string;
@@ -247,12 +247,12 @@ function outcomeLine(theme: Theme, isError: boolean, exitCode: number | undefine
 	const mark = isError
 		? theme.bold(theme.fg("error", "✗")) + (exitCode !== undefined ? ` (${exitCode})` : "")
 		: theme.bold(theme.fg("success", "✓"));
-	return `${CODEX_MARGIN}${mark}${duration ? theme.fg("dim", ` • ${duration}`) : ""}`;
+	return `${TAIL_MARGIN}${mark}${duration ? theme.fg("dim", ` • ${duration}`) : ""}`;
 }
 
 /** The last rows of output under `└`, each cut to the row, dim as Codex previews them. */
 function previewRows(lines: readonly string[], theme: Theme, width: number): string[] {
-	return lines.map((line, index) => clip(theme.fg("dim", (index === 0 ? CODEX_RESULT_PREFIX : CODEX_INDENT) + line), width, theme.fg("dim", "…")));
+	return lines.map((line, index) => clip(theme.fg("dim", (index === 0 ? TAIL_RESULT_PREFIX : TAIL_INDENT) + line), width, theme.fg("dim", "…")));
 }
 
 /**
@@ -260,23 +260,23 @@ function previewRows(lines: readonly string[], theme: Theme, width: number): str
  * and any of those three too wide to show whole.
  */
 function hiddenLines(lines: readonly string[], width: number): number {
-	const shown = lines.slice(Math.max(0, lines.length - CODEX_PREVIEW_ROWS));
-	return Math.max(0, lines.length - CODEX_PREVIEW_ROWS)
-		+ shown.filter((line) => visibleWidth(line) + visibleWidth(CODEX_INDENT) > width).length;
+	const shown = lines.slice(Math.max(0, lines.length - TAIL_PREVIEW_ROWS));
+	return Math.max(0, lines.length - TAIL_PREVIEW_ROWS)
+		+ shown.filter((line) => visibleWidth(line) + visibleWidth(TAIL_INDENT) > width).length;
 }
 
 function outputLines(text: string): string[] {
-	return normalizeLineEndings(stripTerminalSequences(text)).replace(/\n+$/u, "").split("\n").map((line) => line.replace(/\t/gu, CODEX_TAB));
+	return normalizeLineEndings(stripTerminalSequences(text)).replace(/\n+$/u, "").split("\n").map((line) => line.replace(/\t/gu, TAIL_TAB));
 }
 
 /** An opened call's output: whole, undimmed, wrapped from the margin. */
 function fullOutput(text: string, theme: Theme, width: number): string[] {
 	if (isEmptyOutput(text)) return [];
-	return prefixedRows(outputLines(text).map((line) => line ? [{ text: line, color: "toolOutput" as const }] : []), CODEX_MARGIN, CODEX_MARGIN, width, theme);
+	return prefixedRows(outputLines(text).map((line) => line ? [{ text: line, color: "toolOutput" as const }] : []), TAIL_MARGIN, TAIL_MARGIN, width, theme);
 }
 
 function dimDisclosure(theme: Theme, width: number, expanded: boolean, hidden?: number, expandKey?: string): string {
-	return clip(theme.fg("dim", codexDisclosure(width, expanded, hidden, expandKey)), width, theme.fg("dim", "…"));
+	return clip(theme.fg("dim", tailDisclosure(width, expanded, hidden, expandKey)), width, theme.fg("dim", "…"));
 }
 
 /** A command, or a lone read, search, or listing: the tail of its output, or all of it opened. */
@@ -290,7 +290,7 @@ function shellVerb(isPartial: boolean, isError: boolean, exitCode: number | unde
 /** Whether a command's collapsed head hides part of it: a second line, or a first line too wide for the row. */
 function headerCut(command: string, verb: string, width: number): boolean {
 	const lines = command.split("\n");
-	return lines.length > 1 || visibleWidth(`${CODEX_MARGIN}${CODEX_BULLET} ${verb} ${lines[0] ?? ""}`) > width;
+	return lines.length > 1 || visibleWidth(`${TAIL_MARGIN}${TAIL_BULLET} ${verb} ${lines[0] ?? ""}`) > width;
 }
 
 /** What a call's output and the text it shows come to: a command's exit code apart, a read's notice apart. */
@@ -322,7 +322,6 @@ function outputResult(input: ResultInput, width: number): string[] {
 	const empty = isEmptyOutput(text);
 	const details = collapsedDetails(input, width);
 	if (opens(input, width)) {
-		// Codex has no file view: what a read returned shows as a command's output does, notice and all.
 		const rows = fullOutput(footer ? `${text}\n\n${footer}` : text, theme, width);
 		const ended = isPartial ? [] : [outcomeLine(theme, isError, exitCode, durationOf(state))];
 		return [...rows, ...ended, dimDisclosure(theme, width, true)];
@@ -342,9 +341,9 @@ function opens(input: ResultInput, width: number): boolean {
 function failureResult(input: ResultInput, width: number): string[] {
 	const { theme, expanded } = input;
 	const reason = input.output.trim() || "(error details unavailable)";
-	const rows = prefixedRows(textLines(reason, "dim"), theme.fg("dim", CODEX_RESULT_PREFIX), CODEX_INDENT, width, theme);
+	const rows = prefixedRows(textLines(reason, "dim"), theme.fg("dim", TAIL_RESULT_PREFIX), TAIL_INDENT, width, theme);
 	if (expanded) return [...rows, dimDisclosure(theme, width, true)];
-	return [...rows.slice(0, CODEX_PREVIEW_ROWS).map((row) => clip(row, width, theme.fg("dim", "…"))), dimDisclosure(theme, width, false)];
+	return [...rows.slice(0, TAIL_PREVIEW_ROWS).map((row) => clip(row, width, theme.fg("dim", "…"))), dimDisclosure(theme, width, false)];
 }
 
 /** Changed lines only, as Codex previews a patch: context dropped, one `⋮` between hunks. */
@@ -363,7 +362,7 @@ function changesOnly(lines: readonly CodeDiffLine[]): CodeDiffLine[] {
 function patchResult(input: ResultInput, width: number, lines: readonly CodeDiffLine[]): string[] {
 	const { theme, expanded, args } = input;
 	const shown = expanded ? lines : changesOnly(lines);
-	const rows = renderCodexDiff(shown, codexPath(args), theme, CODEX_INDENT, expanded ? undefined : CODEX_PREVIEW_ROWS)?.render(width) ?? [];
+	const rows = renderTailDiff(shown, tailPath(args), theme, TAIL_INDENT, expanded ? undefined : TAIL_PREVIEW_ROWS)?.render(width) ?? [];
 	return [...rows, dimDisclosure(theme, width, expanded)];
 }
 
@@ -374,7 +373,7 @@ function customResult(input: ResultInput, width: number): string[] {
 	if (isPartial) return text ? previewRows(tailLines(text), theme, width) : [];
 	if (expanded) {
 		const inline = invocationInline(VERBS.custom[isError ? "error" : "success"], invocation(name, args), width);
-		const first = inline ? theme.fg("dim", CODEX_RESULT_PREFIX) : CODEX_INDENT;
+		const first = inline ? theme.fg("dim", TAIL_RESULT_PREFIX) : TAIL_INDENT;
 		let rows: string[] = [];
 		let component: Component | undefined;
 		if (author && !isError) {
@@ -386,21 +385,21 @@ function customResult(input: ResultInput, width: number): string[] {
 		}
 		if (component) {
 			// The author's view hangs from "└" like any result, without the blank lines it may open with.
-			const lines = component.render(Math.max(1, width - visibleWidth(CODEX_INDENT)));
+			const lines = component.render(Math.max(1, width - visibleWidth(TAIL_INDENT)));
 			const start = lines.findIndex((line) => stripTerminalSequences(line).trim() !== "");
-			rows = (start < 0 ? [] : lines.slice(start)).map((line, index) => (index === 0 ? first : CODEX_INDENT) + line);
-		} else if (text || isError) rows = prefixedRows(textLines(outputLines(isError ? `Error: ${text}` : text).join("\n"), "dim"), first, CODEX_INDENT, width, theme);
+			rows = (start < 0 ? [] : lines.slice(start)).map((line, index) => (index === 0 ? first : TAIL_INDENT) + line);
+		} else if (text || isError) rows = prefixedRows(textLines(outputLines(isError ? `Error: ${text}` : text).join("\n"), "dim"), first, TAIL_INDENT, width, theme);
 		return [...rows, ...(input.completion?.render(width) ?? []), dimDisclosure(theme, width, true)];
 	}
 	let lines = text ? tailLines(text) : [];
-	if (isError && outputLines(text).length <= CODEX_PREVIEW_ROWS) lines = lines.length ? [`Error: ${lines[0]}`, ...lines.slice(1)] : ["Error: "];
+	if (isError && outputLines(text).length <= TAIL_PREVIEW_ROWS) lines = lines.length ? [`Error: ${lines[0]}`, ...lines.slice(1)] : ["Error: "];
 	return [...previewRows(lines, theme, width), ...(input.completion?.render(width) ?? []), dimDisclosure(theme, width, false)];
 }
 
 /** Everything a Codex row draws beneath its head. */
-export function renderCodexResult(input: ResultInput): Component {
+export function renderTailResult(input: ResultInput): Component {
 	const { name, kind, result, state, isError, isPartial, args } = input;
-	if (kind === "shell" && isError && !isPartial) state.codex = { ...state.codex, exitCode: shellOutcome(input.output).exitCode };
+	if (kind === "shell" && isError && !isPartial) state.tail = { ...state.tail, exitCode: shellOutcome(input.output).exitCode };
 	let draw: (width: number) => string[];
 	if (kind === "custom") {
 		draw = (width) => customResult(input, width);
@@ -409,17 +408,17 @@ export function renderCodexResult(input: ResultInput): Component {
 		if (isError) {
 			draw = (width) => failureResult(input, width);
 		} else if (name === "edit") {
-			state.codex = { ...state.codex, changes: countEditChanges(result) ?? { added: 0, removed: 0 } };
-			const lines = parseCodeDiff(getEditPatch(result), getEditDiff(result), CODEX_TAB);
+			state.tail = { ...state.tail, changes: countEditChanges(result) ?? { added: 0, removed: 0 } };
+			const lines = parseCodeDiff(getEditPatch(result), getEditDiff(result), TAIL_TAB);
 			draw = (width) => patchResult(input, width, lines);
 		} else {
 			const content = typeof args.content === "string" ? normalizeLineEndings(args.content).replace(/\n$/u, "") : "";
-			const lines = content ? content.split("\n").map((line, index): CodeDiffLine => ({ kind: "add", lineNumber: index + 1, content: line.replace(/\t/gu, CODEX_TAB), hunk: 0 })) : [];
+			const lines = content ? content.split("\n").map((line, index): CodeDiffLine => ({ kind: "add", lineNumber: index + 1, content: line.replace(/\t/gu, TAIL_TAB), hunk: 0 })) : [];
 			draw = (width) => patchResult(input, width, lines);
 		}
 	} else {
 		draw = (width) => outputResult(input, width);
-		state.codex = { ...state.codex, opens: (width) => opens(input, width) };
+		state.tail = { ...state.tail, opens: (width) => opens(input, width) };
 	}
 	// In an opened exploration the group's one "− Show less" closes it, so the call leaves out its own.
 	const grouped = () => openExplorations.has(input.toolCallId);

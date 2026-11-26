@@ -14,6 +14,7 @@ import {
 	themeFgRgb,
 } from "../../shared/ansi.ts";
 import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
+import { t } from "../../shared/i18n.ts";
 import {
 	classifyMarkdownLinkTarget,
 	findFilePathSpansInLine,
@@ -58,6 +59,14 @@ interface ActionButtonSpec {
 	readonly key: string;
 	readonly label: string;
 	readonly payload: string;
+}
+
+function tableCopyButtons(token: MarkdownTableToken): ActionButtonSpec[] {
+	return [
+		{ key: "tsv", label: t("transcript.action.copyTsv"), payload: serializeMarkdownTableToTsv(token) },
+		{ key: "csv", label: t("transcript.action.copyCsv"), payload: serializeMarkdownTableToCsv(token) },
+		{ key: "md", label: t("transcript.action.copyMd"), payload: serializeMarkdownTableToMd(token) },
+	];
 }
 
 interface BlockActionMeta {
@@ -153,7 +162,7 @@ function buildCodeFooterRow(
 	state: "rest" | "hover" | "copied",
 ): { line: string; btnStartInCard: number; btnEndInCard: number } {
 	const accentFg = palette.isLight ? palette.accent : palette.accentBright;
-	const btnText = state === "copied" ? "✓ Copied" : "[Copy]";
+	const btnText = t(state === "copied" ? "transcript.action.copied" : "transcript.action.copy");
 	const styledBtn =
 		state === "copied"
 			? themeFgRgb(activeTheme, palette.success, btnText)
@@ -206,7 +215,7 @@ function buildInlineActionBarRow(
 		const actionId = `${zoneId}:${btn.key}`;
 		const isCopied = copiedAction === actionId;
 		const isHovered = hoveredAction === actionId;
-		const text = isCopied ? "✓ Copied" : btn.label;
+		const text = isCopied ? t("transcript.action.copied") : btn.label;
 		const styled = isCopied
 			? themeFgRgb(activeTheme, palette.success, text)
 			: isHovered
@@ -521,11 +530,7 @@ export function installMarkdownCardsAndHeadings(): void {
 					activeTheme,
 					palette,
 					"table",
-					[
-						{ key: "tsv", label: "[Copy TSV]", payload: serializeMarkdownTableToTsv(tableToken) },
-						{ key: "csv", label: "[Copy CSV]", payload: serializeMarkdownTableToCsv(tableToken) },
-						{ key: "md", label: "[Copy MD]", payload: serializeMarkdownTableToMd(tableToken) },
-					],
+					tableCopyButtons(tableToken),
 					0,
 					null,
 					null,
@@ -550,7 +555,7 @@ export function installMarkdownCardsAndHeadings(): void {
 						activeTheme,
 						palette,
 						"quote",
-						[{ key: "copy", label: "[Copy]", payload: strippedMd }],
+						[{ key: "copy", label: t("transcript.action.copy"), payload: strippedMd }],
 						0,
 						null,
 						null,
@@ -610,7 +615,7 @@ export function installMarkdownCardsAndHeadings(): void {
 						startOffset: 0,
 						endOffset: lastContentOffset,
 						actionOffset: 0,
-						buttons: [{ key: "copy", label: "[Copy]", payload: rawCode }],
+						buttons: [{ key: "copy", label: t("transcript.action.copy"), payload: rawCode }],
 					} satisfies BlockActionMeta;
 				} else {
 					block.__conartiBlockAction = {
@@ -621,7 +626,7 @@ export function installMarkdownCardsAndHeadings(): void {
 						startOffset: 0,
 						endOffset: lastContentOffset,
 						actionOffset: lastContentOffset,
-						buttons: [{ key: "copy", label: "[Copy]", payload: rawCode }],
+						buttons: [{ key: "copy", label: t("transcript.action.copy"), payload: rawCode }],
 					} satisfies BlockActionMeta;
 				}
 			} else if (
@@ -638,11 +643,7 @@ export function installMarkdownCardsAndHeadings(): void {
 					startOffset: lastContentOffset,
 					endOffset: lastContentOffset,
 					actionOffset: lastContentOffset,
-					buttons: [
-						{ key: "tsv", label: "[Copy TSV]", payload: serializeMarkdownTableToTsv(tableToken) },
-						{ key: "csv", label: "[Copy CSV]", payload: serializeMarkdownTableToCsv(tableToken) },
-						{ key: "md", label: "[Copy MD]", payload: serializeMarkdownTableToMd(tableToken) },
-					],
+					buttons: tableCopyButtons(tableToken),
 				} satisfies BlockActionMeta;
 			} else if (token?.type === "blockquote" && lastContentOffset >= 0 && cardWidth >= 16) {
 				const strippedMd = stripBlockquoteMarkers(String(token.raw ?? ""));
@@ -653,7 +654,7 @@ export function installMarkdownCardsAndHeadings(): void {
 						startOffset: lastContentOffset,
 						endOffset: lastContentOffset,
 						actionOffset: lastContentOffset,
-						buttons: [{ key: "copy", label: "[Copy]", payload: strippedMd }],
+						buttons: [{ key: "copy", label: t("transcript.action.copy"), payload: strippedMd }],
 					} satisfies BlockActionMeta;
 				} else {
 					block.__conartiBlockAction = undefined;
@@ -764,7 +765,7 @@ export function installMarkdownCardsAndHeadings(): void {
 								{
 									id: actionId,
 									key: "copy",
-									label: "[Copy]",
+									label: t("transcript.action.copy"),
 									payload: meta.raw ?? "",
 									xStart: Math.max(padX, padX + footer.btnStartInCard - 1),
 									xEnd: Math.min(width - 1, padX + footer.btnEndInCard + 1),
@@ -772,14 +773,14 @@ export function installMarkdownCardsAndHeadings(): void {
 							];
 						} else if (meta.kind === "code-inline-hover") {
 							const actionId = `${zoneId}:copy`;
-							const pillText = copiedAction === actionId ? "✓ Copied" : "[Copy]";
+							const pillText = t(copiedAction === actionId ? "transcript.action.copied" : "transcript.action.copy");
 							const pillW = visibleWidth(pillText);
 							const btnCol = Math.max(padX + 2, padX + meta.cardWidth - pillW - 2);
 							buttons = [
 								{
 									id: actionId,
 									key: "copy",
-									label: "[Copy]",
+									label: t("transcript.action.copy"),
 									payload: meta.raw ?? "",
 									xStart: Math.max(padX, btnCol - 1),
 									xEnd: Math.min(width - 1, btnCol + pillW + 1),
@@ -847,7 +848,7 @@ export function installMarkdownCardsAndHeadings(): void {
 				} else if (z.kind === "code-inline-hover") {
 					const btn = z.buttons[0]!;
 					const isCopied = copiedAction === btn.id;
-					const pillText = isCopied ? "✓ Copied" : "[Copy]";
+					const pillText = t(isCopied ? "transcript.action.copied" : "transcript.action.copy");
 					const styledPill = isCopied
 						? themeBgRgb(
 								activeTheme,

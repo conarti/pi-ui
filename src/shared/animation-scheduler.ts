@@ -1,7 +1,6 @@
 import {
+	blueFgRgbPrefix,
 	clampHueOutsideForbiddenBands,
-	fgRgb,
-	fgRgbPrefix,
 	getActiveGlobalTheme,
 	isLightTheme,
 	type RgbTuple,
@@ -209,7 +208,7 @@ export function paintBreathingWaveGlyph(
 	glyph: string,
 	options?: WaveSampleOptions,
 ): string {
-	return fgRgb(sampleBreathingWaveRgb(row, options), glyph);
+	return `${blueFgRgbPrefix(sampleBreathingWaveRgb(row, options), options?.theme)}${glyph}\x1b[39m`;
 }
 
 export interface GlimmerSweepOptions extends WaveSampleOptions {
@@ -393,7 +392,7 @@ export function paintGlimmerSweepText(
 		}
 		const level = evaluateGlimmerLevel(startIdx + i, totalSpan, elapsed, options);
 		const rgb = interpolateFourStops(stops, level);
-		const prefix = fgRgbPrefix(rgb, theme);
+		const prefix = blueFgRgbPrefix(rgb, theme);
 		if (prefix !== lastPrefix) {
 			out += prefix;
 			lastPrefix = prefix;

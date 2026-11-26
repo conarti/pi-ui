@@ -13,7 +13,7 @@ import { loadPiUiUserConfig } from "../../shared/pi-ui-config.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import { runAppAction } from "../../shared/ui-action-bridge.ts";
 import { showCommandPalette } from "../command-palette/index.ts";
-import { cycleSessionMode } from "../plan-studio/index.ts";
+import { cycleSessionMode } from "../plan-approval/index.ts";
 import {
 	acceptActivePromptSuggestion,
 	dismissActivePromptSuggestion,

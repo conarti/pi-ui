@@ -19,11 +19,11 @@ import { createOutlineRailSlot, registerOutlineCommands } from "./features/outli
 import {
 	applyModeTools,
 	cycleSessionMode,
-	registerPlanStudioFeature,
+	registerPlanApprovalFeature,
 	setSessionMode,
 	updatePlanWidget,
-} from "./features/plan-studio/index.ts";
-import { showPlanStudio } from "./features/plan-studio/studio-overlay.ts";
+} from "./features/plan-approval/index.ts";
+import { showPlanApproval } from "./features/plan-approval/approval-overlay.ts";
 import {
 	bindStickyExpandKey,
 	getStickyConfig,
@@ -120,7 +120,7 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 	registerAskUserFeature(pi);
 
 	/* 4. Режим планирования с построчными комментариями и защита вызовов тулов */
-	registerPlanStudioFeature(pi);
+	registerPlanApprovalFeature(pi);
 
 	/* 5. Command Palette (Ctrl+K / /palette), телеметрия + Context Inspector, конфиг-команды и Prompt Suggestion */
 	registerCommandPaletteFeature(pi);
@@ -145,10 +145,10 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 	});
 
 	pi.registerShortcut("ctrl+alt+p", {
-		description: t("sessionMode.shortcut.planStudio"),
+		description: t("sessionMode.shortcut.planApproval"),
 		handler: async (ctx) => {
 			const wf = getSessionWorkflow();
-			if (wf.hasPlan()) await showPlanStudio(pi, ctx);
+			if (wf.hasPlan()) await showPlanApproval(pi, ctx);
 			else setSessionMode(pi, ctx, wf.mode === "plan" ? "always-approve" : "plan");
 		},
 	});

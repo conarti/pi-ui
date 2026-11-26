@@ -145,9 +145,9 @@ describe("Telemetry aggregation, legacy pi-stamp normalization, and formatting (
 						input: 600,
 						cacheRead: 2_000,
 						cacheWrite: 100,
-						output: 200,
+						output: 180,
 						reasoning: 50,
-						totalTokens: 2_900,
+						totalTokens: 2_880,
 						cost: { input: 0.002, output: 0.004, cacheRead: 0.0005, cacheWrite: 0, total: 0.0065 },
 					},
 					timestamp: t0 + 3_000,
@@ -160,10 +160,10 @@ describe("Telemetry aggregation, legacy pi-stamp normalization, and formatting (
 				data: {
 					version: 1,
 					timestamp: t0 + 3_000,
-					firstContentAt: t0 + 3_400,
+					firstContentAt: t0 + 3_800,
 					completedAt: t0 + 7_400,
 					timeSinceUserMs: 7_400,
-					outputTokens: 200,
+					outputTokens: 180,
 					reasoningTokens: 50,
 					inputTokens: 600,
 					cacheReadTokens: 2_000,
@@ -217,7 +217,7 @@ describe("Telemetry aggregation, legacy pi-stamp normalization, and formatting (
 		expect(summary.modelCalls).toBe(3);
 		expect(summary.inputTokens).toBe(500 + 1_500 + 600 + 2_000 + 100 + 300);
 		expect(summary.cacheReadTokens).toBe(3_500);
-		expect(summary.outputTokens).toBe(400);
+		expect(summary.outputTokens).toBe(380);
 		expect(summary.reasoningTokens).toBe(70);
 		expect(summary.totalTokens).toBe(summary.inputTokens + summary.outputTokens);
 		expect(summary.costTotal).toBeCloseTo(0.012, 6);
@@ -227,7 +227,7 @@ describe("Telemetry aggregation, legacy pi-stamp normalization, and formatting (
 		expect(summary.modelGroups).toHaveLength(2);
 		expect(summary.modelGroups[0]!.label).toBe("alpha-model (medium)");
 		expect(summary.modelGroups[0]!.calls).toBe(2);
-		expect(summary.modelGroups[0]!.medianTtftMs).toBe(400);
+		expect(summary.modelGroups[0]!.medianTtftMs).toBe(600);
 		expect(summary.modelGroups[0]!.medianStreamTps).toBe(50);
 
 		expect(summary.turnSummaries).toHaveLength(2);
@@ -240,9 +240,9 @@ describe("Telemetry aggregation, legacy pi-stamp normalization, and formatting (
 
 		const md = buildSessionUsageMarkdownTable(summary);
 		expect(md).toContain("| Model + Effort | Calls | Med TTFT | Stream tok/s | API time | Output (reasoning) |");
-		expect(md).toContain("| alpha-model (medium) | 2 | 0.4s | 50 | 6.4s | 280 (70) |");
+		expect(md).toContain("| alpha-model (medium) | 2 | 0.6s | 50 | 6.4s | 260 (70) |");
 		expect(md).toContain("| Turn | Model | TTFT | tok/s | Duration | Output |");
-		expect(md).toContain("| #1 | alpha-model | 0.4s | 50 | 7.4s | 280 |");
+		expect(md).toContain("| #1 | alpha-model | 0.4s | 50 | 7.4s | 260 |");
 		expect(md).toContain("| #2 | beta-model | 0.6s | 40 | 3.7s | 120 |");
 	});
 

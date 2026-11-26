@@ -714,6 +714,43 @@ export function installViewportScrollDismissHooks(
 		});
 	}
 
+	installPrimaryScrollDismissHooks(namespace, isActive, onDismiss);
+}
+
+/** Подключает общий жизненный цикл Hover Popup, открытого кликом по строке транскрипта. */
+export function installClickedHoverPopupDismissHooks(
+	namespace: string,
+	getPopup: () => Component | undefined,
+	onDismiss: () => void,
+): () => void {
+	installPrimaryScrollDismissHooks(namespace, () => Boolean(getPopup()), onDismiss);
+	let opened = 0;
+	hookMethod(TuiAltScreen.prototype, "handleMouseEvent", `${namespace}.pointerDismiss`, (self, args, original) => {
+		const popup = getPopup();
+		const raw = args[0] as { button: number; x: number; y: number; release: boolean };
+		const move = !raw.release && (raw.button & 35) === 35;
+		const release = raw.release && (raw.button & 32) === 0;
+		if (!popup || (!move && !release) || !isSameHostTui(self, getActiveHostRuntime()?.tui)) {
+			return original.apply(self, args);
+		}
+		const layouts = (self as {
+			renderedOverlayLayouts?: readonly { entry: { component?: Component }; row: number; col: number; width: number; height: number }[];
+		}).renderedOverlayLayouts;
+		const rect = layouts?.find((layout) => layout.entry.component === popup);
+		const inside = rect && raw.x >= rect.col && raw.x < rect.col + rect.width &&
+			raw.y >= rect.row && raw.y < rect.row + rect.height;
+		const before = opened;
+		const result = original.apply(self, args);
+		if (!inside && opened === before && getPopup() === popup) {
+			onDismiss();
+			self.requestRender?.();
+		}
+		return result;
+	});
+	return () => { opened += 1; };
+}
+
+function installPrimaryScrollDismissHooks(namespace: string, isActive: () => boolean, onDismiss: () => void): void {
 	const scrollProto = (ScrollView as unknown as { prototype?: object } | undefined)?.prototype;
 	if (scrollProto) {
 		for (const methodName of ["scrollTo", "scrollBy", "scrollToStart", "scrollToEnd"] as const) {

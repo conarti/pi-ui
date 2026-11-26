@@ -38,7 +38,7 @@ import {
 } from "./invocation.ts";
 import {
 	CachedContainer,
-	claudeRows,
+	classicRows,
 	LiveCallContainer,
 	limitComponentLines,
 	prefixedSentence,
@@ -53,10 +53,10 @@ import {
 	styleMultiline,
 	WithinWidth,
 } from "./layout.ts";
-import { CLAUDE_DIFF_CONTEXT_LINES, CLAUDE_INDENT, CLAUDE_OUTPUT_ROWS, CLAUDE_RESULT_PREFIX, CLAUDE_RUNNING_OUTPUT_ROWS, CLAUDE_TITLE_INDENT, CLAUDE_WRITE_ROWS, claudeFailure, claudeOutcome, claudeTitle } from "./claude.ts";
-import { CODEX_BULLET, CODEX_INDENT } from "./codex.ts";
+import { CLASSIC_DIFF_CONTEXT_LINES, CLASSIC_INDENT, CLASSIC_OUTPUT_ROWS, CLASSIC_RESULT_PREFIX, CLASSIC_RUNNING_OUTPUT_ROWS, CLASSIC_TITLE_INDENT, CLASSIC_WRITE_ROWS, classicFailure, classicOutcome, classicTitle } from "./classic-rows.ts";
+import { TAIL_BULLET, TAIL_INDENT } from "./exploration-tail.ts";
 import { NestedCallSummaries } from "./nested.ts";
-import { renderCodexCall, renderCodexResult } from "./codex-rows.ts";
+import { renderTailCall, renderTailResult } from "./tail-rows.ts";
 import { renderDensityCall, renderDensityResult } from "./density.ts";
 import { ToolGroupController } from "./grouping.ts";
 import { chromePainter, completionPainter, paintIndicator } from "./palette.ts";
@@ -115,12 +115,12 @@ function isDensity(): boolean {
 	return runtime.config.style === "density";
 }
 
-function isClaude(): boolean {
-	return runtime.config.style === "claude";
+function isClassic(): boolean {
+	return runtime.config.style === "classic-rows";
 }
 
-function isCodex(): boolean {
-	return runtime.config.style === "codex";
+function isTail(): boolean {
+	return runtime.config.style === "exploration-tail";
 }
 
 function pathArgument(args: ToolArgs): string {
@@ -264,21 +264,20 @@ function renderRowCallContent(name: string, args: ToolArgs, theme: Theme, ctx: R
 		});
 	}
 	const kind = rowKind(name);
-	const indicator = liveIndicator(theme, ctx, state, isCodex() ? CODEX_BULLET : undefined);
+	const indicator = liveIndicator(theme, ctx, state, isTail() ? TAIL_BULLET : undefined);
 	// Painted once now as well, so a row that starts running starts the animation clock.
 	indicator();
-	// Codex's head reads the call's outcome, so it is worded each time it is drawn.
-	if (isCodex()) return renderCodexCall(name, kind, args, theme, state, () => callStatus(ctx, state), indicator, ctx.toolCallId);
-	if (isClaude()) {
-		// Claude Code's call line: `⦁ Bash(npm test)`, `⦁ Update(src/app.ts)`.
-		const { label, argument } = claudeTitle(name, args, state.expanded === true);
+	/* Заголовок читает исход вызова при отрисовке: результат может поступить позже. */
+	if (isTail()) return renderTailCall(name, kind, args, theme, state, () => callStatus(ctx, state), indicator, ctx.toolCallId);
+	if (isClassic()) {
+		const { label, argument } = classicTitle(name, args, state.expanded === true);
 		const title = ` ${theme.fg("toolTitle", theme.bold(label))}`
 			+ (argument ? styleMultiline(`(${argument})`, (line) => theme.fg("toolOutput", line)) : "");
 		// The title wraps under the tool's name rather than being cut to the row; only a
 		// very long command is shortened.
-		const container = new LiveCallContainer(indicator, (dot) => renderToolCall(dot + title, undefined, theme, CLAUDE_TITLE_INDENT));
+		const container = new LiveCallContainer(indicator, (dot) => renderToolCall(dot + title, undefined, theme, CLASSIC_TITLE_INDENT));
 		// The title already lists plain arguments; only nested ones need the full view.
-		if (kind === "custom" && state.expanded && hasNestedArguments(args)) container.addChild(renderArguments(args, theme, CLAUDE_INDENT));
+		if (kind === "custom" && state.expanded && hasNestedArguments(args)) container.addChild(renderArguments(args, theme, CLASSIC_INDENT));
 		return new WithinWidth(container);
 	}
 	const title = ` ${theme.fg("toolTitle", theme.bold(name))}`;
@@ -351,19 +350,19 @@ function renderRowBody(
 	return renderOutput(output, theme, isError, rail);
 }
 
-function claudeMoreLines(theme: Theme, hidden: number, expandKey: string): string {
+function classicMoreLines(theme: Theme, hidden: number, expandKey: string): string {
 	return chromePainter(theme)(`… +${hidden} ${hidden === 1 ? "line" : "lines"}${expandKey ? ` (${expandKey} to expand)` : ""}`);
 }
 
 /** Output previewed in rows the way Claude Code previews it, all of it once opened. */
-function claudeOutput(output: string, expanded: boolean, theme: Theme, isError: boolean, empty: string, firstPrefix: string, completion: Component | undefined, expandKey: string): Component {
+function classicOutput(output: string, expanded: boolean, theme: Theme, isError: boolean, empty: string, firstPrefix: string, completion: Component | undefined, expandKey: string): Component {
 	const normalized = normalizeLineEndings(output).trimEnd();
-	// Pi's bash reports an empty run as "(no output)"; Claude Code dims its own words for it.
+	/* Не дублируем служебную строку bash, когда команда ничего не вывела. */
 	const lines = !normalized || normalized === "(no output)"
 		? [chromePainter(theme)(empty)]
 		: normalized.split("\n").map((line) => theme.fg(isError ? "error" : "toolOutput", line));
-	return claudeRows(lines, firstPrefix, CLAUDE_INDENT, expanded ? undefined : CLAUDE_OUTPUT_ROWS,
-		(hidden) => claudeMoreLines(theme, hidden, expandKey), completion);
+	return classicRows(lines, firstPrefix, CLASSIC_INDENT, expanded ? undefined : CLASSIC_OUTPUT_ROWS,
+		(hidden) => classicMoreLines(theme, hidden, expandKey), completion);
 }
 
 /**
@@ -371,7 +370,7 @@ function claudeOutput(output: string, expanded: boolean, theme: Theme, isError: 
  * first rows, the author's view of a custom tool once opened, and otherwise
  * nothing until the row is opened. Read stays counts-only even when opened.
  */
-function claudeBody(
+function classicBody(
 	name: string,
 	args: ToolArgs,
 	result: AgentToolResult<unknown>,
@@ -381,30 +380,30 @@ function claudeBody(
 	author: AuthorResultRenderer | undefined,
 	expandKey: string,
 ): Component | undefined {
-	if (author && expanded) return renderRowBody(name, args, result, output, true, theme, false, author, CLAUDE_INDENT);
+	if (author && expanded) return renderRowBody(name, args, result, output, true, theme, false, author, CLASSIC_INDENT);
 	const path = pathArgument(args);
 	if (name === "edit") {
 		return renderCodeDiff(getEditPatch(result), getEditDiff(result), path, theme,
-			{ contextLines: CLAUDE_DIFF_CONTEXT_LINES, rail: CLAUDE_INDENT });
+			{ contextLines: CLASSIC_DIFF_CONTEXT_LINES, rail: CLASSIC_INDENT });
 	}
 	if (name === "write") {
-		const component = renderCodeView(output, path, theme, { rail: CLAUDE_INDENT });
+		const component = renderCodeView(output, path, theme, { rail: CLASSIC_INDENT });
 		return component && !expanded
-			? limitComponentLines(component, CLAUDE_WRITE_ROWS, theme, (hidden) => CLAUDE_INDENT + claudeMoreLines(theme, hidden, expandKey))
+			? limitComponentLines(component, CLASSIC_WRITE_ROWS, theme, (hidden) => CLASSIC_INDENT + classicMoreLines(theme, hidden, expandKey))
 			: component;
 	}
 	// A command's output is already the result line itself.
 	const kind = rowKind(name);
 	if (!expanded || kind === "shell" || name === "read") return undefined;
-	if (kind === "custom") return author ? renderRowBody(name, args, result, output, true, theme, false, author, CLAUDE_INDENT) : undefined;
-	return renderFileBody(name, args, result, output, true, theme, false, CLAUDE_INDENT);
+	if (kind === "custom") return author ? renderRowBody(name, args, result, output, true, theme, false, author, CLASSIC_INDENT) : undefined;
+	return renderFileBody(name, args, result, output, true, theme, false, CLASSIC_INDENT);
 }
 
 /**
  * Claude Code's result block: a "⎿" line saying what happened, or the output
  * itself for commands and custom tools, then any diff or code beneath it.
  */
-function renderClaudeResult(
+function renderClassicResult(
 	name: string,
 	args: ToolArgs,
 	result: AgentToolResult<unknown>,
@@ -420,34 +419,34 @@ function renderClaudeResult(
 	const chrome = chromePainter(theme);
 	const container = new CachedContainer();
 	// One line under the call, wrapped rather than cut to the row.
-	const line = (text: string) => prefixedSentence(text, chrome(CLAUDE_RESULT_PREFIX), CLAUDE_INDENT);
+	const line = (text: string) => prefixedSentence(text, chrome(CLASSIC_RESULT_PREFIX), CLASSIC_INDENT);
 	if (options.isPartial) {
 		const partial = normalizeLineEndings(output).trimEnd();
 		if (rowKind(name) === "shell" && partial && partial !== "(no output)") {
-			container.addChild(claudeRows(partial.split("\n").map((row) => theme.fg("toolOutput", row)),
-				chrome(CLAUDE_RESULT_PREFIX), CLAUDE_INDENT, expanded ? undefined : CLAUDE_RUNNING_OUTPUT_ROWS,
+			container.addChild(classicRows(partial.split("\n").map((row) => theme.fg("toolOutput", row)),
+				chrome(CLASSIC_RESULT_PREFIX), CLASSIC_INDENT, expanded ? undefined : CLASSIC_RUNNING_OUTPUT_ROWS,
 				(hidden) => chrome(`+${hidden} lines`), undefined, true));
 		} else container.addChild(line(chrome("Running…")));
 		return container;
 	}
 	if (isError) {
-		const failure = claudeFailure(name, output, expanded);
+		const failure = classicFailure(name, output, expanded);
 		// Expansion reveals diagnostics, never Pi's transport-only shell status.
 		// A non-shell failure keeps its full message in place once opened. Each
 		// logical line needs its own color: Pi resets terminal styling per row.
 		container.addChild(line(styleMultiline(failure.headline, (row) => theme.fg("error", row))));
 		if (failure.detail) {
-			container.addChild(claudeOutput(failure.detail, expanded, theme, true, "", CLAUDE_INDENT, completion, expandKey));
+			container.addChild(classicOutput(failure.detail, expanded, theme, true, "", CLASSIC_INDENT, completion, expandKey));
 		} else if (completion) container.addChild(completion);
 		return container;
 	}
-	const body = claudeBody(name, args, result, output, expanded, theme, author, expandKey);
+	const body = classicBody(name, args, result, output, expanded, theme, author, expandKey);
 	// The author's view already shows a custom tool's output, so the line above it only counts it.
 	const outcome = body && rowKind(name) === "custom"
 		? formatResultLineSummary(name, args, result, output) ?? "Done"
-		: claudeOutcome(name, args, result, output, (value) => theme.bold(value));
+		: classicOutcome(name, args, result, output, (value) => theme.bold(value));
 	if (outcome !== undefined) container.addChild(line(theme.fg("toolOutput", outcome)));
-	else container.addChild(claudeOutput(output, expanded, theme, false, rowKind(name) === "shell" ? "(No output)" : "(No content)", chrome(CLAUDE_RESULT_PREFIX), completion, expandKey));
+	else container.addChild(classicOutput(output, expanded, theme, false, rowKind(name) === "shell" ? "(No output)" : "(No content)", chrome(CLASSIC_RESULT_PREFIX), completion, expandKey));
 	if (body) container.addChild(body);
 	if (completion && outcome !== undefined) container.addChild(completion);
 	return container;
@@ -503,16 +502,16 @@ function renderRowResult(
 			previousWriteContent: name === "write" ? runtime.writeBaseline(ctx.toolCallId) : undefined,
 			showImages: ctx.showImages,
 		});
-	} else if (isCodex()) {
-		component = renderCodexResult({
+	} else if (isTail()) {
+		component = renderTailResult({
 			name, kind: author ? "custom" : kind, args: ctx.args, result, output, theme, state, isError: ctx.isError,
 			isPartial: options.isPartial, expanded: state.expanded === true, toolCallId: ctx.toolCallId, author, expandKey: toolExpandKey(ctx),
-			completion: nestedSummary ? renderControls(theme, state, false, ctx.isError, undefined, undefined, nestedSummary, CODEX_INDENT, CODEX_INDENT) : undefined,
+			completion: nestedSummary ? renderControls(theme, state, false, ctx.isError, undefined, undefined, nestedSummary, TAIL_INDENT, TAIL_INDENT) : undefined,
 		});
-	} else if (isClaude()) {
+	} else if (isClassic()) {
 		const container = new CachedContainer();
-		const completion = nestedSummary ? renderControls(theme, state, false, ctx.isError, undefined, undefined, nestedSummary, CLAUDE_INDENT, CLAUDE_INDENT) : undefined;
-		container.addChild(renderClaudeResult(name, ctx.args, result, options, theme, ctx.isError, state.expanded === true, output, author, completion, toolExpandKey(ctx)));
+		const completion = nestedSummary ? renderControls(theme, state, false, ctx.isError, undefined, undefined, nestedSummary, CLASSIC_INDENT, CLASSIC_INDENT) : undefined;
+		container.addChild(renderClassicResult(name, ctx.args, result, options, theme, ctx.isError, state.expanded === true, output, author, completion, toolExpandKey(ctx)));
 		component = new WithinWidth(container);
 	} else {
 		if (!options.isPartial && !state.resultLineSummaryComputed) {

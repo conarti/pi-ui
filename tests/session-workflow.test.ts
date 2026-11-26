@@ -230,9 +230,9 @@ describe("Session Workflow on real InteractiveMode", () => {
 		expect(saved?.planComments).toEqual({});
 
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
-		const studioText = harness.screen().text();
-		expect(studioText).toContain("Completely different step A");
-		expect(studioText).not.toContain("Check nullability");
+		const approvalText = harness.screen().text();
+		expect(approvalText).toContain("Completely different step A");
+		expect(approvalText).not.toContain("Check nullability");
 		await harness.pressKey("\x1b");
 	});
 

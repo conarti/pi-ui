@@ -19,8 +19,8 @@ import {
 	lookKind as classifyExploration,
 	pathOf,
 	type LookKind,
-} from "./claude.ts";
-import { isEmptyOutput, shellOutcome } from "./codex.ts";
+} from "./classic-rows.ts";
+import { isEmptyOutput, shellOutcome } from "./exploration-tail.ts";
 import { TOOL_DIAMOND, normalizeLineEndings, type RowStatus } from "./core.ts";
 import {
 	countEditChanges,
@@ -40,7 +40,7 @@ import {
 	railComponent,
 	renderArguments,
 	renderCodeView,
-	renderCodexDiff,
+	renderTailDiff,
 	renderOutput,
 	trimDiffContext,
 	type CodeDiffLine,
@@ -462,6 +462,16 @@ function formatWrappedShellCommandRows(
 	return out;
 }
 
+function expandedCommandRows(name: string, args: ToolArgs, pal: DensityPalette, rail: string, width: number): string[] {
+	if ((name === "bash" || name === "powershell") && typeof args.command === "string") {
+		return formatWrappedShellCommandRows(args.command, pal, rail, Math.max(1, width - 5));
+	}
+	if (name === "codemode" && typeof args.code === "string" && args.code.trim()) {
+		return [...(renderCodeView(args.code, "script.js", pal.theme, { rail })?.render(width) ?? [])];
+	}
+	return [];
+}
+
 function renderNonGraphicImages(
 	result: AgentToolResult<unknown>,
 	pal: DensityPalette,
@@ -631,12 +641,7 @@ export function renderDensityCall(options: {
 
 			/* Если команда раскрыта ещё до прихода первого partial-результата, сразу показываем полную команду / скрипт. */
 			if (expanded && !state.density && isCommandLikeTool(name)) {
-				if ((name === "bash" || name === "powershell") && typeof args.command === "string" && args.command.trim()) {
-					lines.push(...formatWrappedShellCommandRows(args.command, pal, rail, avail));
-				} else if (name === "codemode" && typeof args.code === "string" && args.code.trim()) {
-					const codeView = renderCodeView(args.code, "script.js", pal.theme, { rail });
-					if (codeView) lines.push(...codeView.render(width));
-				}
+				lines.push(...expandedCommandRows(name, args, pal, rail, width));
 			}
 
 			if (status === "running" && isCommandLikeTool(name) && !state.density) {
@@ -828,15 +833,7 @@ export function renderDensityResult(options: {
 
 			if (running) {
 				if (!cmdLike) return [];
-				const cmdHeaderRows: string[] = [];
-				if (expanded) {
-					if ((name === "bash" || name === "powershell") && typeof args.command === "string" && args.command.trim()) {
-						cmdHeaderRows.push(...formatWrappedShellCommandRows(args.command, pal, rail, avail));
-					} else if (name === "codemode" && typeof args.code === "string" && args.code.trim()) {
-						const codeView = renderCodeView(args.code, "script.js", pal.theme, { rail });
-						if (codeView) cmdHeaderRows.push(...codeView.render(width));
-					}
-				}
+				const cmdHeaderRows = expanded ? expandedCommandRows(name, args, pal, rail, width) : [];
 				const lines = extractedCmd?.lines ?? [];
 				if (lines.length === 0) {
 					const bar = paintDensityWaveGlyph(pal.theme, pal.light, 1, "▎");
@@ -876,7 +873,7 @@ export function renderDensityResult(options: {
 					if (contextual.length === 0) return [];
 					const maxPreview = 12;
 					const fullPreview =
-						renderCodexDiff(contextual, pathOf(args), pal.theme, rail)?.render(width) ?? [];
+						renderTailDiff(contextual, pathOf(args), pal.theme, rail)?.render(width) ?? [];
 					if (fullPreview.length > maxPreview) {
 						return [...fullPreview.slice(0, maxPreview), `${rail}${pal.dim("…")}`];
 					}
@@ -911,7 +908,7 @@ export function renderDensityResult(options: {
 			/* Приоритет нативных раскрытых представлений для read, edit, write, bash, powershell и codemode
 			   выше внешних обёрток registerToolRenderer, чтобы провайдеры не скрывали $ <command> и diff. */
 			if (hasImages && !isError) {
-				const outRows: string[] = [];
+				const outRows = expandedCommandRows(name, args, pal, rail, width);
 				if (!getCapabilities().images || !showImages) {
 					outRows.push(...renderNonGraphicImages(result, pal, rail, avail));
 				}
@@ -936,20 +933,14 @@ export function renderDensityResult(options: {
 			if (name === "edit" || name === "write") {
 				if (!isError) {
 					const allLines = diffInfo?.lines ?? [];
-					const fullDiff = renderCodexDiff(allLines, pathOf(args), pal.theme, rail);
+					const fullDiff = renderTailDiff(allLines, pathOf(args), pal.theme, rail);
 					if (fullDiff) return [...fullDiff.render(width)];
 				}
 				return [...(renderOutput(output, pal.theme, isError, rail)?.render(width) ?? [])];
 			}
 
 			if (cmdLike) {
-				const outRows: string[] = [];
-				if (name === "codemode" && typeof args.code === "string" && args.code.trim()) {
-					const codeView = renderCodeView(args.code, "script.js", pal.theme, { rail });
-					if (codeView) outRows.push(...codeView.render(width));
-				} else if ((name === "bash" || name === "powershell") && typeof args.command === "string" && args.command.trim()) {
-					outRows.push(...formatWrappedShellCommandRows(args.command, pal, rail, avail));
-				}
+				const outRows = expandedCommandRows(name, args, pal, rail, width);
 				const nestedCallLines = name === "codemode" ? formatCodemodeCallLines(detailsCalls) : [];
 				const lines = extractedCmd?.lines ?? [];
 				const linesAlreadyAreCalls =

@@ -231,7 +231,7 @@ export class Questionnaire implements Component, Focusable {
 		if (this.field?.tab === this.state.tab) return this.field;
 		const input = new Input({
 			prompt: "",
-			placeholder: "Type something.",
+			placeholder: t("askUser.customPlaceholder"),
 			placeholderStyle: (text) => this.theme.fg("muted", text),
 		});
 		input.setValue(this.state.answers[this.state.tab].draft);
@@ -651,19 +651,19 @@ export class Questionnaire implements Component, Focusable {
 		};
 		const navigate = `${keyLabel(this.keys.getKeys("tui.select.up"))}/${keyLabel(this.keys.getKeys("tui.select.down"))}`;
 		const switchHint = (arrows = true) => {
-			if (!this.single) hint(arrows ? "Tab/←→" : "Tab", "switch");
+			if (!this.single) hint(arrows ? "Tab/←→" : "Tab", t("askUser.hint.switch"));
 		};
-		const noteHint = () => hint(keyLabel(actionKeys(this.keys, "pi-ask-user.note")), "note");
+		const noteHint = () => hint(keyLabel(actionKeys(this.keys, "pi-ask-user.note")), t("askUser.hint.note"));
 		const confirmKey = keyLabel(this.keys.getKeys("tui.select.confirm"));
 		const cancelKey = keyLabel(this.keys.getKeys("tui.select.cancel"));
-		let cancelHint = `${cancelKey} cancel`;
+		let cancelHint = t("askUser.hint.cancel", { key: cancelKey });
 
 		const actionButtons: Array<{ id: string; label: string; tone?: "accent" | "danger"; onClick: () => void }> = [];
 
 		if (this.confirming) {
-			add(theme.bold("Discard all answers and drafts?"));
+			add(theme.bold(t("askUser.confirmDiscard")));
 			body.push("");
-			["Keep editing", "Discard answers"].forEach((label, i) =>
+			[t("askUser.keepEditing"), t("askUser.discardAnswers")].forEach((label, i) =>
 				choice(i, label, this.discard === (i === 1), {
 					id: `confirm-${i}`,
 					onClick: () => {
@@ -673,19 +673,19 @@ export class Questionnaire implements Component, Focusable {
 					},
 				}),
 			);
-			hint(confirmKey, "select");
-			hint(navigate, "navigate");
-			cancelHint = `${cancelKey} keep editing`;
+			hint(confirmKey, t("askUser.hint.select"));
+			hint(navigate, t("askUser.hint.navigate"));
+			cancelHint = t("askUser.hint.keepEditing", { key: cancelKey });
 		} else if (this.editing) {
-			add(theme.bold(this.reviewing ? "Global note" : "Question note"));
+			add(theme.bold(t(this.reviewing ? "askUser.globalNoteTitle" : "askUser.questionNoteTitle")));
 			body.push("");
 			/* Сохраняем SGR и CURSOR_MARKER, отфильтровывая опасные управляющие последовательности */
 			const editorLines = this.editor.render(width).map(editorDisplay);
 			const cursor = editorLines.findIndex((line) => line.includes(CURSOR_MARKER));
 			focusLine = body.length + Math.max(0, cursor);
 			body.push(...editorLines);
-			hints.push("Enter apply", "Shift+Enter newline");
-			cancelHint = `${cancelKey} back`;
+			hints.push(t("askUser.hint.apply"), t("askUser.hint.newline"));
+			cancelHint = t("askUser.hint.back", { key: cancelKey });
 			actionButtons.push(
 				{
 					id: "btn-apply-note",
@@ -709,7 +709,7 @@ export class Questionnaire implements Component, Focusable {
 				},
 			);
 		} else if (this.reviewing) {
-			add(theme.bold("Review your answers"));
+			add(theme.bold(t("askUser.review.title")));
 			body.push("");
 			state.questions.forEach((question, i) => {
 				const answer = state.answers[i];
@@ -719,23 +719,23 @@ export class Questionnaire implements Component, Focusable {
 				if (answer.customActive) labels.push(answer.custom);
 				add(display(question.question), "● ");
 				add(
-					state.answered(i) ? display(labels.join("; ")) : theme.fg("warning", "Unanswered"),
+					state.answered(i) ? display(labels.join("; ")) : theme.fg("warning", t("askUser.review.unanswered")),
 					"  → ",
 				);
-				if (answer.notes) add(theme.fg("muted", `Note: ${display(answer.notes)}`), "    ");
+				if (answer.notes) add(theme.fg("muted", t("askUser.notePrefix", { note: display(answer.notes) })), "    ");
 			});
 			if (state.globalNote) {
 				body.push("");
-				add(`Global note: ${display(state.globalNote)}`);
+				add(t("askUser.globalNotePrefix", { note: display(state.globalNote) }));
 			}
 			body.push("");
 			add(
 				state.complete()
-					? "Ready to submit your answers?"
-					: theme.fg("warning", "Answer every question before submitting."),
+					? t("askUser.review.ready")
+					: theme.fg("warning", t("askUser.review.incomplete")),
 			);
 			body.push("");
-			["Submit answers", "Cancel"].forEach((label, i) =>
+			[t("askUser.review.submit"), t("askUser.pill.cancel")].forEach((label, i) =>
 				choice(i, label, this.reviewCursor === i, {
 					id: `review-${i}`,
 					onClick: () => {
@@ -745,8 +745,8 @@ export class Questionnaire implements Component, Focusable {
 					},
 				}),
 			);
-			hint(confirmKey, "select");
-			hint(navigate, "navigate");
+			hint(confirmKey, t("askUser.hint.select"));
+			hint(navigate, t("askUser.hint.navigate"));
 			switchHint();
 			noteHint();
 			actionButtons.push(
@@ -774,13 +774,13 @@ export class Questionnaire implements Component, Focusable {
 			add(theme.bold(display(question.question)));
 			body.push("");
 			const explaining = this.explaining?.tab === state.tab ? this.explaining : undefined;
-			const explanation = explaining ? explaining.text || "Explaining…" : answer.explanation;
+			const explanation = explaining ? explaining.text || t("askUser.explaining") : answer.explanation;
 			if (explanation) {
 				add(theme.fg("muted", display(explanation)));
 				body.push("");
 			}
 			if (this.explainError?.tab === state.tab) {
-				add(theme.fg("error", `Explanation failed: ${display(this.explainError.message)}`));
+				add(theme.fg("error", t("askUser.explanationFailed", { message: display(this.explainError.message) })));
 				body.push("");
 			}
 			const rows = [
@@ -790,7 +790,7 @@ export class Questionnaire implements Component, Focusable {
 					checked: answer.selected.has(i),
 				})),
 				{
-					label: answer.draft ? display(answer.draft) : "Type something.",
+					label: answer.draft ? display(answer.draft) : t("askUser.customPlaceholder"),
 					description: undefined,
 					checked: answer.customActive,
 				},
@@ -853,7 +853,7 @@ export class Questionnaire implements Component, Focusable {
 			if (question.multiSelect) {
 				const subStart = body.length;
 				if (onSubmit) focusLine = subStart;
-				const label = theme.bold(this.single ? "Submit" : "Next");
+				const label = theme.bold(t(this.single ? "askUser.pill.submit" : "askUser.pill.next"));
 				const indent = " ".repeat(`${rows.length + 1}. `.length);
 				add(
 					onSubmit
@@ -874,13 +874,13 @@ export class Questionnaire implements Component, Focusable {
 			}
 			if (answer.notes) {
 				body.push("");
-				add(theme.fg("muted", `Note: ${display(answer.notes)}`));
+				add(theme.fg("muted", t("askUser.notePrefix", { note: display(answer.notes) })));
 			}
 			body.push(theme.fg("border", "─".repeat(bodyWidth)));
 			const explainRow = rows.length + (question.multiSelect ? 1 : 0);
 			choice(
 				question.options.length + 1,
-				explaining ? "Explaining…" : "Explain this question",
+				t(explaining ? "askUser.explaining" : "askUser.explainQuestion"),
 				answer.cursor === explainRow,
 				{
 					id: "row-explain",
@@ -891,24 +891,24 @@ export class Questionnaire implements Component, Focusable {
 					},
 				},
 			);
-			choice(question.options.length + 2, "Chat about this", answer.cursor === explainRow + 1, {
+			choice(question.options.length + 2, t("askUser.chatAboutQuestion"), answer.cursor === explainRow + 1, {
 				id: "row-chat",
 				onClick: () => {
 					answer.cursor = explainRow + 1;
 					this.done(result(this.state, false, true));
 				},
 			});
-			if (!question.multiSelect) hint(confirmKey, "select");
-			else if (typing) hint(confirmKey, "done");
-			else hint(`Space/${confirmKey}`, "toggle");
-			hint(navigate, "navigate");
+			if (!question.multiSelect) hint(confirmKey, t("askUser.hint.select"));
+			else if (typing) hint(confirmKey, t("askUser.hint.done"));
+			else hint(`Space/${confirmKey}`, t("askUser.hint.toggle"));
+			hint(navigate, t("askUser.hint.navigate"));
 			switchHint(!typing);
 			if (!typing) noteHint();
-			if (explaining) cancelHint = `${cancelKey} stop explaining`;
+			if (explaining) cancelHint = t("askUser.hint.stopExplaining", { key: cancelKey });
 			if (hasPreview) {
 				hint(
 					`${keyLabel(actionKeys(this.keys, "pi-ask-user.previewUp"))}/${keyLabel(actionKeys(this.keys, "pi-ask-user.previewDown"))}`,
-					"preview",
+					t("askUser.hint.preview"),
 				);
 			}
 			actionButtons.push(
@@ -994,7 +994,7 @@ export class Questionnaire implements Component, Focusable {
 		let bottom = footer([]);
 		let available = height - top.length - 1 - actionRowCount - bottom.length;
 		if (body.length > available && available >= 1) {
-			bottom = footer(["Ctrl+↑/↓ scroll"]);
+			bottom = footer([t("askUser.hint.scroll")]);
 			available = height - top.length - 1 - actionRowCount - bottom.length;
 		}
 		const chrome = available >= 1;
@@ -1056,9 +1056,9 @@ export class Questionnaire implements Component, Focusable {
 		const box = (i: number) => (state.answered(i) ? "☒" : "☐");
 		const full = [
 			...state.questions.map(
-				(question, i) => `${box(i)} ${display(question.header || `Q${i + 1}`).replace(/\s+/g, " ")}`,
+				(question, i) => `${box(i)} ${display(question.header || t("askUser.fallbackTab", { number: i + 1 })).replace(/\s+/g, " ")}`,
 			),
-			"✔ Submit",
+			`✔ ${t("askUser.pill.submit")}`,
 		];
 		const short = [...state.questions.map((_, i) => `${box(i)} ${i + 1}`), "✔"];
 		const fits = full.reduce((sum, label) => sum + visibleWidth(label) + 3, 6) <= width;

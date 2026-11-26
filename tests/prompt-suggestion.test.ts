@@ -125,6 +125,26 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		expect(harness.screen().text()).toContain("Usage: /suggestions [on|off]");
 	});
 
+	it("disabling Prompt Suggestions in the Command Palette revokes the live token opt-in", async () => {
+		const agentDir = allocateEnabledAgentDir();
+		harness = await createInteractiveHarness({
+			agentDir,
+			width: 100,
+			height: 28,
+			responses: [fauxAssistantMessage("Reply after opting out.")],
+			suggestionResponses: [fauxAssistantMessage("Should not run")],
+		});
+
+		await harness.pressKey("\x0b");
+		await harness.typeText("disable prompt suggestions");
+		expect(harness.screen().text()).toContain("Prompt Suggestion: disable");
+		await harness.pressKey("\r");
+		expect(loadPiUiUserConfig().promptSuggestions).toBe(false);
+		await harness.submitInput("No background work please");
+		await harness.flush();
+		expect(harness.suggestionCalls).toHaveLength(0);
+	});
+
 	it("fires zero background Prompt Suggestion calls on fresh installs without explicit opt-in", async () => {
 		harness = await createInteractiveHarness({
 			width: 90,

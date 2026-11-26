@@ -1,4 +1,5 @@
-import { basename, dirname, extname } from "node:path";
+import { createHash } from "node:crypto";
+import { basename, dirname, extname, normalize } from "node:path";
 import {
 	ExtensionRunner,
 	type ExtensionAPI,
@@ -83,6 +84,8 @@ const GENERIC_SOURCE_TOKENS = new Set([
 	"auto",
 ]);
 
+export const COMMAND_PALETTE_CHORD = "ctrl+k";
+
 const SENTINEL_TOOL_RENDERER = Object.freeze({
 	renderCall: () => undefined,
 	renderResult: () => undefined,
@@ -140,6 +143,9 @@ interface RawUiSlotMethods {
 	setWorkingIndicator?: ExtensionUIContext["setWorkingIndicator"];
 	getEditorComponent?: ExtensionUIContext["getEditorComponent"];
 }
+
+type EditorFactory = NonNullable<ReturnType<ExtensionUIContext["getEditorComponent"]>>;
+type EditorProbe = { ownerId: string; delegated?: ReturnType<EditorFactory> };
 
 interface ArbitrationGlobalState {
 	controllers: WeakMap<object, SessionArbitrationController>;
@@ -242,7 +248,7 @@ function extractNodeModulesPackage(filePath: string): string | undefined {
  * Вычисляет стабильный идентификатор расширения для хранения в `pi-ui.json` (`slotOwners`)
  * и отображения в модальной карточке `Slot Arbitration`.
  */
-export function deriveExtensionOwnerId(ext: unknown, usedIds?: Set<string>): string {
+export function deriveExtensionOwnerId(ext: unknown): string {
 	if (isPiUiExtension(ext)) return PI_UI_OWNER_ID;
 	const rec = (ext && typeof ext === "object" ? ext : {}) as RunnerExtensionRecord;
 	let candidate: string | undefined;
@@ -282,18 +288,14 @@ export function deriveExtensionOwnerId(ext: unknown, usedIds?: Set<string>): str
 	}
 
 	const baseSlug = sanitizeOwnerSlug(candidate ?? "third-party");
-	if (!usedIds) return baseSlug;
-	if (!usedIds.has(baseSlug)) {
-		usedIds.add(baseSlug);
-		return baseSlug;
-	}
-	let suffix = 2;
-	while (usedIds.has(`${baseSlug}-${suffix}`)) {
-		suffix += 1;
-	}
-	const unique = `${baseSlug}-${suffix}`;
-	usedIds.add(unique);
-	return unique;
+	const path = rec.resolvedPath ?? rec.path ?? rec.sourceInfo?.path;
+	if (!path || path.startsWith("<")) return baseSlug;
+	/* Суффикс не зависит от наличия соседей и порядка загрузки; для npm сохраняем путь внутри пакета. */
+	const normalized = normalize(path).replaceAll("\\", "/");
+	const pkg = extractNodeModulesPackage(normalized);
+	const identity = pkg ? normalized.slice(normalized.lastIndexOf("/node_modules/") + "/node_modules/".length) : normalized;
+	const suffix = createHash("sha256").update(identity).digest("hex").slice(0, 12);
+	return `${baseSlug}-${suffix}`;
 }
 
 function findCommandKeyIgnoreCase(
@@ -391,7 +393,6 @@ class SessionArbitrationController {
 	private rawSlots: RawUiSlotMethods = {};
 	private readonly ownerIdsByExt = new WeakMap<RunnerExtensionRecord, string>();
 	private readonly extsByOwnerId = new Map<string, RunnerExtensionRecord>();
-	private readonly usedOwnerIds = new Set<string>([PI_UI_OWNER_ID]);
 	private readonly wrappedExtensions = new WeakSet<RunnerExtensionRecord>();
 	private readonly wrappedCtxCache = new WeakMap<
 		object,
@@ -411,8 +412,9 @@ class SessionArbitrationController {
 
 	private readonly appliedSingletonOwners: Partial<Record<SingletonUiSlot, string>> = {};
 	private readonly appliedSingletonValues: Partial<Record<SingletonUiSlot, unknown>> = {};
-	private readonly editorReaders = new Set<string>();
-	private readonly cooperativeEditorWrappers = new Map<string, unknown>();
+	private readonly editorDelegates = new Map<string, EditorFactory>();
+	private readonly cooperativeEditorWrappers = new Map<string, EditorFactory>();
+	private editorProbe?: EditorProbe;
 	private inSessionStart = false;
 	private sessionStartFinished = false;
 	private readonly promptedSlots = new Set<string>();
@@ -449,7 +451,7 @@ class SessionArbitrationController {
 	getOwnerId(ext: RunnerExtensionRecord): string {
 		const cached = this.ownerIdsByExt.get(ext);
 		if (cached) return cached;
-		const derived = deriveExtensionOwnerId(ext, isPiUiExtension(ext) ? undefined : this.usedOwnerIds);
+		const derived = deriveExtensionOwnerId(ext);
 		this.ownerIdsByExt.set(ext, derived);
 		this.extsByOwnerId.set(derived, ext);
 		return derived;
@@ -604,14 +606,17 @@ class SessionArbitrationController {
 		ownerId: string,
 	): ReturnType<ExtensionUIContext["getEditorComponent"]> {
 		if (ownerId !== PI_UI_OWNER_ID) {
-			const currentPiUiOrWrapped =
-				[...this.cooperativeEditorWrappers.values()].at(-1) ??
+			const delegated = ([...this.cooperativeEditorWrappers.entries()].filter(([id]) => id !== ownerId).at(-1)?.[1] ??
 				this.singletonCandidates.editor.get(PI_UI_OWNER_ID) ??
-				this.rawSlots.getEditorComponent?.();
-			if (currentPiUiOrWrapped) {
-				this.editorReaders.add(ownerId);
-			}
-			return currentPiUiOrWrapped as ReturnType<ExtensionUIContext["getEditorComponent"]>;
+				this.rawSlots.getEditorComponent?.()) as EditorFactory | undefined;
+			if (!delegated) return undefined;
+			this.editorDelegates.set(ownerId, delegated);
+			return (...args) => {
+				const editor = delegated(...args);
+				const probe = this.editorProbe;
+				if (probe?.ownerId === ownerId) probe.delegated = editor;
+				return editor;
+			};
 		}
 		const own = this.singletonCandidates.editor.get(ownerId);
 		if (own !== undefined) {
@@ -624,19 +629,42 @@ class SessionArbitrationController {
 		return this.rawSlots.getEditorComponent?.();
 	}
 
-	private registerEditorComponent(ownerId: string, factory: unknown): void {
-		/* Если стороннее расширение заранее прочитало getEditorComponent(), оно кооперативно декорирует наш Composer без конфликта */
-		if (ownerId !== PI_UI_OWNER_ID && this.editorReaders.has(ownerId)) {
-			this.editorReaders.delete(ownerId);
-			if (factory === undefined) {
-				this.cooperativeEditorWrappers.delete(ownerId);
-			} else {
-				this.cooperativeEditorWrappers.set(ownerId, factory);
-			}
-			this.applySingletonSlot("editor", true);
+	private registerEditorComponent(ownerId: string, factory: EditorFactory | undefined): void {
+		const delegated = this.editorDelegates.get(ownerId);
+		this.editorDelegates.delete(ownerId);
+		this.cooperativeEditorWrappers.delete(ownerId);
+		const candidates = this.singletonCandidates.editor;
+		if (!factory || !delegated || !candidates.has(PI_UI_OWNER_ID) ||
+			this.resolveWinnerForSingletonSlot("editor").ownerId !== PI_UI_OWNER_ID) {
+			this.registerSingletonSlot("editor", ownerId, factory);
 			return;
 		}
-		this.registerSingletonSlot("editor", ownerId, factory);
+
+		/* Хост синхронно вызывает фабрику с реальными аргументами; декоратор должен вернуть тот же экземпляр Composer. */
+		let cooperative = false;
+		this.cooperativeEditorWrappers.set(ownerId, (...args) => {
+			const probe: EditorProbe = { ownerId };
+			const previousProbe = this.editorProbe;
+			this.editorProbe = probe;
+			try {
+				const proposed = factory(...args);
+				cooperative = probe.delegated !== undefined && proposed === probe.delegated;
+				if (cooperative) return proposed;
+			} catch {
+				/* Не ломаем Composer, если сторонняя фабрика не смогла его декорировать. */
+				cooperative = false;
+			} finally {
+				this.editorProbe = previousProbe;
+			}
+			return probe.delegated ?? delegated(...args);
+		});
+		this.applySingletonSlot("editor", true);
+		if (cooperative) {
+			candidates.delete(ownerId);
+		} else {
+			this.cooperativeEditorWrappers.delete(ownerId);
+			this.registerSingletonSlot("editor", ownerId, factory);
+		}
 	}
 
 	registerSingletonSlot(slot: SingletonUiSlot, ownerId: string, value: unknown): void {
@@ -670,7 +698,7 @@ class SessionArbitrationController {
 			if (candidates.has(saved)) {
 				return { ownerId: saved, value: candidates.get(saved) };
 			}
-			if (slot === "footer" && saved !== PI_UI_OWNER_ID) {
+			if (slot === "footer" && candidates.size <= 1 && saved !== PI_UI_OWNER_ID) {
 				return { ownerId: saved, value: undefined };
 			}
 		}
@@ -794,7 +822,6 @@ class SessionArbitrationController {
 
 		for (const piUiChord of piUiExt.shortcuts.keys()) {
 			const normChord = piUiChord.trim().toLowerCase();
-			if (normChord === "ctrl+k") continue;
 			const contenders = new Map<string, RunnerExtensionRecord>();
 			for (const ext of thirdParties) {
 				if (findShortcutKeyIgnoreCase(ext.shortcuts, normChord)) {
@@ -864,9 +891,6 @@ class SessionArbitrationController {
 			if (!candidateOwnerIds) return saved;
 			for (const id of candidateOwnerIds) {
 				if (id === saved) return saved;
-			}
-			if (slotId === "footer" && saved !== PI_UI_OWNER_ID) {
-				return saved;
 			}
 		}
 		return PI_UI_OWNER_ID;
@@ -1062,18 +1086,29 @@ class SessionArbitrationController {
 		}
 	}
 
+	async dispatchPaletteShortcut(): Promise<void> {
+		const piUiExt = this.getPiUiExtension();
+		if (!piUiExt) return;
+		const contenders = this.collectContendedShortcutMap().get(COMMAND_PALETTE_CHORD);
+		const active = this.resolveActiveOwner(`shortcut:${COMMAND_PALETTE_CHORD}`, contenders?.keys());
+		const winner = contenders?.get(active) ?? piUiExt;
+		const key = findShortcutKeyIgnoreCase(winner.shortcuts, COMMAND_PALETTE_CHORD);
+		const ctx = this.runner.createContext?.();
+		if (key && ctx) await winner.shortcuts?.get(key)?.handler(this.wrapContextForExtension(ctx, winner));
+	}
+
 	resolveShortcutsHook(
 		resolvedKeybindings: unknown,
 		original: (kb: unknown) => Map<string, ExtensionShortcut>,
 	): Map<string, ExtensionShortcut> {
 		this.syncExtensionsAndWrap();
 		const contended = this.collectContendedShortcutMap();
-		if (contended.size === 0) {
-			const baseMap = original(resolvedKeybindings);
-			return this.wrapNonContendedShortcuts(baseMap);
-		}
-
 		const piUiExt = this.getPiUiExtension();
+		/* Хост отклоняет Ctrl+K (deleteToLineEnd); сохраняем регистрации для арбитража, но не отдаём их его диспетчеру. */
+		if (findShortcutKeyIgnoreCase(piUiExt?.shortcuts, COMMAND_PALETTE_CHORD)) {
+			const reserved = contended.get(COMMAND_PALETTE_CHORD) ?? new Map([[PI_UI_OWNER_ID, piUiExt!]]);
+			contended.set(COMMAND_PALETTE_CHORD, reserved);
+		}
 		const savedEntries: Array<{
 			map: Map<string, ExtensionShortcut>;
 			key: string;
@@ -1102,7 +1137,7 @@ class SessionArbitrationController {
 					}
 				}
 
-				if (piUiExt?.shortcuts && piUiShortcut) {
+				if (normChord !== COMMAND_PALETTE_CHORD && piUiExt?.shortcuts && piUiShortcut) {
 					const dynamicShortcut: ExtensionShortcut = {
 						...piUiShortcut,
 						handler: async (ctx: ExtensionContext) => {
@@ -1429,6 +1464,10 @@ export function markPiUiCommandHandler<T extends Function>(handler: T): T {
  */
 export function installSlotArbitration(_pi: ExtensionAPI): void {
 	installExtensionRunnerArbitrationHooks();
+}
+
+export async function dispatchPaletteShortcut(): Promise<void> {
+	await getGlobalState().activeController?.dispatchPaletteShortcut();
 }
 
 export function registerSlotArbitrationModalOpener(opener: SlotArbitrationModalOpener): void {

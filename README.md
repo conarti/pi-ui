@@ -33,7 +33,7 @@ pi-ui/
         │   ├── markdown-cards.ts # Двухтоновые карточки кода + Copy и заголовки без `###`
         │   ├── thinking-block.ts # Блоки мыслей (120 кол., волна `┃`, сворачивание по клику)
         │   └── index.ts
-        ├── tool-calls/           # Рендер вызовов тулзов (Compact / Claude / Codex / Silent)
+        ├── tool-calls/           # Рендер вызовов тулзов (Tool Density / Silent)
         │   ├── index.ts          # Оркестрация, команды /compact-tools и /silent
         │   ├── config.ts         # Настройки стилей и авто-компакта тулзов
         │   └── ...               # Модули рендера строк, группировки и диффов
@@ -50,8 +50,8 @@ pi-ui/
         ├── chrome/               # Обрамление экрана
         │   ├── header.ts         # Однострочная шапка сессии
         │   └── composer.ts       # Поле ввода (Option+Enter newline, волна генерации, hover рамки)
-        ├── plan-studio/          # Режим планирования без воды, построчные комменты и Auto-Safe
-        │   ├── studio-overlay.ts # Оверлей ревью плана с комментариями под строками
+        ├── plan-approval/          # Режим планирования без воды, построчные комменты и Auto-Safe
+        │   ├── approval-overlay.ts # Оверлей ревью плана с комментариями под строками
         │   └── index.ts          # Хуки режимов, виджет прогресса, /plan и /mode
         ├── command-palette/      # Единое меню команд и тем (Ctrl+K, /palette)
         │   └── index.ts
@@ -63,7 +63,7 @@ pi-ui/
 
 - **`Ctrl+K`** / `/palette` — единая палитра команд, режимов, тем и скиллов
 - **`Alt+M`** / `/mode [code|plan|safe]` — переключение режимов
-- **`Ctrl+Alt+P`** / `/plan [on|off|review|run|clear]` — Plan Mode и Plan Studio с построчными комментариями
+- **`Ctrl+Alt+P`** / `/plan [on|off|review|run|clear]` — Plan Mode и Plan Approval с построчными комментариями
 - **`/context`** — инспектор заполнения контекстного окна
 - **`/sticky`** — управление закреплённым сверху промптом
 - **`Ctrl+Alt+O`** / `/outline` — показать / скрыть правую панель навигации по репликам

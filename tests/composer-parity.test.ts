@@ -416,14 +416,22 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 		await harness.flush();
 		expect(harness.session.getSteeringMessages()).toEqual(["Steer item beta"]);
 
-		/* Клик по [×] удаляет конкретный элемент из очереди без прерывания хода */
+		const queuedImage = { type: "image" as const, mimeType: "image/png", data: "iVBORw0KGgo=" };
+		await harness.session.steer("Steer item with image", [queuedImage]);
+		await harness.flush();
 		const betaHit = harness.screen().findText("Steer item beta")!;
 		const removeCol = harness.screen().rowText(betaHit.row).indexOf("[×]");
 		expect(removeCol).toBeGreaterThan(0);
 		await harness.mouseClick(removeCol + 1, betaHit.row);
 		await harness.flush();
-		expect(harness.session.getSteeringMessages()).toEqual([]);
+		expect(harness.session.getSteeringMessages()).toEqual(["Steer item with image"]);
+		expect(harness.session.agent.peekQueuedMessages()).toEqual([
+			expect.objectContaining({ content: [{ type: "text", text: "Steer item with image" }, queuedImage] }),
+		]);
 		expect(harness.session.getFollowUpMessages()).toEqual(["Queued item alpha"]);
+		const imageHit = harness.screen().findText("Steer item with image")!;
+		await harness.mouseClick(harness.screen().rowText(imageHit.row).indexOf("[×]") + 1, imageHit.row);
+		await harness.flush();
 
 		/* Клик по [Edit · Alt+↑] возвращает элемент в Composer для редактирования */
 		const alphaHit = harness.screen().findText("Queued item alpha")!;

@@ -212,8 +212,33 @@ function openAnsiRgb(set: 38 | 48, r: number, g: number, b: number, theme?: unkn
 		: `\x1b[${set};2;${rr};${gg};${bb}m`;
 }
 
-export function fgRgbPrefix(rgb: RgbTuple, theme?: unknown): string {
-	return openAnsiRgb(38, rgb[0], rgb[1], rgb[2], theme);
+function isBlueOrNeutral(rgb: RgbTuple): boolean {
+	const { hue, saturation } = rgbHueDegrees(rgb);
+	return saturation <= 0.04 || (hue > FORBIDDEN_TURQUOISE_MAX && hue < FORBIDDEN_PURPLE_MIN);
+}
+
+const BLUE_ANSI_CUBE = Array.from({ length: 216 }, (_, i) => {
+	const index = i + 16;
+	return { index, rgb: ansi256ToRgb(index)! };
+}).filter(({ rgb }) => isBlueOrNeutral(rgb));
+
+export function blueFgRgbPrefix(rgb: RgbTuple, theme?: unknown): string {
+	if (!is256ColorTheme(theme)) return openAnsiRgb(38, ...rgb, theme);
+	const [r, g, b] = rgb;
+	let index = rgbToAnsi256(r, g, b);
+	/* Квантование может превратить безопасный RGB в бирюзу; для волны подбираем ближайший допустимый цвет. */
+	if (!isBlueOrNeutral(ansi256ToRgb(index)!)) {
+		let best = Infinity;
+		for (const candidate of BLUE_ANSI_CUBE) {
+			const [cr, cg, cb] = candidate.rgb;
+			const distance = (r - cr) ** 2 * 0.299 + (g - cg) ** 2 * 0.587 + (b - cb) ** 2 * 0.114;
+			if (distance < best) {
+				best = distance;
+				index = candidate.index;
+			}
+		}
+	}
+	return `\x1b[38;5;${index}m`;
 }
 
 export function themeFgRgb(theme: unknown, rgb: RgbTuple, text: string): string {

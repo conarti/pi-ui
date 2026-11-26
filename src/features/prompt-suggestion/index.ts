@@ -48,6 +48,7 @@ const SUGGESTIONS_MODES = ["on", "off"] as const;
 const SUGGESTION_BRIDGE_KEY = Symbol.for("conarti.pi-ui.prompt-suggestion-bridge.v1");
 
 interface PromptSuggestionBridge {
+	setEnabled(next: boolean): boolean;
 	hasActive(): boolean;
 	accept(editor: PiUiComposerEditor): boolean;
 	dismiss(): boolean;
@@ -59,6 +60,11 @@ function getSuggestionBridgeSlot(): { bridge?: PromptSuggestionBridge } {
 		g[SUGGESTION_BRIDGE_KEY] = {};
 	}
 	return g[SUGGESTION_BRIDGE_KEY]!;
+}
+
+export function setPromptSuggestionsEnabled(next: boolean): boolean {
+	return getSuggestionBridgeSlot().bridge?.setEnabled(next)
+		?? updatePiUiUserConfig({ promptSuggestions: next }).promptSuggestions;
 }
 
 export function hasActivePromptSuggestion(): boolean {
@@ -128,6 +134,12 @@ export function registerPromptSuggestionFeature(pi: ExtensionAPI): void {
 	};
 
 	getSuggestionBridgeSlot().bridge = {
+		setEnabled: (next) => {
+			enabled = updatePiUiUserConfig({ promptSuggestions: next }).promptSuggestions;
+			if (!enabled) clearPromptSuggestion();
+			requestRender();
+			return enabled;
+		},
 		hasActive: () => Boolean(enabled && activeSuggestion),
 		accept: (editor) => {
 			if (!enabled || !activeSuggestion) return false;
@@ -165,14 +177,9 @@ export function registerPromptSuggestionFeature(pi: ExtensionAPI): void {
 
 				const current = loadPiUiUserConfig().promptSuggestions;
 				const next = arg === "on" ? true : arg === "off" ? false : !current;
-				enabled = updatePiUiUserConfig({ promptSuggestions: next }).promptSuggestions;
-				if (!enabled) {
-					clearPromptSuggestion();
-				} else {
-					requestRender();
-				}
+				const active = setPromptSuggestionsEnabled(next);
 				ctx.ui.notify(
-					t("suggestions.toggled", { state: enabled ? t("state.on") : t("state.off") }),
+					t("suggestions.toggled", { state: active ? t("state.on") : t("state.off") }),
 					"info",
 				);
 			},

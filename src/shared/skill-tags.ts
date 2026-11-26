@@ -3,8 +3,6 @@ import { homedir } from "node:os";
 import { relative } from "node:path";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
-	ScrollView,
-	TuiAltScreen,
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
@@ -25,11 +23,12 @@ import {
 } from "./ansi.ts";
 import {
 	getActiveHostRuntime,
+	installClickedHoverPopupDismissHooks,
 	registerTransientHoverDismisser,
 	unwrapHostTui,
 } from "./host-runtime.ts";
 import { hasBlockingModalOverlay } from "./modal-card.ts";
-import { hookMethod } from "./runtime-hooks.ts";
+import { t } from "./i18n.ts";
 
 export interface ParsedSkillInvocation {
 	readonly id: string;
@@ -236,7 +235,7 @@ class SkillPreviewPopup implements Component {
 				}
 			}
 		} else {
-			bodyWrapped.push({ text: "(Empty SKILL.md)", muted: true });
+			bodyWrapped.push({ text: t("transcript.skill.empty"), muted: true });
 		}
 
 		const allRows = [...headerRows, ...bodyWrapped];
@@ -253,9 +252,9 @@ class SkillPreviewPopup implements Component {
 		const statusParts: string[] = [];
 		if (this.scrollOffset > 0) statusParts.push(`↑ ${this.scrollOffset}`);
 		if (remainingBelow > 0) {
-			statusParts.push(`+${remainingBelow} more ${remainingBelow === 1 ? "line" : "lines"}`);
+			statusParts.push(t(remainingBelow === 1 ? "transcript.popup.moreLine" : "transcript.popup.moreLines", { count: remainingBelow }));
 		}
-		statusParts.push("Scroll · Esc close");
+		statusParts.push(t("transcript.popup.scrollHint"));
 
 		return {
 			rows: [...visibleSlice, { text: statusParts.join(" · "), muted: true }],
@@ -371,8 +370,7 @@ interface SkillPopupState {
 	activeKey?: string;
 	activeTui?: TUI;
 	activeRenderer?: object;
-	hooksInstalled: boolean;
-	clickedInsideCurrentRelease: boolean;
+	markOpened?: () => void;
 }
 
 function getSkillPopupState(): SkillPopupState {
@@ -380,8 +378,6 @@ function getSkillPopupState(): SkillPopupState {
 	if (!g[SKILL_POPUP_SLOT_KEY]) {
 		const state: SkillPopupState = {
 			visible: false,
-			hooksInstalled: false,
-			clickedInsideCurrentRelease: false,
 		};
 		g[SKILL_POPUP_SLOT_KEY] = state;
 		registerTransientHoverDismisser("skillChips.preview", () => hideSkillPreviewPopup());
@@ -411,78 +407,6 @@ export function hideSkillPreviewPopup(): void {
 	}
 }
 
-function ensureSkillPopupDismissHooks(): void {
-	const state = getSkillPopupState();
-	if (state.hooksInstalled) return;
-	state.hooksInstalled = true;
-
-	const scrollProto = (ScrollView as unknown as { prototype?: object } | undefined)?.prototype;
-	if (scrollProto) {
-		for (const methodName of ["scrollTo", "scrollBy", "scrollToStart", "scrollToEnd"] as const) {
-			hookMethod(
-				scrollProto,
-				methodName,
-				`skillChips.scrollDismiss.${methodName}`,
-				(self, args, original) => {
-					const prevTop = self.scrollTop;
-					const result = original.apply(self, args);
-					if (state.visible && self.scrollTop !== prevTop && self === getActiveHostRuntime()?.scroll) {
-						hideSkillPreviewPopup();
-						getActiveHostRuntime()?.requestRender();
-					}
-					return result;
-				},
-			);
-		}
-	}
-
-	const altProto = (TuiAltScreen as unknown as { prototype?: object } | undefined)?.prototype;
-	if (altProto) {
-		hookMethod(
-			altProto,
-			"handleMouseEvent",
-			"skillChips.outsideReleaseDismiss",
-			(self, args, original) => {
-				const raw = args[0] as { button: number; x: number; y: number; release: boolean } | undefined;
-				const isButtonRelease = Boolean(raw && raw.release && (raw.button & 32) === 0);
-				if (!isButtonRelease || !state.visible) {
-					return original.apply(self, args);
-				}
-
-				const col = raw!.x - 1;
-				const row = raw!.y - 1;
-				const layouts = (
-					self as {
-						renderedOverlayLayouts?: ReadonlyArray<{
-							entry: { component?: Component };
-							col: number;
-							row: number;
-							width: number;
-							height: number;
-						}>;
-					}
-				).renderedOverlayLayouts;
-				const ownLayout = layouts?.find((l) => l.entry?.component === state.popup);
-				const insidePopup = Boolean(
-					ownLayout &&
-						col >= ownLayout.col &&
-						col < ownLayout.col + ownLayout.width &&
-						row >= ownLayout.row &&
-						row < ownLayout.row + ownLayout.height,
-				);
-
-				state.clickedInsideCurrentRelease = insidePopup;
-				const res = original.apply(self, args);
-				if (!state.clickedInsideCurrentRelease && state.visible) {
-					hideSkillPreviewPopup();
-					self.requestRender?.();
-				}
-				return res;
-			},
-		);
-	}
-}
-
 export function toggleSkillPreviewPopup(
 	skill: ParsedSkillInvocation,
 	screenX: number,
@@ -495,9 +419,10 @@ export function toggleSkillPreviewPopup(
 		return;
 	}
 
-	ensureSkillPopupDismissHooks();
 	const state = getSkillPopupState();
-	state.clickedInsideCurrentRelease = true;
+	state.markOpened ??= installClickedHoverPopupDismissHooks(
+		"skillChips", () => state.visible ? state.popup : undefined, hideSkillPreviewPopup,
+	);
 
 	const key = `${skill.id}:${skill.location ?? ""}`;
 	if (state.visible && state.activeKey === key) {
@@ -540,6 +465,7 @@ export function toggleSkillPreviewPopup(
 
 	state.visible = true;
 	state.activeKey = key;
+	state.markOpened();
 
 	if (!state.options) {
 		state.options = {

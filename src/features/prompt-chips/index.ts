@@ -10,7 +10,6 @@ import {
 	getImageDimensions,
 	isKeyRelease,
 	matchesKey,
-	TuiAltScreen,
 	type TUI,
 } from "@earendil-works/pi-tui";
 import { bgRgb, fgRgb, getActiveGlobalTheme, isLightTheme, type RgbTuple } from "../../shared/ansi.ts";
@@ -29,7 +28,7 @@ import {
 } from "../transcript/user-prompt.ts";
 import {
 	getActiveHostRuntime,
-	installViewportScrollDismissHooks,
+	installClickedHoverPopupDismissHooks,
 	resolveActiveClipboardProvider,
 	unwrapHostTui,
 } from "../../shared/host-runtime.ts";
@@ -675,10 +674,9 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 		}
 	};
 
-	let sentPillClickedInCurrentRelease = false;
+	let markSentPopupOpened: (() => void) | undefined;
 
 	const toggleSentPillPreview = (chip: SerializedPromptChip, screenX: number, screenY: number): void => {
-		sentPillClickedInCurrentRelease = true;
 		const tui = resolveEditorTui(lastEditor);
 		const expectedKey = `sent-pill:${chip.id}:${chip.token}`;
 		if (overlayController.source === "sent-pill" && overlayController.chipKey === expectedKey) {
@@ -697,6 +695,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 			},
 			buildPreviewActions(),
 		);
+		markSentPopupOpened?.();
 		requestRender();
 	};
 
@@ -766,32 +765,6 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 		};
 	};
 
-	const installAltScreenDismissHooks = (): void => {
-		installViewportScrollDismissHooks(
-			"promptChips",
-			() => overlayController.source === "sent-pill",
-			() => overlayController.hide(["sent-pill"]),
-		);
-
-		const altProto = (TuiAltScreen as unknown as { prototype?: object } | undefined)?.prototype;
-		if (!altProto) return;
-
-		hookMethod(altProto, "handleMouseEvent", "promptChips.outsideReleaseDismiss", (self, args, original) => {
-			const raw = args[0] as { button: number; release: boolean } | undefined;
-			const isButtonRelease = Boolean(raw && raw.release && (raw.button & 32) === 0);
-			if (!isButtonRelease || overlayController.source !== "sent-pill") {
-				return original.apply(self, args);
-			}
-			sentPillClickedInCurrentRelease = false;
-			const res = original.apply(self, args);
-			if (!sentPillClickedInCurrentRelease && overlayController.source === "sent-pill") {
-				overlayController.hide(["sent-pill"]);
-				self.requestRender?.();
-			}
-			return res;
-		});
-	};
-
 	ensureHooksInstalled();
 
 	pi.on("session_start", async (event, ctx) => {
@@ -801,7 +774,9 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 		overlayController.hide();
 		registerComposerHooks(composerHooks);
 		registerPromptPillFormatter(pillFormatter);
-		installAltScreenDismissHooks();
+		markSentPopupOpened = installClickedHoverPopupDismissHooks(
+			"promptChips", () => overlayController.sentPopup, () => overlayController.hide(["sent-pill"]),
+		);
 		const registry = getActivePromptChipRegistry();
 		if (event.reason !== "reload") {
 			registry.clearSession();
