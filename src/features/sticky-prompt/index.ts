@@ -18,6 +18,7 @@ import {
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import { t } from "../../shared/i18n.ts";
 import {
+	formatTurnTime,
 	selectStickyTurn,
 	type IndexedTurn,
 	type StickyDisplayMode,
@@ -251,7 +252,7 @@ export class StickyPromptBar implements Component {
 			cardWidth,
 			this.shell.theme(),
 			{
-				formattedTime: this.config.showTimestamp ? this.active.formattedTime : "",
+				formattedTime: this.config.showTimestamp ? formatTurnTime(this.active.timestamp) : "",
 				hovered: this.hovered,
 				showCopyBadge: false,
 				maxContentLines,

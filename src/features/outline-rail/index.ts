@@ -7,6 +7,7 @@ import {
 } from "../../shared/host-runtime.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import { t } from "../../shared/i18n.ts";
+import { extractSkillInvocations } from "../../shared/skill-tags.ts";
 import type { IndexedTurn, TranscriptTurnIndex } from "../../shared/turn-index.ts";
 import { reconstructTurnPromptText } from "../prompt-chips/registry.ts";
 import {
@@ -91,7 +92,8 @@ export function createOutlineRailSlot(
 			messageId: turn.id,
 			entries,
 		});
-		const previewSource = reconstructed || turn.prompt;
+		const rawPreview = reconstructed || turn.prompt;
+		const previewSource = extractSkillInvocations(rawPreview, { cwd: ctx.cwd }).previewText;
 		const bodyLines = wrapPreviewLines(previewSource, maxText);
 		const contentW = Math.max(
 			Math.min(10, maxText),
