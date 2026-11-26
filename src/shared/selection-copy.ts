@@ -42,7 +42,7 @@ const COPY_ACTION_ROW_RE =
 	/^(?:(?:[a-z0-9_+#.-]+\s+)?(?:·\s*)?(?:\[?Copy\]?|✓\s*Copied)|\[Copy TSV\]\s+\[Copy CSV\]\s+\[Copy MD\])$/i;
 const BOX_HORIZONTAL_BORDER_RE = /^[╭╰├┌└][─┬┴┼]+[╮╯┤┐┘]$/u;
 const USER_CARD_TRAILING_TIME_RE =
-	/\s{2,}(?:\d{1,2}\s+[A-Z][a-z]{2}(?:\s+\d{4})?,\s*\d{2}:\d{2}|\d{2}:\d{2})$/u;
+	/\s{2,}(?:\d{1,2}\s+[A-Z][a-z]{2}(?:\s+\d{4})?,\s*\d{2}:\d{2}|\d{2}:\d{2}|Copy|✓\s*Copied)$/u;
 const STRUCTURAL_LINE_START_RE = /^(?:#{1,6}\s|(?:[-*+•]|\d+[.)])\s|[│|┌├└─┬┼┴]|[-─═_*]{3,}$)/u;
 
 function rgbMatches(a: RgbTuple | undefined, b: RgbTuple | undefined, tolerance = 14): boolean {
@@ -70,12 +70,15 @@ function detectRowSurfaceKind(fullLine: string, theme?: Theme): SurfaceKind {
 	}
 	if (
 		rgbMatches(bgRgb, palette.codeHeaderBg) ||
-		rgbMatches(bgRgb, palette.codeHeaderActiveBg)
+		rgbMatches(bgRgb, palette.codeHeaderActiveBg) ||
+		rgbMatches(bgRgb, palette.codeFooterBg)
 	) {
 		return "code-header";
 	}
 
 	const userCandidates: RgbTuple[] = [
+		palette.userCardBg,
+		palette.userCardHoverBg,
 		[27, 35, 50],
 		[33, 43, 60],
 		[237, 243, 252],

@@ -20,6 +20,7 @@ import {
 	type FullscreenShellContext,
 	type MountedViewportSlots,
 } from "./fullscreen-layout.ts";
+import { buildEditorOpenCommand } from "./link-targets.ts";
 import { hasBlockingModalOverlay } from "./modal-card.ts";
 import { loadPiUiUserConfig } from "./pi-ui-config.ts";
 import {
@@ -662,9 +663,28 @@ export const defaultHostExternalOpener: HostExternalOpener = {
 		return await execOpenTarget(trimmed);
 	},
 
-	async openPath(filePath: string): Promise<ExternalOpenResult> {
+	async openPath(
+		filePath: string,
+		options?: { readonly line?: number; readonly column?: number },
+	): Promise<ExternalOpenResult> {
 		const trimmed = filePath.trim();
 		if (!trimmed) return { ok: false, error: "Empty file path" };
+		const editorCmd = buildEditorOpenCommand(
+			process.env.VISUAL || process.env.EDITOR,
+			trimmed,
+			options,
+		);
+		if (editorCmd) {
+			return await new Promise((resolve) => {
+				execFile(editorCmd.command, editorCmd.args, { timeout: 5000 }, (err) => {
+					if (err) {
+						resolve({ ok: false, error: err.message });
+						return;
+					}
+					resolve({ ok: true });
+				});
+			});
+		}
 		return await execOpenTarget(trimmed);
 	},
 };

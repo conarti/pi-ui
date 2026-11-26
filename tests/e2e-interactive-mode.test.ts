@@ -323,11 +323,13 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(promptHit).toBeDefined();
 		await harness.mouseMove(promptHit!.col + 4, promptHit!.row);
 		const hoveredPromptScreen = harness.screen();
-		expect(hoveredPromptScreen.rowText(promptHit!.row - 1)).toContain("Copy");
+		expect(hoveredPromptScreen.rowText(promptHit!.row - 1).trim()).toBe("");
+		expect(hoveredPromptScreen.rowText(promptHit!.row)).toContain("Copy");
 		const promptCopyPos = hoveredPromptScreen.findText("Copy");
 		expect(promptCopyPos).toBeDefined();
 		await harness.mouseClick(promptCopyPos!.col + 1, promptCopyPos!.row);
-		expect(harness.screen().rowText(promptHit!.row - 1)).toContain("Copied");
+		expect(hoveredPromptScreen.rowText(promptHit!.row - 1).trim()).toBe("");
+		expect(harness.screen().rowText(promptHit!.row)).toContain("Copied");
 		expect(await getActiveHostRuntime()!.clipboard.readText?.()).toBe(
 			"Audit src/entry.ts and show the helper",
 		);
@@ -335,20 +337,21 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		harness.setTheme("light");
 		const codeLineHit = harness.screen().findText("export const bundleAnswer = 42;");
 		expect(codeLineHit).toBeDefined();
-		const codeHeaderRow = codeLineHit!.row - 1;
-		await harness.mouseMove(codeLineHit!.col + 2, codeHeaderRow);
+		const codeFooterRow = codeLineHit!.row + 1;
+		const initialFooterText = harness.screen().rowText(codeFooterRow);
+		const codeCopyCol = initialFooterText.lastIndexOf("[Copy]");
+		expect(codeCopyCol).toBeGreaterThan(10);
+		await harness.mouseMove(codeCopyCol + 2, codeFooterRow);
 
 		const hoveredCodeScreen = harness.screen();
-		const headerCell = hoveredCodeScreen.cellAt(codeHeaderRow, codeLineHit!.col);
-		expect(headerCell?.bg.kind).toBe("rgb");
-		if (headerCell?.bg.kind === "rgb") {
-			expect(luminance(headerCell.bg.r, headerCell.bg.g, headerCell.bg.b)).toBeGreaterThan(170);
+		const footerCell = hoveredCodeScreen.cellAt(codeFooterRow, codeLineHit!.col);
+		expect(footerCell?.bg.kind).toBe("rgb");
+		if (footerCell?.bg.kind === "rgb") {
+			expect(luminance(footerCell.bg.r, footerCell.bg.g, footerCell.bg.b)).toBeGreaterThan(170);
 		}
 
-		const codeCopyCol = hoveredCodeScreen.rowText(codeHeaderRow).lastIndexOf("Copy");
-		expect(codeCopyCol).toBeGreaterThan(10);
-		await harness.mouseClick(codeCopyCol + 1, codeHeaderRow);
-		expect(harness.screen().rowText(codeHeaderRow)).toContain("Copied");
+		await harness.mouseClick(codeCopyCol + 2, codeFooterRow);
+		expect(harness.screen().rowText(codeFooterRow)).toContain("Copied");
 		expect(await getActiveHostRuntime()!.clipboard.readText?.()).toBe(
 			"export const bundleAnswer = 42;",
 		);
@@ -869,17 +872,19 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		const codeBodyHit = harness.screen().findText("export const answer = 42;");
 		expect(headingHit).toBeDefined();
 		expect(codeBodyHit).toBeDefined();
-		const codeHeaderRow = codeBodyHit!.row - 1;
+		const codeFooterRow = codeBodyHit!.row + 1;
+		const copyCol = harness.screen().rowText(codeFooterRow).lastIndexOf("[Copy]");
+		expect(copyCol).toBeGreaterThan(10);
 
-		await harness.mouseMove(codeBodyHit!.col + 1, codeHeaderRow);
+		await harness.mouseMove(copyCol + 2, codeFooterRow);
 		const hoveredFrame = harness.renderFrame();
 		const headingAnsi = hoveredFrame[headingHit!.row] ?? "";
-		const codeHeaderAnsi = hoveredFrame[codeHeaderRow] ?? "";
+		const codeFooterAnsi = hoveredFrame[codeFooterRow] ?? "";
 		expect(headingAnsi).toContain("\x1b[38;5;");
 		expect(headingAnsi).not.toContain("\x1b[38;2;");
-		expect(codeHeaderAnsi).toContain("\x1b[48;5;");
-		expect(codeHeaderAnsi).toContain("\x1b[38;5;");
-		expect(codeHeaderAnsi).not.toContain("\x1b[48;2;");
-		expect(codeHeaderAnsi).not.toContain("\x1b[38;2;");
+		expect(codeFooterAnsi).toContain("\x1b[48;5;");
+		expect(codeFooterAnsi).toContain("\x1b[38;5;");
+		expect(codeFooterAnsi).not.toContain("\x1b[48;2;");
+		expect(codeFooterAnsi).not.toContain("\x1b[38;2;");
 	});
 });

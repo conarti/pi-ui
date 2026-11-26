@@ -507,11 +507,12 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 
 		scroll.scrollTo(rail.offsetOf(0) + 8, { disableFollow: true });
 		const scrolledScreen = harness.screen();
-		const stickyRow = scrolledScreen.rowText(4);
-		expect(stickyRow).toContain("[❝ Quote #3 · 3 lines]");
-		const stickyQuoteCol = stickyRow.indexOf("[❝ Quote #3 · 3 lines]");
+		const stickyQuoteHit = scrolledScreen.findText("[❝ Quote #3 · 3 lines]");
+		expect(stickyQuoteHit).toBeDefined();
+		expect(stickyQuoteHit!.row).toBeGreaterThanOrEqual(4);
+		expect(stickyQuoteHit!.row).toBeLessThanOrEqual(6);
 
-		await harness.mouseClick(stickyQuoteCol + 3, 4);
+		await harness.mouseClick(stickyQuoteHit!.col + 3, stickyQuoteHit!.row);
 		const withStickyPreview = harness.screen().text();
 		expect(withStickyPreview).toContain("❝ Quote #3 · 3 lines");
 		expect(withStickyPreview).toContain("│   Quoted first line");

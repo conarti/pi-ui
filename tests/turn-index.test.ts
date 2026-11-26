@@ -168,7 +168,8 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 		const cardPos = harness.screen().findText("› continue");
 		expect(cardPos).toBeDefined();
 		await harness.mouseMove(cardPos!.col + 3, cardPos!.row);
-		expect(harness.screen().rowText(cardPos!.row - 1)).toContain("Copy");
+		expect(harness.screen().rowText(cardPos!.row - 1).trim()).toBe("");
+		expect(harness.screen().rowText(cardPos!.row)).toContain("Copy");
 
 		await harness.mouseClick(119, tick1Row);
 		const turn2StartOffset = scroll.scrollTop;
