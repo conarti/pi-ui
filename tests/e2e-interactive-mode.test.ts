@@ -629,24 +629,30 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		});
 
 		await harness.submitInput("Inspect and update service timeout");
+		/* По умолчанию активен пресет Balanced: чтения свёрнуты в Explored, правки и команды в 1 строку. */
+		const balancedText = harness.screen().text();
+		expect(balancedText).toContain("◆ Explored 2 files, 1 search");
+		expect(balancedText).not.toContain("◆ Read src/service.ts");
+		expect(balancedText).toContain("◆ Edited src/service.ts");
+		expect(balancedText).not.toContain("+export const timeoutMs = 2500;");
+		expect(balancedText).not.toContain("│ out-7");
+
+		const exploredPos = harness.screen().findText("◆ Explored 2 files, 1 search");
+		expect(exploredPos).toBeDefined();
+		await harness.mouseClick(exploredPos!.col + 2, exploredPos!.row);
+		expect(harness.screen().text()).toContain("│ ◆ Read src/service.ts");
+		const exploredOpenPos = harness.screen().findText("◆ Explored 2 files, 1 search");
+		await harness.mouseClick(exploredOpenPos!.col + 2, exploredOpenPos!.row);
+		expect(harness.screen().text()).not.toContain("◆ Read src/service.ts");
+
+		await harness.submitInput("/density detailed");
 		const detailedText = harness.screen().text();
-		expect(detailedText).toContain("◆ Explored 2 files, 1 search");
-		expect(detailedText).not.toContain("◆ Read src/service.ts");
-		expect(detailedText).toContain("◆ Edited src/service.ts");
 		expect(detailedText).toContain("-export const timeoutMs = 1000;");
 		expect(detailedText).toContain("+export const timeoutMs = 2500;");
 		expect(detailedText).toContain("│ out-1");
 		expect(detailedText).toContain("│ …");
 		expect(detailedText).toContain("│ out-7");
 		expect(detailedText).not.toContain("│ out-4");
-
-		const exploredPos = harness.screen().findText("◆ Explored 2 files, 1 search");
-		expect(exploredPos).toBeDefined();
-		await harness.mouseClick(exploredPos!.col + 2, exploredPos!.row);
-		expect(harness.screen().text()).toContain("◆ Read src/service.ts");
-		const exploredOpenPos = harness.screen().findText("◆ Explored 2 files, 1 search");
-		await harness.mouseClick(exploredOpenPos!.col + 2, exploredOpenPos!.row);
-		expect(harness.screen().text()).not.toContain("◆ Read src/service.ts");
 
 		await harness.submitInput("/density diff-focus");
 		const diffFocusText = harness.screen().text();
@@ -655,7 +661,7 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 
 		await harness.submitInput("/density compact");
 		const compactText = harness.screen().text();
-		expect(compactText).toContain("◆ Edited src/service.ts");
+		expect(compactText).toContain("Edited 1 file, ran 1 command, explored 2 files, 1 search");
 		expect(compactText).not.toContain("+export const timeoutMs = 2500;");
 		expect(compactText).not.toContain("│ out-7");
 

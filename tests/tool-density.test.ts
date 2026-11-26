@@ -7,22 +7,33 @@ import {
 	createCodemodeExtension,
 	createPowerShellToolDefinition,
 	defineTool,
+	type ExtensionAPI,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { Text, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	resetCapabilitiesCache,
+	setCapabilityOverrides,
+	Text,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { DEFAULT_CONFIG } from "../src/features/tool-calls/config.ts";
+import { TOOL_DIAMOND } from "../src/features/tool-calls/core.ts";
 import {
 	classifyExploration,
 	extractCommandOutput,
 	formatExploredSummary,
 	sliceHeadTailPreview,
 } from "../src/features/tool-calls/density.ts";
+import { AGY_TOOL_SUMMARIES_ENTRY_TYPE } from "../src/features/tool-calls/step-summaries.ts";
 import { stopAllAnimations } from "../src/shared/animation-scheduler.ts";
+import { parseAnsiColorRgb } from "../src/shared/ansi.ts";
+import { getActiveHostRuntime } from "../src/shared/host-runtime.ts";
 import {
 	createAssistantMessageEventStream,
 	createInteractiveHarness,
 	fauxAssistantMessage,
+	fauxThinking,
 	fauxToolCall,
 	type AssistantMessage,
 	type AssistantMessageEventStream,
@@ -235,6 +246,8 @@ describe("Tool Density: real InteractiveMode integration", () => {
 
 	afterEach(async () => {
 		vi.useRealTimers();
+		setCapabilityOverrides({});
+		resetCapabilitiesCache();
 		stopAllAnimations();
 		if (harness) {
 			await harness.dispose();
@@ -258,7 +271,7 @@ describe("Tool Density: real InteractiveMode integration", () => {
 			"find",
 			"ls",
 		]);
-		expect(DEFAULT_CONFIG.density).toBe("detailed");
+		expect(DEFAULT_CONFIG.density).toBe("balanced");
 
 		const projDir = createTempDir();
 		mkdirSync(join(projDir, "src"), { recursive: true });
@@ -454,6 +467,15 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		await turn;
 		expect(vi.getTimerCount()).toBe(0);
 
+		/* В пресете по умолчанию Balanced правки и команды свёрнуты в 1 строку; в Detailed видны diff и превью вывода. */
+		const settledBalancedText = harness.screen().text();
+		expect(settledBalancedText).toContain("◆ Edited src/auth.ts (+2 -1");
+		expect(settledBalancedText).toContain("◆ Wrote src/config.ts (+3 -0");
+		expect(settledBalancedText).toContain("◆ mcp__github__search pi-tui");
+		expect(settledBalancedText).not.toContain("│ codemode-out-1");
+		expect(settledBalancedText).not.toContain("+const token = parseBearer(header);");
+
+		await harness.submitInput("/density detailed");
 		const settledDarkText = harness.screen().text();
 		expect(settledDarkText).toContain("│ codemode-out-1");
 		expect(settledDarkText).toContain("│ codemode-out-10");
@@ -616,7 +638,7 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		expect(restoredText).toContain("AUTHOR_FULL_DIAGRAM_VIEW");
 	});
 
-	it("switches live without reload across detailed, diff-focus, and compact via /density (including interactive selector), /compact-tools, and trusted/untrusted project scopes", async () => {
+	it("switches live without reload across all 5 presets (balanced, compact, grouped, diff-focus, detailed) via /density (including interactive selector), /compact-tools, and trusted/untrusted project scopes", async () => {
 		const projDir = createTempDir();
 		mkdirSync(join(projDir, "src"), { recursive: true });
 		writeFileSync(join(projDir, "src", "one.ts"), "export const one = 1;\n", "utf8");
@@ -720,6 +742,20 @@ describe("Tool Density: real InteractiveMode integration", () => {
 
 		await harness.submitInput("Build density matrix");
 
+		/* 1. Balanced (по умолчанию): чтения свёрнуты в Explored, остальные вызовы по 1 строке */
+		const balancedText = harness.screen().text();
+		expect(balancedText).toContain("◆ Explored 2 files");
+		expect(balancedText).toContain("◆ Edited src/service.ts (+2 -1");
+		expect(balancedText).toContain("◆ Wrote src/constants.ts (+2 -0");
+		expect(balancedText).toContain("◆ Ran npm test (8 lines");
+		expect(balancedText).toContain("◆ Ran Invoke-Pester (7 lines");
+		expect(balancedText).toContain("◆ Ran script codemode (9 lines");
+		expect(balancedText).toContain("◆ mcp__docs__lookup ScrollView (4 lines");
+		expect(balancedText).not.toContain("+const host = '0.0.0.0';");
+		expect(balancedText).not.toContain("bash-line-1");
+
+		/* 2. Detailed: inline diffs + 2 head + 3 tail превью вывода команд */
+		await harness.submitInput("/density detailed");
 		const detailedText = harness.screen().text();
 		expect(detailedText).toContain("◆ Explored 2 files");
 		expect(detailedText).toContain("◆ Edited src/service.ts (+2 -1");
@@ -733,6 +769,7 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		expect(detailedText).toContain("cm-line-1");
 		expect(detailedText).toContain("cm-line-9");
 
+		/* 3. Diff Focus: inline diffs открыты, завершённые команды в 1 строку */
 		await harness.submitInput("/density diff-focus");
 		const diffFocusText = harness.screen().text();
 		expect(diffFocusText).toContain("◆ Explored 2 files");
@@ -743,29 +780,48 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		expect(diffFocusText).not.toContain("ps-line-1");
 		expect(diffFocusText).not.toContain("cm-line-1");
 
+		/* 4. Grouped: отдельные группы по категориям (Explored, Edited, Ran) */
+		await harness.submitInput("/density grouped");
+		const groupedText = harness.screen().text();
+		expect(groupedText).toContain("◆ Explored 2 files");
+		expect(groupedText).toContain("◆ Edited 2 files +4 -1");
+		expect(groupedText).toContain("◆ Ran 3 commands");
+		expect(groupedText).toContain("◆ mcp__docs__lookup ScrollView (4 lines");
+		expect(groupedText).not.toContain("+const host = '0.0.0.0';");
+		expect(groupedText).not.toContain("bash-line-1");
+
+		/* 5. Интерактивный выбор Compact через /density (второй пункт после Balanced) */
 		const selectCmd = harness.submitInput("/density");
 		await harness.flush();
-		await harness.pressKey("\x1b[B");
 		await harness.pressKey("\x1b[B");
 		await harness.pressKey("\r");
 		await selectCmd;
 
 		const compactText = harness.screen().text();
-		expect(compactText).toContain("◆ Explored 2 files");
-		expect(compactText).toContain("◆ Edited src/service.ts (+2 -1");
-		expect(compactText).toContain("◆ Wrote src/constants.ts (+2 -0");
-		expect(compactText).toContain("◆ Ran npm test (8 lines");
-		expect(compactText).toContain("◆ mcp__docs__lookup ScrollView (4 lines");
+		expect(compactText).toContain("◆ Edited 2 files, ran 3 commands, explored 2 files, called 1 tool +4 -1");
+		expect(compactText).not.toContain("◆ Edited src/service.ts");
 		expect(compactText).not.toContain("+const host = '0.0.0.0';");
-		expect(compactText).not.toContain("+export const MAX = 10;");
 		expect(compactText).not.toContain("bash-line-1");
 
-		const editPos = harness.screen().findText("◆ Edited src/service.ts")!;
+		/* Клик по свёрнутой Compact-группе раскрывает компактное дерево │ ◆ … без пустых строк */
+		const compactGroupPos = harness.screen().findText("◆ Edited 2 files, ran 3 commands")!;
+		await harness.mouseClick(compactGroupPos.col + 2, compactGroupPos.row);
+		const expandedTreeScreen = harness.screen();
+		const expandedTreeText = expandedTreeScreen.text();
+		expect(expandedTreeText).toContain("│ ◆ Edited src/service.ts (+2 -1");
+		expect(expandedTreeText).toContain("│ ◆ Wrote src/constants.ts (+2 -0");
+		expect(expandedTreeText).toContain("│ ◆ Ran npm test (8 lines");
+		const editPos = expandedTreeScreen.findText("◆ Edited src/service.ts")!;
+		const writePos = expandedTreeScreen.findText("◆ Wrote src/constants.ts")!;
+		expect(writePos.row).toBe(editPos.row + 1);
+
+		/* Клик по дочерней строке внутри раскрытого дерева открывает её diff */
 		await harness.mouseClick(editPos.col + 2, editPos.row);
 		expect(harness.screen().text()).toContain("+const host = '0.0.0.0';");
 
 		await harness.reload();
 		expect(harness.screen().text()).not.toContain("bash-line-1");
+		expect(harness.screen().text()).toContain("◆ Edited 2 files, ran 3 commands");
 
 		await harness.submitInput("/compact-tools detailed");
 		expect(harness.screen().text()).toContain("bash-line-8");
@@ -850,15 +906,23 @@ describe("Tool Density: real InteractiveMode integration", () => {
 
 		await harness.submitInput("Execute real codemode script");
 
+		/* В Balanced семантический заголовок codemode без сырого JS и без внутреннего числа строк JSON */
+		const settledCmBalanced = harness.screen().text();
+		expect(settledCmBalanced).toContain("◆ Read a.ts");
+		expect(settledCmBalanced).toContain("read 1");
+		expect(settledCmBalanced).not.toContain("const total = 42;");
+		expect(settledCmBalanced).not.toContain("lines ·");
+
+		await harness.submitInput("/density detailed");
 		const settledCmText = harness.screen().text();
-		expect(settledCmText).toContain("◆ Ran codemode");
+		expect(settledCmText).toContain("◆ Read a.ts");
 		expect(settledCmText).toContain("read 1");
 		expect(settledCmText).toContain("res-1");
 		expect(settledCmText).toContain("res-2");
 		expect(settledCmText).toContain("res-7");
 		expect(settledCmText).not.toContain("res-4");
 
-		const cmPos = harness.screen().findText("◆ Ran codemode")!;
+		const cmPos = harness.screen().findText("◆ Read a.ts")!;
 		await harness.mouseClick(cmPos.col + 2, cmPos.row);
 		const expandedCmText = harness.screen().text();
 		expect(expandedCmText).toContain("const total = 42;");
@@ -867,7 +931,7 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		expect(expandedCmText).not.toContain("Took ");
 
 		await new Promise((r) => setTimeout(r, 450));
-		const cmOpenPos = harness.screen().findText("◆ Ran codemode")!;
+		const cmOpenPos = harness.screen().findText("◆ Read a.ts")!;
 		await harness.mouseClick(cmOpenPos.col + 2, cmOpenPos.row);
 
 		const buildTurn = harness.submitInput("Run streaming build");
@@ -891,10 +955,10 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		expect(harness.screen().text()).toContain("◆ Ran npm run build");
 
 		await harness.submitInput("/compact-tools off");
-		expect(harness.screen().text()).not.toContain("◆ Ran codemode");
+		expect(harness.screen().text()).not.toContain("◆ Read a.ts");
 
 		await harness.submitInput("/density detailed");
-		expect(harness.screen().text()).toContain("◆ Ran codemode");
+		expect(harness.screen().text()).toContain("◆ Read a.ts");
 		expect(harness.screen().text()).toContain("│ b7");
 	});
 
@@ -1133,5 +1197,496 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		}
 		expect(sawPalette256).toBe(true);
 		expect(sawTrueColor).toBe(false);
+	});
+
+	it("renders pi-agy-tool-summaries & inline toolSummary metadata, folds textless thinking in Compact, and colors only N failed red on partial group failures", async () => {
+		const projDir = createTempDir("pi-ui-summaries-");
+		mkdirSync(join(projDir, "src"), { recursive: true });
+		writeFileSync(join(projDir, "src", "a.ts"), "export const a = 1;\n", "utf8");
+		writeFileSync(join(projDir, "src", "b.ts"), "export const b = 2;\n", "utf8");
+
+		const summaryBash = createBashToolDefinition(projDir, {
+			operations: {
+				async exec(_cmd, _cwd, opts) {
+					opts.onData(Buffer.from("clean\n", "utf8"));
+					return { exitCode: 0 };
+				},
+			},
+		});
+
+		const cmScript = [
+			"await tools.read({ path: 'src/a.ts' });",
+			"await tools.read({ path: 'src/b.ts' });",
+			"await tools.bash({ command: 'git status' });",
+			"console.log(JSON.stringify({ ok: true, count: 3 }, null, 2));",
+		].join("\n");
+
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			cwd: projDir,
+			projectTrusted: true,
+			width: 112,
+			height: 46,
+			extensionFactories: [createCodemodeExtension()],
+			customTools: [summaryBash],
+			setupSession(sm) {
+				sm.appendCustomEntry(AGY_TOOL_SUMMARIES_ENTRY_TYPE, {
+					summaries: {
+						"agy-cm-1": "Inspect repo state",
+					},
+				});
+			},
+			responses: [
+				fauxAssistantMessage(
+					[
+						fauxThinking("Planning repo inspection before running codemode."),
+						fauxToolCall("codemode", { code: cmScript }, { id: "agy-cm-1" }),
+						fauxToolCall(
+							"bash",
+							{ command: "git status -sb", toolSummary: "Check git status" },
+							{ id: "inline-bash-1" },
+						),
+					],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("Step summaries verified."),
+				/* Частичная ошибка в группе чтения: 2 успешных + 1 отсутствующий файл */
+				fauxAssistantMessage(
+					[
+						fauxToolCall("read", { path: join(projDir, "src", "a.ts") }, { id: "pf-1" }),
+						fauxToolCall("read", { path: join(projDir, "src", "b.ts") }, { id: "pf-2" }),
+						fauxToolCall("read", { path: join(projDir, "src", "missing.ts") }, { id: "pf-3" }),
+					],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("Partial failure group done."),
+				/* Полная ошибка в группе чтения: все вызовы провалились */
+				fauxAssistantMessage(
+					[
+						fauxToolCall("read", { path: join(projDir, "src", "nope1.ts") }, { id: "af-1" }),
+						fauxToolCall("read", { path: join(projDir, "src", "nope2.ts") }, { id: "af-2" }),
+					],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("All failure group done."),
+			],
+		});
+		harness.session.setActiveToolsByName(["read", "bash", "codemode"]);
+
+		await harness.submitInput("Inspect workspace with summaries");
+		const stepScreenText = harness.screen().text();
+		expect(stepScreenText).toContain(`${TOOL_DIAMOND} Inspect repo state (`);
+		expect(stepScreenText).toContain("read 2");
+		expect(stepScreenText).toContain("bash 1");
+		expect(stepScreenText).not.toContain("lines ·");
+		expect(stepScreenText).toContain(`${TOOL_DIAMOND} Check git status git status -sb`);
+
+		/* В Compact текстово-пустой Thinking складывается вместе с вызовами в 1 строку и раскрывается деревом */
+		await harness.submitInput("/density compact");
+		const compactWithThought = harness.screen().text();
+		expect(compactWithThought).toContain(`${TOOL_DIAMOND} Ran 1 command, explored 1 file (1 thought`);
+		const compactPos = harness.screen().findText(`${TOOL_DIAMOND} Ran 1 command, explored 1 file`)!;
+		await harness.mouseClick(compactPos.col + 2, compactPos.row);
+		const expandedCompact = harness.screen().text();
+		expect(expandedCompact).toContain(`│ ${TOOL_DIAMOND} Inspect repo state`);
+		expect(expandedCompact).toContain(`│ ${TOOL_DIAMOND} Check git status`);
+
+		await harness.submitInput("/density balanced");
+		await harness.submitInput("Trigger partial read failure");
+		await harness.submitInput("Trigger full read failure");
+
+		const failureScreen = harness.screen();
+		const errorRgb = parseAnsiColorRgb(getActiveHostRuntime()!.theme().getFgAnsi("error"));
+		expect(errorRgb).toBeDefined();
+
+		/* При частичной ошибке (1 из 3) заголовок Explored остаётся нейтральным, а `1 failed` окрашен в error */
+		const partialPos = failureScreen.findText("Explored 3 files (1 failed");
+		expect(partialPos).toBeDefined();
+		const partialRow = partialPos!.row;
+		const partialTitleCell = failureScreen.cellAt(partialRow, partialPos!.col);
+		expect(partialTitleCell?.fg.kind).toBe("rgb");
+		if (partialTitleCell?.fg.kind === "rgb") {
+			expect([partialTitleCell.fg.r, partialTitleCell.fg.g, partialTitleCell.fg.b]).not.toEqual(errorRgb);
+		}
+		const failedBadgeCol = failureScreen.rowText(partialRow).indexOf("1 failed");
+		expect(failedBadgeCol).toBeGreaterThan(-1);
+		const failedBadgeCell = failureScreen.cellAt(partialRow, failedBadgeCol);
+		expect(failedBadgeCell?.fg.kind).toBe("rgb");
+		if (failedBadgeCell?.fg.kind === "rgb") {
+			expect([failedBadgeCell.fg.r, failedBadgeCell.fg.g, failedBadgeCell.fg.b]).toEqual(errorRgb);
+		}
+
+		/* При полной ошибке (2 из 2) весь заголовок окрашен в error */
+		const allFailPos = failureScreen.findText("Explored 2 files (2 failed");
+		expect(allFailPos).toBeDefined();
+		const allFailTitleCell = failureScreen.cellAt(allFailPos!.row, allFailPos!.col);
+		expect(allFailTitleCell?.fg.kind).toBe("rgb");
+		if (allFailTitleCell?.fg.kind === "rgb") {
+			expect([allFailTitleCell.fg.r, allFailTitleCell.fg.g, allFailTitleCell.fg.b]).toEqual(errorRgb);
+		}
+
+		/* Раскрытие группы показывает относительные пути (без абсолютного префикса projDir) */
+		await harness.mouseClick(partialPos!.col + 2, partialPos!.row);
+		const expandedPartialText = harness.screen().text();
+		expect(expandedPartialText).toContain(`│ ${TOOL_DIAMOND} Read src/a.ts`);
+		expect(expandedPartialText).not.toContain(`${projDir}/src/a.ts`);
+	});
+
+	it("prioritizes core-tool expanded views over competing provider registerToolRenderer wrappers and wraps full $ <command>, patterns, nested calls, and custom args without truncation", async () => {
+		const projDir = createTempDir("pi-ui-provider-priority-");
+		mkdirSync(join(projDir, "src"), { recursive: true });
+		writeFileSync(
+			join(projDir, "src", "readme.ts"),
+			"export const SEPARATE_READ_FILE_CONTENT_TOKEN = 'alpha';\n",
+			"utf8",
+		);
+		writeFileSync(join(projDir, "src", "app.ts"), "export const version = 1;\n", "utf8");
+
+		let emitLiveBash: ((chunk: string) => void) | undefined;
+		let finishLiveBash: (() => void) | undefined;
+		const longSingleLineCmd =
+			"echo --alpha=first-flag --beta=second-flag --gamma=third-flag --delta=fourth-flag --omega=TAIL_MARKER_TOKEN";
+		const multiLineCmd =
+			"echo MULTI_LINE_START\necho --long-second-line-arg=SECOND_LINE_TAIL_MARKER_VALUE";
+
+		const testBash = createBashToolDefinition(projDir, {
+			operations: {
+				async exec(command, _cwd, opts) {
+					if (command.includes("TAIL_MARKER_TOKEN")) {
+						emitLiveBash = (chunk) => opts.onData(Buffer.from(chunk, "utf8"));
+						await new Promise<void>((resolve) => {
+							finishLiveBash = resolve;
+							opts.signal?.addEventListener("abort", () => resolve(), { once: true });
+						});
+						return { exitCode: 0 };
+					}
+					opts.onData(Buffer.from("MULTI_OK\n", "utf8"));
+					return { exitCode: 0 };
+				},
+			},
+		});
+		const testPs = createPowerShellToolDefinition(projDir, {
+			operations: {
+				async exec(_cmd, _cwd, opts) {
+					opts.onData(Buffer.from("PS_OK\n", "utf8"));
+					return { exitCode: 0 };
+				},
+			},
+		});
+		const testMcp = defineTool({
+			name: "mcp__ops__deploy",
+			label: "mcp__ops__deploy",
+			description: "Deploy helper",
+			parameters: Type.Object({
+				environment: Type.String(),
+				manifestPath: Type.String(),
+			}),
+			async execute() {
+				return { content: [{ type: "text", text: "deployed" }], details: {} };
+			},
+		});
+
+		/* Синтетический провайдер регистрирует конкурирующий registerToolRenderer, пытающийся скрыть diff и $ <command> */
+		const competingProviderExt = (pi: ExtensionAPI) => {
+			pi.registerToolRenderer((name, next) => {
+				const base = next();
+				if (
+					name === "read" ||
+					name === "edit" ||
+					name === "write" ||
+					name === "bash" ||
+					name === "powershell" ||
+					name === "codemode"
+				) {
+					return {
+						...base,
+						renderCall() {
+							return new Text("PROVIDER_MASKED_CALL", 0, 0);
+						},
+						renderResult() {
+							return new Text("PROVIDER_MASKED_RESULT", 0, 0);
+						},
+					};
+				}
+				return base;
+			});
+		};
+
+		const longGrepPattern =
+			"VERY_LONG_REGEX_PATTERN_WITH_ZERO_ELLIPSIS_TRUNCATION_TAIL_TOKEN";
+		const longArgValue =
+			"deployments/production/clusters/eu-west/service-manifest-FULL_TAIL_ARG_VALUE.yaml";
+
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			cwd: projDir,
+			projectTrusted: true,
+			width: 82,
+			height: 60,
+			extensionFactories: [createCodemodeExtension(), competingProviderExt],
+			customTools: [testBash, testPs, testMcp],
+			responses: [
+				fauxAssistantMessage(
+					[
+						fauxToolCall(
+							"bash",
+							{ command: longSingleLineCmd, toolSummary: "Run long streaming command" },
+							{ id: "prov-bash-stream" },
+						),
+					],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage(
+					[
+						fauxToolCall("bash", { command: multiLineCmd }, { id: "prov-bash-multi" }),
+						fauxToolCall(
+							"powershell",
+							{ command: "Write-Output --ps-flag=PS_TAIL_MARKER_VALUE" },
+							{ id: "prov-ps" },
+						),
+						fauxToolCall("read", { path: "src/readme.ts" }, { id: "prov-read" }),
+						fauxToolCall(
+							"edit",
+							{
+								path: "src/app.ts",
+								edits: [
+									{
+										oldText: "export const version = 1;",
+										newText: "export const version = 2;",
+									},
+								],
+							},
+							{ id: "prov-edit" },
+						),
+						fauxToolCall(
+							"write",
+							{
+								path: "src/created.ts",
+								content: "export const WRITE_UNIQUE_MARKER = true;\n",
+							},
+							{ id: "prov-write" },
+						),
+						fauxToolCall(
+							"codemode",
+							{
+								code: [
+									"const uniqueCodemodeMarker = 'CODEMODE_SCRIPT_VISIBLE';",
+									"await tools.read({ path: 'src/app.ts' });",
+									"console.log(uniqueCodemodeMarker);",
+								].join("\n"),
+							},
+							{ id: "prov-cm" },
+						),
+						fauxToolCall(
+							"grep",
+							{
+								pattern: longGrepPattern,
+								path: "src",
+								toolSummary: "Search long regex",
+							},
+							{ id: "prov-grep" },
+						),
+						fauxToolCall(
+							"mcp__ops__deploy",
+							{ environment: "prod", manifestPath: longArgValue },
+							{ id: "prov-mcp" },
+						),
+					],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("Provider priority check complete."),
+			],
+		});
+		harness.session.setActiveToolsByName([
+			"read",
+			"edit",
+			"write",
+			"bash",
+			"powershell",
+			"codemode",
+			"grep",
+			"mcp__ops__deploy",
+		]);
+
+		const turn = harness.submitInput("Run tools under competing provider wrapper");
+		await harness.flush();
+		emitLiveBash!("stream-chunk-1\n");
+		await harness.flush();
+
+		/* Раскрываем стримящийся bash во время выполнения: полная перенесённая команда $ ... без обрезки */
+		const streamRowPos = harness.screen().findText("Run long streaming command")!;
+		await harness.mouseClick(streamRowPos.col + 2, streamRowPos.row);
+		const streamingExpandedText = harness.screen().text();
+		expect(streamingExpandedText).toContain("$ echo --alpha=first-flag");
+		expect(streamingExpandedText).toContain("TAIL_MARKER_TOKEN");
+		expect(streamingExpandedText).toContain("stream-chunk-1");
+		expect(streamingExpandedText).not.toContain("PROVIDER_MASKED_");
+
+		finishLiveBash!();
+		await turn;
+
+		/* Глобальное раскрытие Ctrl+O раскрывает все строки: проверяем все core-инструменты и переносы */
+		await harness.pressKey("\x0f");
+		await harness.flush();
+		const allExpanded = harness.screen().text();
+		expect(allExpanded).not.toContain("PROVIDER_MASKED_CALL");
+		expect(allExpanded).not.toContain("PROVIDER_MASKED_RESULT");
+		/* Многострочная bash-команда полностью перенесена с $ */
+		expect(allExpanded).toContain("$ echo MULTI_LINE_START");
+		expect(allExpanded).toContain("SECOND_LINE_TAIL_MARKER_VALUE");
+		/* PowerShell команда полностью видна */
+		expect(allExpanded).toContain("PS_TAIL_MARKER_VALUE");
+		/* Edit diff, Write diff и Read CodeView не скрыты провайдером */
+		expect(allExpanded).toContain("SEPARATE_READ_FILE_CONTENT_TOKEN");
+		expect(allExpanded).toContain("-export const version = 1;");
+		expect(allExpanded).toContain("+export const version = 2;");
+		expect(allExpanded).toContain("+export const WRITE_UNIQUE_MARKER = true;");
+		/* Codemode показывает исходный script.js и вывод */
+		expect(allExpanded).toContain("CODEMODE_SCRIPT_VISIBLE");
+		/* Полный grep pattern и длинный аргумент кастомного MCP-инструмента перенесены без … */
+		expect(allExpanded).toContain("ZERO_ELLIPSIS_TRUNCATION_TAIL_TOKEN");
+		expect(allExpanded).toContain("FULL_TAIL_ARG_VALUE");
+		expect(allExpanded).toContain(".yaml");
+		expect(allExpanded).not.toContain("FULL_TAIL_ARG_VALUE…");
+	});
+
+	it("keeps image-returning tool calls outside collapsed groups across Balanced/Compact/Grouped, renders inline Kitty & iTerm2 images with clean non-graphic fallback, and live-switches via Command Palette", async () => {
+		const projDir = createTempDir("pi-ui-inline-images-");
+		mkdirSync(join(projDir, "src"), { recursive: true });
+		writeFileSync(join(projDir, "src", "a.ts"), "export const a = 1;\n", "utf8");
+		writeFileSync(join(projDir, "src", "b.ts"), "export const b = 2;\n", "utf8");
+		writeFileSync(join(projDir, "src", "c.ts"), "export const c = 3;\n", "utf8");
+
+		/* Валидный 1x1 PNG */
+		const pngBase64 =
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+		writeFileSync(join(projDir, "src", "shot.png"), Buffer.from(pngBase64, "base64"));
+
+		const chartTool = defineTool({
+			name: "render_chart",
+			label: "render_chart",
+			description: "Returns an inline PNG chart without text",
+			parameters: Type.Object({ title: Type.String() }),
+			async execute() {
+				return {
+					content: [{ type: "image", data: pngBase64, mimeType: "image/png" }],
+					details: {},
+				};
+			},
+		});
+
+		/* 1. Kitty protocol */
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			cwd: projDir,
+			projectTrusted: true,
+			width: 108,
+			height: 90,
+			customTools: [chartTool],
+			responses: [
+				fauxAssistantMessage(
+					[
+						fauxToolCall("read", { path: "src/a.ts" }, { id: "img-r1" }),
+						fauxToolCall("read", { path: "src/shot.png" }, { id: "img-png" }),
+						fauxToolCall("read", { path: "src/b.ts" }, { id: "img-r2" }),
+						fauxToolCall("read", { path: "src/c.ts" }, { id: "img-r3" }),
+						fauxToolCall("render_chart", { title: "latency" }, { id: "img-chart" }),
+					],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("Inline image inspection complete."),
+			],
+		});
+		setCapabilityOverrides({ images: "kitty" });
+		resetCapabilitiesCache();
+		harness.session.setActiveToolsByName(["read", "render_chart"]);
+
+		await harness.submitInput("Inspect files and inline screenshot");
+
+		const kittyScreenText = harness.screen().text();
+		expect(kittyScreenText).toContain(`${TOOL_DIAMOND} Read src/shot.png (image/png · 1×1`);
+		expect(kittyScreenText).toContain(`${TOOL_DIAMOND} Explored 2 files`);
+		expect(kittyScreenText).toContain(`${TOOL_DIAMOND} render_chart latency (image/png · 1×1`);
+
+		const kittyRawFrame = harness.renderFrame().join("\n");
+		expect(kittyRawFrame).toContain("\x1b_G");
+
+		/* В Compact и Grouped строки с изображениями также никогда не складываются в группу */
+		await harness.submitInput("/density compact");
+		const compactImgText = harness.screen().text();
+		expect(compactImgText).toContain(`${TOOL_DIAMOND} Read src/shot.png (image/png · 1×1`);
+		expect(compactImgText).toContain(`${TOOL_DIAMOND} render_chart latency (image/png · 1×1`);
+
+		await harness.submitInput("/density grouped");
+		const groupedImgText = harness.screen().text();
+		expect(groupedImgText).toContain(`${TOOL_DIAMOND} Read src/shot.png (image/png · 1×1`);
+		expect(groupedImgText).toContain(`${TOOL_DIAMOND} render_chart latency (image/png · 1×1`);
+
+		/* Переключение пресета через Command Palette (Ctrl+K -> Tool Density) применяет изменение сразу */
+		await harness.submitInput("/density balanced");
+		await harness.pressKey("\x0b");
+		await harness.typeText("Tool Density");
+		await harness.pressKey("\r");
+		await harness.flush();
+		expect(harness.screen().text()).toContain("Tool Density: compact");
+
+		await harness.dispose();
+		harness = undefined;
+
+		/* 2. iTerm2 protocol */
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			cwd: projDir,
+			projectTrusted: true,
+			width: 108,
+			height: 44,
+			customTools: [chartTool],
+			responses: [
+				fauxAssistantMessage(
+					[fauxToolCall("render_chart", { title: "throughput" }, { id: "iterm-chart" })],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("iTerm2 chart rendered."),
+			],
+		});
+		setCapabilityOverrides({ images: "iterm2" });
+		resetCapabilitiesCache();
+		harness.session.setActiveToolsByName(["render_chart"]);
+		await harness.submitInput("Show iTerm2 chart");
+		expect(harness.renderFrame().join("\n")).toContain("\x1b]1337;File=");
+
+		await harness.dispose();
+		harness = undefined;
+
+		/* 3. Non-graphic terminal fallback */
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			cwd: projDir,
+			projectTrusted: true,
+			width: 108,
+			height: 36,
+			customTools: [chartTool],
+			responses: [
+				fauxAssistantMessage(
+					[
+						fauxToolCall("read", { path: "src/shot.png" }, { id: "nogfx-png" }),
+						fauxToolCall("render_chart", { title: "fallback" }, { id: "nogfx-chart" }),
+					],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("Fallback rendered."),
+			],
+		});
+		setCapabilityOverrides({ images: null });
+		resetCapabilitiesCache();
+		harness.session.setActiveToolsByName(["read", "render_chart"]);
+		await harness.submitInput("Render without graphics");
+		const fallbackRaw = harness.renderFrame().join("\n");
+		expect(fallbackRaw).not.toContain("\x1b_G");
+		expect(fallbackRaw).not.toContain("\x1b]1337;File=");
+		const fallbackText = harness.screen().text();
+		expect(fallbackText).toContain(`${TOOL_DIAMOND} Read src/shot.png (image/png · 1×1`);
+		expect(fallbackText).toContain(`${TOOL_DIAMOND} render_chart fallback (image/png · 1×1`);
+		expect(fallbackText).toContain("[Image: [image/png] 1x1]");
 	});
 });
