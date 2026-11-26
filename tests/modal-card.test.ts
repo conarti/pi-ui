@@ -114,7 +114,7 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 			const closeFgAfter = harness.screen().cellAt(bounds.top, closeCol)?.fg;
 			expect(closeFgAfter).not.toEqual(closeFgBefore);
 
-			const pillPos = baseScreen.findText("Закрыть");
+			const pillPos = baseScreen.findText("Close");
 			expect(pillPos).toBeDefined();
 			const pillBgBefore = baseScreen.cellAt(pillPos!.row, pillPos!.col)?.bg;
 			await harness.mouseMove(pillPos!.col + 1, pillPos!.row);
@@ -155,12 +155,12 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 			],
 		});
 
-		await harness.submitInput("/mode safe");
+		await harness.submitInput("/mode auto");
 		const turn = harness.submitInput("Write demo file");
 		await harness.flush();
 
 		const screen0 = harness.screen();
-		expect(screen0.text()).toContain("Auto-Safe Confirmation");
+		expect(screen0.text()).toContain("Auto Permission");
 		const bgLums = collectModalBgLuminances(screen0);
 		expect(bgLums.length).toBeGreaterThan(0);
 		for (const lum of bgLums) {
@@ -179,7 +179,7 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		await harness.mouseMove(closeCol, bounds.top);
 		expect(harness.screen().cellAt(bounds.top, closeCol)?.fg).not.toEqual(closeBefore);
 
-		const denyPos = harness.screen().findText("Отклонить");
+		const denyPos = harness.screen().findText("Deny");
 		expect(denyPos).toBeDefined();
 		await harness.mouseClick(denyPos!.col + 2, denyPos!.row);
 		await turn;
@@ -200,7 +200,7 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		await harness.pressKey("\x0b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
 		expect(harness.screen().text()).toContain("⌘ Command Palette");
-		expect(harness.screen().text()).toContain("Поиск команд");
+		expect(harness.screen().text()).toContain("Search commands");
 
 		const boundsWide = findModalBounds(harness.screen());
 		await harness.mouseMove(boundsWide.left + 6, boundsWide.top + 4);
@@ -217,7 +217,7 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		expect(afterBs).not.toContain("👨‍👩‍👧‍👦");
 		expect(afterBs).toContain("⌕");
 		await harness.pressKey("\x15");
-		expect(harness.screen().text()).toContain("Поиск команд");
+		expect(harness.screen().text()).toContain("Search commands");
 
 		for (const termW of [50, 110]) {
 			await harness.resize(termW, 32);
@@ -323,7 +323,7 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 			await harness.resize(termW, 34);
 			await harness.mouseMove(1, 1);
 			const s = harness.screen();
-			const clearPos = s.findText("Сбросить комменты");
+			const clearPos = s.findText("Clear comments");
 			expect(clearPos).toBeDefined();
 			const bgBefore = s.cellAt(clearPos!.row, clearPos!.col)?.bg;
 			await harness.mouseMove(clearPos!.col + 2, clearPos!.row);
@@ -331,7 +331,7 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		}
 
 		await harness.resize(56, 34);
-		const closePill = harness.screen().findText("Закрыть");
+		const closePill = harness.screen().findText("Close");
 		expect(closePill).toBeDefined();
 		await harness.mouseClick(closePill!.col + 1, closePill!.row);
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);

@@ -140,7 +140,7 @@ describe("Host Runtime seam (real InteractiveMode)", () => {
 			quoteTarget!.col + 12,
 			quoteTarget!.row,
 		);
-		expect(harness.screen().text()).toContain("╭ ❝ Цитировать ╮");
+		expect(harness.screen().text()).toContain("╭ ❝ Quote ╮");
 
 		const switchedToRegular = await harness.setTuiMode("regular");
 		expect(switchedToRegular).toBe(true);
@@ -165,10 +165,10 @@ describe("Host Runtime seam (real InteractiveMode)", () => {
 
 		await harness.paste("/palette", true);
 		await harness.sendInput("\r");
-		expect(harness.screen().text()).toContain("Поиск команд");
+		expect(harness.screen().text()).toContain("Search commands");
 		expect(await harness.setTuiMode("regular")).toBe(false);
 		await harness.pressKey("\x1b");
-		expect(harness.screen().text()).not.toContain("Поиск команд");
+		expect(harness.screen().text()).not.toContain("Search commands");
 
 		const reboundScreen = harness.screen();
 		const reboundTarget = reboundScreen.findText("Quotable line across mode switch");
@@ -179,7 +179,7 @@ describe("Host Runtime seam (real InteractiveMode)", () => {
 			reboundTarget!.col + 12,
 			reboundTarget!.row,
 		);
-		expect(harness.screen().text()).toContain("╭ ❝ Цитировать ╮");
+		expect(harness.screen().text()).toContain("╭ ❝ Quote ╮");
 
 		await harness.dispose();
 		expect(getActiveHostRuntime()).toBeUndefined();

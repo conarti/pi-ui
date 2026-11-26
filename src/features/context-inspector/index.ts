@@ -6,6 +6,7 @@ import {
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 import { fgRgb, formatCompactTokens } from "../../shared/ansi.ts";
+import { t } from "../../shared/i18n.ts";
 import { createModalCard, getThemeSurfacePalette, openModalCard } from "../../shared/modal-card.ts";
 
 interface ContextBreakdown {
@@ -145,34 +146,34 @@ export async function showContextInspector(pi: ExtensionAPI, ctx: ExtensionConte
 							: 0;
 
 					const body: string[] = [
-						`${theme.bold(data.modelLabel)}  ${theme.fg("dim", "·")}  ${pctBadge} ${theme.fg("muted", `(${formatCompactTokens(data.totalTokens)} / ${formatCompactTokens(data.contextWindow)} tokens)`)}`,
+						`${theme.bold(data.modelLabel)}  ${theme.fg("dim", "·")}  ${pctBadge} ${theme.fg("muted", t("context.tokensSummary", { used: formatCompactTokens(data.totalTokens), window: formatCompactTokens(data.contextWindow) }))}`,
 						"",
 						` ${segSys}${segChat}${segTool}${segFree}${segReserve}`,
 						"",
-						` ${fgRgb(palette.accent, "●")} System & Skills   ${theme.bold(formatCompactTokens(data.systemTokensEst).padStart(6))}   ${theme.fg("dim", "системный промпт, правила и скиллы")}`,
-						` ${fgRgb(palette.info, "●")} Диалог            ${theme.bold(formatCompactTokens(data.chatTokensEst).padStart(6))}   ${theme.fg("dim", `сообщения и рассуждения (${data.turnCount} реплик)`)}`,
-						` ${fgRgb(palette.accentBright, "●")} Инструменты       ${theme.bold(formatCompactTokens(data.toolTokensEst).padStart(6))}   ${theme.fg("dim", "вызовы и результаты тулзов")}`,
-						` ${fgRgb(palette.warning, "▒")} Буфер компакта    ${theme.bold(formatCompactTokens(data.reserveTokens).padStart(6))}   ${theme.fg("dim", "резерв до авто-сжатия")}`,
+						` ${fgRgb(palette.accent, "●")} ${t("context.row.system").padEnd(17)} ${theme.bold(formatCompactTokens(data.systemTokensEst).padStart(6))}   ${theme.fg("dim", t("context.row.systemDesc"))}`,
+						` ${fgRgb(palette.info, "●")} ${t("context.row.chat").padEnd(17)} ${theme.bold(formatCompactTokens(data.chatTokensEst).padStart(6))}   ${theme.fg("dim", t("context.row.chatDesc", { turns: data.turnCount }))}`,
+						` ${fgRgb(palette.accentBright, "●")} ${t("context.row.tools").padEnd(17)} ${theme.bold(formatCompactTokens(data.toolTokensEst).padStart(6))}   ${theme.fg("dim", t("context.row.toolsDesc"))}`,
+						` ${fgRgb(palette.warning, "▒")} ${t("context.row.reserve").padEnd(17)} ${theme.bold(formatCompactTokens(data.reserveTokens).padStart(6))}   ${theme.fg("dim", t("context.row.reserveDesc"))}`,
 						"",
-						` ${theme.fg("muted", "Сессия:")} in ${formatCompactTokens(data.inputTotal)} · cache ${formatCompactTokens(data.cacheReadTotal)} (${cacheRatio}%) · out ${formatCompactTokens(data.outputTotal)}${data.costTotal > 0 ? ` · $${data.costTotal.toFixed(3)}` : ""}`,
+						` ${theme.fg("muted", t("context.sessionLine"))} in ${formatCompactTokens(data.inputTotal)} · cache ${formatCompactTokens(data.cacheReadTotal)} (${cacheRatio}%) · out ${formatCompactTokens(data.outputTotal)}${data.costTotal > 0 ? ` · $${data.costTotal.toFixed(3)}` : ""}`,
 					];
 
 					return card.render(width, theme, {
-						title: fgRgb(palette.accentBright, theme.bold("◐ Context Inspector")),
+						title: fgRgb(palette.accentBright, theme.bold(t("context.title"))),
 						onClose: () => done("close"),
 						bodyLines: body,
 						borderVariant: "primary",
 						footerPills: [
 							{
 								id: "compact",
-								label: "⚡ Сжать контекст (c)",
+								label: t("context.pill.compact"),
 								variant: "primary",
 								active: true,
 								onClick: () => done("compact"),
 							},
 							{
 								id: "close",
-								label: "✕ Закрыть (Esc)",
+								label: t("context.pill.close"),
 								variant: "neutral",
 								onClick: () => done("close"),
 							},
@@ -200,13 +201,13 @@ export async function showContextInspector(pi: ExtensionAPI, ctx: ExtensionConte
 
 	if (action === "compact") {
 		if (!ctx.isIdle()) {
-			ctx.ui.notify("Дождись завершения ответа перед сжатием контекста", "warning");
+			ctx.ui.notify(t("context.compactBusy"), "warning");
 			return;
 		}
-		ctx.ui.notify("Сжимаю контекст…", "info");
+		ctx.ui.notify(t("palette.compactStarted"), "info");
 		ctx.compact({
-			onComplete: () => ctx.ui.notify("Контекст успешно сжат", "info"),
-			onError: (err) => ctx.ui.notify(`Ошибка сжатия: ${err.message}`, "error"),
+			onComplete: () => ctx.ui.notify(t("context.compactDone"), "info"),
+			onError: (err) => ctx.ui.notify(t("palette.compactError", { message: err.message }), "error"),
 		});
 	}
 }

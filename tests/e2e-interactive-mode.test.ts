@@ -317,7 +317,7 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(expandedHit).toBeDefined();
 		await harness.mouseClick(expandedHit!.col + 2, expandedHit!.row);
 		expect(harness.screen().text()).not.toContain("Verifying tree-shaking boundaries");
-		expect(harness.screen().text()).not.toContain("Цитировать");
+		expect(harness.screen().text()).not.toContain("Quote");
 
 		const promptHit = harness.screen().findText("› Audit src/entry.ts and show the helper");
 		expect(promptHit).toBeDefined();
@@ -360,6 +360,11 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 
 	it("coordinates Sticky Prompt, Outline Rail, mouse-selection & Alt+Q quoting, paste/image/quote Prompt Chips, and Prompt Suggestion workflows", async () => {
 		const sharedAgentDir = allocateTempDir("pi-ui-e2e-agent-");
+		writeFileSync(
+			join(sharedAgentDir, "pi-ui.json"),
+			`${JSON.stringify({ promptSuggestions: true }, null, 2)}\n`,
+			"utf8",
+		);
 		const buildReply = (tag: string, count: number) =>
 			Array.from({ length: count }, (_, idx) => `${tag} line ${idx + 1}: cache invalidation detail`).join(
 				"\n",
@@ -433,7 +438,7 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 			quoteLine2!.row,
 			{ steps: 3 },
 		);
-		const popupPos = harness.screen().findText("Цитировать");
+		const popupPos = harness.screen().findText("Quote");
 		expect(popupPos).toBeDefined();
 		expect(harness.screen().cellAt(popupPos!.row, popupPos!.col)?.inverse).toBe(false);
 
@@ -695,11 +700,11 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		await harness.pressKey("\x1b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 
-		await harness.submitInput("/mode safe");
+		await harness.submitInput("/mode auto");
 		expect(harness.session.getActiveToolNames()).toContain("edit");
 
 		const safePromise = harness.submitInput("Apply governed changes");
-		await waitForCondition(() => harness!.screen().text().includes("Auto-Safe Confirmation"));
+		await waitForCondition(() => harness!.screen().text().includes("Auto Permission"));
 		expect(harness.screen().text()).toContain("src/service.ts");
 		await harness.pressKey("\r");
 
@@ -734,9 +739,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 				fauxAssistantMessage("Post-reload turn succeeded."),
 			],
 			suggestionResponses: [
-				fauxAssistantMessage(""),
-				fauxAssistantMessage(""),
-				fauxAssistantMessage(""),
 				fauxAssistantMessage("Продолжи после перезагрузки"),
 			],
 		});
@@ -768,7 +770,7 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 			targetBeforeSwitch!.row,
 			{ steps: 3 },
 		);
-		expect(harness.screen().text()).toContain("Цитировать");
+		expect(harness.screen().text()).toContain("Quote");
 
 		expect(await harness.setTuiMode("regular")).toBe(true);
 		expect(runtime.isFullscreen).toBe(false);
@@ -806,7 +808,7 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 			targetAfterSwitch!.row,
 			{ steps: 3 },
 		);
-		const quotePopupAfterSwitch = harness.screen().findText("Цитировать");
+		const quotePopupAfterSwitch = harness.screen().findText("Quote");
 		expect(quotePopupAfterSwitch).toBeDefined();
 		await harness.mouseClick(quotePopupAfterSwitch!.col + 2, quotePopupAfterSwitch!.row);
 		await flushUiAsync(harness);
@@ -836,7 +838,8 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(harness.screen().text()).toContain("⌘ Command Palette");
 		await harness.pressKey("\x1b");
 
-		await harness.submitInput("/mode code");
+		await harness.submitInput("/suggestions on");
+		await harness.submitInput("/mode always-approve");
 		expect(harness.session.getActiveToolNames()).toContain("edit");
 		await harness.submitInput("Verify post-reload turn");
 		expect(harness.screen().text()).toContain("Post-reload turn succeeded.");

@@ -152,7 +152,7 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		await harness.prompt("/quote 99");
 		scroll.scrollToEnd();
 		expect(editor.getText()).toBe("[❝ Quote #1 · 1 line] [❝ Quote #2 · 2 lines]");
-		expect(harness.screen().text()).toContain("доступно ответов ассистента: 2");
+		expect(harness.screen().text()).toContain("Available assistant replies in this session: 2");
 	});
 
 	it("provides /quotes Modal Card inspection, multi-line editing, single removal, and full clearing while preserving non-quote chips and undo", async () => {
@@ -170,7 +170,7 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 
 		await harness.prompt("/quotes");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
-		expect(harness.screen().text()).toContain("В черновике нет активных цитат");
+		expect(harness.screen().text()).toContain("No active quotes in the draft");
 
 		await harness.pressKey("\x16");
 		await flushAsyncQuote(harness);
@@ -290,7 +290,7 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		const mouseModalPromise = harness.prompt("/quotes");
 		await flushAsyncQuote(harness);
 		const modalScreen = harness.screen();
-		const clearPillHit = modalScreen.findText("Очистить все");
+		const clearPillHit = modalScreen.findText("Clear all");
 		expect(clearPillHit).toBeDefined();
 		await harness.mouseClick(clearPillHit!.col + 2, clearPillHit!.row);
 		await mouseModalPromise;
@@ -527,7 +527,7 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 	});
 
 	it.each(["dark", "light"] as const)(
-		"lazily mounts nonCapturing ╭ ❝ Цитировать ╮ Hover Popup on drag and multi-click selection in %s theme (preserving copyOnSelect and respecting Modal Cards), quotes on click, and dismisses on Esc, scroll, or outside click without stealing focus",
+		"lazily mounts nonCapturing ╭ ❝ Quote ╮ Hover Popup on drag and multi-click selection in %s theme (preserving copyOnSelect and respecting Modal Cards), quotes on click, and dismisses on Esc, scroll, or outside click without stealing focus",
 		async (themeMode) => {
 			harness = await createInteractiveHarness({
 				theme: themeMode,
@@ -565,7 +565,7 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			expect(secondHit).toBeDefined();
 
 			await harness.mouseDrag(80, alphaHit!.row, 90, alphaHit!.row, { steps: 2 });
-			expect(harness.screen().text()).not.toContain("╭ ❝ Цитировать ╮");
+			expect(harness.screen().text()).not.toContain("╭ ❝ Quote ╮");
 
 			harness.terminal.writes.length = 0;
 			await harness.mouseDrag(
@@ -581,7 +581,7 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			expect(renderer.getFocusedComponent?.()).toBe(editor);
 
 			const dragScreen = harness.screen();
-			const popupHit = dragScreen.findText("╭ ❝ Цитировать ╮");
+			const popupHit = dragScreen.findText("╭ ❝ Quote ╮");
 			expect(popupHit).toBeDefined();
 			expect(popupHit!.col).toBeGreaterThanOrEqual(1);
 
@@ -599,7 +599,7 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			expect(editor.getText()).toBe("[❝ Quote #1 · 2 lines]");
 			expect(getSelectionText(harness)).toBeUndefined();
 			expect(renderer.getFocusedComponent?.()).toBe(editor);
-			expect(harness.screen().text()).not.toContain("╭ ❝ Цитировать ╮");
+			expect(harness.screen().text()).not.toContain("╭ ❝ Quote ╮");
 			expect(harness.screen().text()).toContain("❝ Quote #1 · 2 lines");
 
 			editor.setText("");
@@ -608,31 +608,31 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			await harness.mouseClick(wordCol.col + 1, wordCol.row);
 			await harness.mouseClick(wordCol.col + 1, wordCol.row);
 			expect(getSelectionText(harness)).toBe("alpha");
-			expect(harness.screen().text()).toContain("╭ ❝ Цитировать ╮");
+			expect(harness.screen().text()).toContain("╭ ❝ Quote ╮");
 
 			await harness.pressKey("\x1b");
 			expect(renderer.getFocusedComponent?.()).toBe(editor);
-			expect(harness.screen().text()).not.toContain("╭ ❝ Цитировать ╮");
+			expect(harness.screen().text()).not.toContain("╭ ❝ Quote ╮");
 
 			await harness.mouseDrag(alphaHit!.col, alphaHit!.row, alphaHit!.col + 16, alphaHit!.row);
-			expect(harness.screen().text()).toContain("╭ ❝ Цитировать ╮");
+			expect(harness.screen().text()).toContain("╭ ❝ Quote ╮");
 			await harness.mouseWheel("down", 10, 8, 1);
 			expect(renderer.getFocusedComponent?.()).toBe(editor);
-			expect(harness.screen().text()).not.toContain("╭ ❝ Цитировать ╮");
+			expect(harness.screen().text()).not.toContain("╭ ❝ Quote ╮");
 
 			scroll.scrollTo(railTestTop, { disableFollow: true });
 			await harness.mouseDrag(alphaHit!.col, alphaHit!.row, alphaHit!.col + 16, alphaHit!.row);
-			expect(harness.screen().text()).toContain("╭ ❝ Цитировать ╮");
+			expect(harness.screen().text()).toContain("╭ ❝ Quote ╮");
 			await harness.mouseClick(2, alphaHit!.row + 4);
 			expect(renderer.getFocusedComponent?.()).toBe(editor);
-			expect(harness.screen().text()).not.toContain("╭ ❝ Цитировать ╮");
+			expect(harness.screen().text()).not.toContain("╭ ❝ Quote ╮");
 
 			editor.setText("");
 			await harness.mouseClick(wordCol.col + 1, wordCol.row);
 			await harness.mouseClick(wordCol.col + 1, wordCol.row);
 			await harness.mouseClick(wordCol.col + 1, wordCol.row);
 			expect(getSelectionText(harness)?.trim()).toBe("Selectable alpha beta gamma delta");
-			const triplePopup = harness.screen().findText("╭ ❝ Цитировать ╮")!;
+			const triplePopup = harness.screen().findText("╭ ❝ Quote ╮")!;
 			expect(triplePopup).toBeDefined();
 
 			await harness.mouseDrag(
@@ -654,10 +654,10 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 				scroll.scrollTo(startTop, { disableFollow: true });
 				const rowForDrag = harness.screen().findText("Selectable alpha")!.row;
 				await harness.mouseDrag(4, rowForDrag, 20, rowForDrag);
-				expect(harness.screen().text()).toContain("╭ ❝ Цитировать ╮");
+				expect(harness.screen().text()).toContain("╭ ❝ Quote ╮");
 				scrollAction();
 				expect(renderer.getFocusedComponent?.()).toBe(editor);
-				expect(harness.screen().text()).not.toContain("╭ ❝ Цитировать ╮");
+				expect(harness.screen().text()).not.toContain("╭ ❝ Quote ╮");
 			}
 
 			scroll.scrollTo(railTestTop, { disableFollow: true });
@@ -665,7 +665,7 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			await harness.pressKey("\x0b");
 			expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
 			await harness.mouseDrag(4, modalTestRow, 20, modalTestRow);
-			expect(harness.screen().text()).not.toContain("╭ ❝ Цитировать ╮");
+			expect(harness.screen().text()).not.toContain("╭ ❝ Quote ╮");
 			await harness.pressKey("\x1b");
 		},
 	);
@@ -698,7 +698,7 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		expect(bodyRowHit).toBeDefined();
 		await harness.mouseDrag(bodyRowHit!.col, bodyRowHit!.row, bodyRowHit!.col + 20, bodyRowHit!.row);
 
-		const firstPop = harness.screen().findText("╭ ❝ Цитировать ╮");
+		const firstPop = harness.screen().findText("╭ ❝ Quote ╮");
 		expect(firstPop).toBeDefined();
 		expect(firstPop!.row).toBeGreaterThanOrEqual(3);
 		await harness.mouseClick(firstPop!.col + 3, firstPop!.row);
@@ -728,13 +728,13 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 
 		expect(rawRenderer.selectionPressActive).toBe(false);
 		expect(harness.terminal.writes.some((w) => w.startsWith("\x1b]52;c;"))).toBe(true);
-		const stickySafePopup = harness.screen().findText("╭ ❝ Цитировать ╮");
+		const stickySafePopup = harness.screen().findText("╭ ❝ Quote ╮");
 		expect(stickySafePopup).toBeDefined();
 		expect(stickySafePopup!.row).toBeGreaterThanOrEqual(3);
 
 		await harness.pressKey("\x1b");
 		const composerBodyRow = findComposerTopRow(harness) + 1;
 		await harness.mouseDrag(4, composerBodyRow, 20, 10, { steps: 2 });
-		expect(harness.screen().text()).not.toContain("╭ ❝ Цитировать ╮");
+		expect(harness.screen().text()).not.toContain("╭ ❝ Quote ╮");
 	});
 });

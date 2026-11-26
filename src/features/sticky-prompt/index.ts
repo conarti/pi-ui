@@ -12,6 +12,7 @@ import {
 	type StickyOverlayRender,
 } from "../../shared/fullscreen-layout.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
+import { t } from "../../shared/i18n.ts";
 import {
 	selectStickyTurn,
 	type IndexedTurn,
@@ -260,11 +261,11 @@ export function registerStickyPromptCommands(
 	const usage = "/sticky [toggle | prev | next | expand | time | auto | always | status]";
 
 	pi.registerCommand("sticky", {
-		description: `Закреплённый сверху активный промпт: ${usage}`,
+		description: t("sticky.command", { usage }),
 		handler: async (args, ctx) => {
 			const bar = getBar();
 			if (!bar) {
-				ctx.ui.notify("Sticky prompt доступен в fullscreen TUI", "info");
+				ctx.ui.notify(t("sticky.fullscreenOnly"), "info");
 				return;
 			}
 			const cfg = bar.config;
@@ -273,7 +274,10 @@ export function registerStickyPromptCommands(
 				case "":
 				case "toggle":
 					cfg.enabled = !cfg.enabled;
-					ctx.ui.notify(`Sticky prompt: ${cfg.enabled ? "включён" : "выключен"}`, "info");
+					ctx.ui.notify(
+						t("sticky.toggled", { state: cfg.enabled ? t("state.on") : t("state.off") }),
+						"info",
+					);
 					break;
 				case "prev":
 				case "up":
@@ -298,7 +302,7 @@ export function registerStickyPromptCommands(
 				case "auto":
 				case "always":
 					cfg.mode = sub;
-					ctx.ui.notify(`Sticky режим: ${cfg.mode}`, "info");
+					ctx.ui.notify(t("sticky.modeChanged", { mode: cfg.mode }), "info");
 					break;
 				case "status":
 					ctx.ui.notify(
@@ -307,7 +311,7 @@ export function registerStickyPromptCommands(
 					);
 					return;
 				default:
-					ctx.ui.notify(`Использование: ${usage}`, "info");
+					ctx.ui.notify(t("sticky.usage", { usage }), "info");
 					return;
 			}
 			bar.invalidate();

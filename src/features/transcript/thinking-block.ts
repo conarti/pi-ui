@@ -17,6 +17,7 @@ import {
 	paintBreathingWaveGlyph,
 } from "../../shared/animation-scheduler.ts";
 import { fgRgb, getActiveGlobalTheme, isLightTheme } from "../../shared/ansi.ts";
+import { t } from "../../shared/i18n.ts";
 import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
 
@@ -565,20 +566,22 @@ export function installAssistantTranscriptBlocks(): void {
 			if (message?.stopReason === "length") {
 				self.contentContainer.addChild(new Spacer(1));
 				self.contentContainer.addChild(
-					new Text(themeRef.fg("error", "Ответ обрезан по лимиту токенов."), chatPad, 0),
+					new Text(themeRef.fg("error", t("transcript.truncated")), chatPad, 0),
 				);
 			} else if (!hasToolCalls) {
 				if (message?.stopReason === "aborted") {
 					const abortMsg =
 						message.errorMessage && message.errorMessage !== "Request was aborted"
 							? message.errorMessage
-							: "Остановлено";
+							: t("transcript.stopped");
 					self.contentContainer.addChild(new Spacer(1));
 					self.contentContainer.addChild(new Text(themeRef.fg("muted", `⏹ ${abortMsg}`), chatPad, 0));
 				} else if (message?.stopReason === "error") {
 					const errMsg = message.errorMessage || "Unknown error";
 					self.contentContainer.addChild(new Spacer(1));
-					self.contentContainer.addChild(new Text(themeRef.fg("error", `Ошибка: ${errMsg}`), chatPad, 0));
+					self.contentContainer.addChild(
+						new Text(themeRef.fg("error", t("transcript.error", { message: errMsg })), chatPad, 0),
+					);
 				}
 			}
 		},

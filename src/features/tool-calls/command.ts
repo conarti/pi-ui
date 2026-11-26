@@ -26,13 +26,19 @@ import {
 	type DisplayStyle,
 	type ToolDensity,
 } from "./types.ts";
+import {
+	parseToolDensityPreset,
+	TOOL_DENSITY_PRESETS,
+	updatePiUiUserConfig,
+	type ToolDensityPreset,
+} from "../../shared/pi-ui-config.ts";
 import { loadConfig } from "./config.ts";
 
 type Scope = "global" | "project";
 const SCOPES: readonly Scope[] = ["global", "project"];
 
 const DENSITY_HELP =
-	"Usage: /density [detailed|diff-focus|compact] [global|project]\n/density status · /density help\nSwitches Tool Density live without reload. Ctrl+O or click expands rows; /silent toggles quiet mode.";
+	"Usage: /density [balanced|compact|grouped|diff-focus|detailed] [global|project]\n/density status · /density help\nSwitches Tool Density live without reload. Ctrl+O or click expands rows; /silent toggles quiet mode.";
 
 const COMPACT_HELP =
 	"Usage: /compact-tools [detailed|diff-focus|compact|claude|codex|off] [global|project]\nWithout a scope the preset applies live (and updates active settings when configured).\n/compact-tools status · /compact-tools help\nCtrl+O expands rows; /silent toggles quiet mode.";
@@ -255,20 +261,27 @@ function applySelection(
 	}
 }
 
+function mapPresetToLiveDensity(preset: ToolDensityPreset): ToolDensity {
+	if (preset === "detailed" || preset === "diff-focus" || preset === "compact") {
+		return preset;
+	}
+	return preset === "grouped" ? "compact" : "detailed";
+}
+
 export function registerDensityCommand(
 	pi: ExtensionAPI,
 	getConfig: () => CompactToolsConfig,
 	applyStyle?: ApplyStyle,
 ): void {
 	pi.registerCommand("density", {
-		description: "Switch Tool Density live (detailed, diff-focus, compact)",
+		description: "Switch Tool Density live (balanced, compact, grouped, diff-focus, detailed)",
 		getArgumentCompletions: (prefix) => {
 			const typed = prefix.trimStart().toLowerCase();
 			const parts = typed.split(/\s+/);
-			const scoped = parts.length === 2 && TOOL_DENSITIES.includes(parts[0] as ToolDensity);
+			const scoped = parts.length === 2 && Boolean(parseToolDensityPreset(parts[0]));
 			const values = scoped
 				? SCOPES.map((scope) => `${parts[0]} ${scope}`)
-				: [...TOOL_DENSITIES, "status", "help"];
+				: [...TOOL_DENSITY_PRESETS, "status", "help"];
 			const items = values
 				.filter((value) => value.startsWith(typed) && value !== typed.trimEnd())
 				.map((value) => ({ value, label: value }));
@@ -276,9 +289,11 @@ export function registerDensityCommand(
 		},
 		handler: async (args, ctx) => {
 			const rawParts = args.trim() ? args.trim().toLowerCase().split(/\s+/) : [];
-			const normalizedFirst =
-				rawParts[0] === "diff_focus" || rawParts[0] === "difffocus" ? "diff-focus" : rawParts[0];
-			const parts = normalizedFirst !== undefined ? [normalizedFirst, ...rawParts.slice(1)] : [];
+			const parsedPreset = rawParts[0] !== undefined ? parseToolDensityPreset(rawParts[0]) : undefined;
+			const parts =
+				parsedPreset !== undefined
+					? [parsedPreset, ...rawParts.slice(1)]
+					: rawParts;
 
 			if (parts.length === 1 && parts[0] === "help") {
 				ctx.ui.notify(DENSITY_HELP, "info");
@@ -290,14 +305,14 @@ export function registerDensityCommand(
 			}
 			if (
 				parts.length > 2 ||
-				(parts.length > 0 && !TOOL_DENSITIES.includes(parts[0] as ToolDensity)) ||
+				(parts.length > 0 && !parsedPreset) ||
 				(parts[1] !== undefined && !SCOPES.includes(parts[1] as Scope))
 			) {
 				ctx.ui.notify(DENSITY_HELP, "warning");
 				return;
 			}
 
-			let preset = parts[0] as ToolDensity | undefined;
+			let preset: ToolDensityPreset | undefined = parsedPreset;
 			const explicitScope = parts[1] as Scope | undefined;
 			if (!preset) {
 				if (ctx.mode !== "tui") {
@@ -313,7 +328,16 @@ export function registerDensityCommand(
 				if (!preset) return;
 			}
 
-			await applySelection(preset, explicitScope, ctx, applyStyle, "density");
+			if (explicitScope !== "project") {
+				updatePiUiUserConfig({ toolDensity: preset });
+			}
+			await applySelection(
+				mapPresetToLiveDensity(preset),
+				explicitScope,
+				ctx,
+				applyStyle,
+				"density",
+			);
 		},
 	});
 }

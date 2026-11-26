@@ -43,6 +43,7 @@ export {
 	type MouseButtonName,
 	type MouseModifiers,
 	type MutableClipboardState,
+	type RecordedExternalOpen,
 	type RecordedFauxCall,
 	type SessionEntry,
 	type SimpleStreamOptions,

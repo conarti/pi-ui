@@ -7,6 +7,7 @@ import {
 } from "../../shared/host-runtime.ts";
 import { registerOptionShortcutChord } from "../../shared/keyboard-layout.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
+import { t } from "../../shared/i18n.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
 import { getActiveComposerEditor } from "../chrome/composer.ts";
 import {
@@ -154,10 +155,7 @@ export function registerQuotesFeature(pi: ExtensionAPI): void {
 			return;
 		}
 
-		ctx.ui.notify(
-			"Выдели текст в транскрипте или скопируй его в буфер обмена перед нажатием Alt+Q",
-			"warning",
-		);
+		ctx.ui.notify(t("quotes.needSelectionOrClipboard"), "warning");
 	};
 
 	const quoteAssistantReply = async (rawArgs: string, ctx: ExtensionContext): Promise<void> => {
@@ -167,14 +165,17 @@ export function registerQuotesFeature(pi: ExtensionAPI): void {
 		const extracted = extractAssistantQuoteFromBranch(branch, rawArgs);
 		if (!extracted.ok) {
 			if (extracted.reason === "empty_history") {
-				ctx.ui.notify("В этой сессии пока нет ответов ассистента", "info");
+				ctx.ui.notify(t("quotes.emptyHistory"), "info");
 			} else if (extracted.reason === "out_of_range") {
 				ctx.ui.notify(
-					`В сессии доступно ответов ассистента: ${extracted.totalReplies} (запрошен #${extracted.requested})`,
+					t("quotes.outOfRange", {
+						total: extracted.totalReplies,
+						requested: extracted.requested ?? 1,
+					}),
 					"warning",
 				);
 			} else {
-				ctx.ui.notify("Использование: /quote [n] (n >= 1, по умолчанию 1)", "warning");
+				ctx.ui.notify(t("quotes.usage.quote"), "warning");
 			}
 			return;
 		}
@@ -184,21 +185,21 @@ export function registerQuotesFeature(pi: ExtensionAPI): void {
 
 	withConartiInternalRegistration(() => {
 		pi.registerShortcut("alt+q", {
-			description: "Вставить выделенный фрагмент или буфер обмена как чип цитаты",
+			description: t("quotes.shortcut"),
 			handler: async (ctx) => {
 				await quoteSelectionOrClipboard(ctx);
 			},
 		});
 
 		pi.registerCommand("quote", {
-			description: "Процитировать ответ ассистента из истории (/quote [n], по умолчанию 1)",
+			description: t("quotes.command.quote"),
 			handler: async (args, ctx) => {
 				await quoteAssistantReply(args, ctx);
 			},
 		});
 
 		pi.registerCommand("quotes", {
-			description: "Инспектор, редактирование и очистка активных цитат черновика",
+			description: t("quotes.command.quotes"),
 			handler: async (args, ctx) => {
 				selectionController.hide();
 				await handleQuotesCommand(args, ctx);

@@ -72,8 +72,11 @@ import {
 } from "@earendil-works/pi-tui";
 import {
 	setHostClipboardProvider,
+	setHostExternalOpener,
 	type ClipboardImagePayload,
+	type ExternalOpenResult,
 	type HostClipboardProvider,
+	type HostExternalOpener,
 } from "../../src/shared/host-runtime.ts";
 import { captureTerminalScreen, type TerminalScreenSnapshot } from "./terminal-screen.ts";
 
@@ -340,6 +343,15 @@ export interface MutableClipboardState {
 	filePaths?: readonly string[] | null;
 }
 
+export type RecordedExternalOpen =
+	| { readonly kind: "url"; readonly url: string }
+	| {
+			readonly kind: "path";
+			readonly path: string;
+			readonly line?: number;
+			readonly column?: number;
+	  };
+
 export type CustomStreamSimpleHandler = (
 	model: Model<string>,
 	context: TranscriptContext,
@@ -375,6 +387,7 @@ export interface InteractiveHarnessOptions {
 	tokenSize?: { min?: number; max?: number };
 	thinkingLevel?: ThinkingLevel;
 	clipboard?: HostClipboardProvider | MutableClipboardState;
+	externalOpener?: HostExternalOpener;
 	interactiveOptions?: Omit<InteractiveModeOptions, "terminal" | "tuiMode" | "initialThemeSetting">;
 	trueColor?: boolean;
 	sessionManager?: SessionManager;
@@ -488,6 +501,7 @@ export interface InteractiveHarness {
 	readonly tui: TUI;
 	readonly faux: FauxProviderHandle;
 	readonly calls: readonly RecordedFauxCall[];
+	readonly openedExternals: readonly RecordedExternalOpen[];
 	readonly cwd: string;
 	readonly agentDir: string;
 	readonly width: number;
@@ -495,6 +509,7 @@ export interface InteractiveHarness {
 	setResponses(steps: FauxResponseStep[]): void;
 	appendResponses(steps: FauxResponseStep[]): void;
 	setClipboard(next: MutableClipboardState): void;
+	setExternalOpener(opener: HostExternalOpener | undefined): void;
 	setTheme(theme: "dark" | "light" | string): void;
 	sendInput(data: string): Promise<void>;
 	pressKey(sequence: string): Promise<void>;
@@ -832,6 +847,27 @@ export async function createInteractiveHarness(
 
 	setHostClipboardProvider(activeClipboard);
 
+	const recordedExternalOpens: RecordedExternalOpen[] = [];
+	const defaultHarnessExternalOpener: HostExternalOpener = {
+		async openUrl(url: string): Promise<ExternalOpenResult> {
+			recordedExternalOpens.push({ kind: "url", url });
+			return { ok: true };
+		},
+		async openPath(
+			filePath: string,
+			openOptions?: { readonly line?: number; readonly column?: number },
+		): Promise<ExternalOpenResult> {
+			recordedExternalOpens.push({
+				kind: "path",
+				path: filePath,
+				...(openOptions?.line !== undefined ? { line: openOptions.line } : {}),
+				...(openOptions?.column !== undefined ? { column: openOptions.column } : {}),
+			});
+			return { ok: true };
+		},
+	};
+	setHostExternalOpener(options?.externalOpener ?? defaultHarnessExternalOpener);
+
 	const extensionPaths: string[] = [];
 	if (options?.loadDefaultExtension !== false) {
 		extensionPaths.push(DEFAULT_EXTENSION_ENTRY);
@@ -1096,6 +1132,7 @@ export async function createInteractiveHarness(
 		},
 		faux,
 		calls: recordedCalls,
+		openedExternals: recordedExternalOpens,
 		suggestionCalls: recordedSuggestionCalls,
 		cwd,
 		agentDir,
@@ -1120,6 +1157,9 @@ export async function createInteractiveHarness(
 			if ("text" in next) clipboardState.text = next.text;
 			if ("image" in next) clipboardState.image = next.image;
 			if ("filePaths" in next) clipboardState.filePaths = next.filePaths;
+		},
+		setExternalOpener(opener: HostExternalOpener | undefined) {
+			setHostExternalOpener(opener ?? defaultHarnessExternalOpener);
 		},
 		async sendInput(data: string): Promise<void> {
 			terminal.sendInput(data);
@@ -1307,6 +1347,7 @@ export async function createInteractiveHarness(
 
 			unregisterApiProviders(compatSourceId);
 			setHostClipboardProvider(undefined);
+			setHostExternalOpener(undefined);
 			if (options?.trueColor !== undefined) {
 				if (prevTrueColorEnv === undefined) {
 					delete process.env.PI_TRUE_COLOR;

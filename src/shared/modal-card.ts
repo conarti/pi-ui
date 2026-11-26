@@ -13,6 +13,7 @@ import {
 import {
 	fgRgb,
 	getThemeSurfacePalette,
+	paintThemeSurfaceRow,
 	renderPill,
 	type HitBox,
 	type PillVariant,
@@ -322,7 +323,7 @@ export function createModalCard(): ModalCardController {
 						});
 						const pillW = visibleWidth(rendered);
 
-						// Wrap to next footer row when adding this pill would exceed innerWidth
+						/* Переносим пилюлю на следующую строку футера при нехватке ширины */
 						if (currentRowWidth > 0 && currentRowWidth + gapW + pillW > innerWidth) {
 							renderedRows.push(currentRowText);
 							rowIdx++;
@@ -360,7 +361,7 @@ export function createModalCard(): ModalCardController {
 			}
 
 			out.push(`${bColor("╰")}${bColor("─".repeat(Math.max(0, safeWidth - 2)))}${bColor("╯")}`);
-			return out;
+			return out.map((row) => paintThemeSurfaceRow(theme, row, safeWidth, palette.popupSurfaceBg));
 		},
 		handleMouse(event: TuiMouseEvent): ModalCardMouseOutcome {
 			const findHit = (x: number, y: number): HitBox | undefined => {

@@ -81,38 +81,38 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		expect(editor.constructor.name).toBe("PiUiComposerEditor");
 
 		const wf = getSessionWorkflow();
-		expect(wf.mode).toBe("code");
+		expect(wf.mode).toBe("always-approve");
 
 		await harness.pressKey("\x1b[1100;3u");
 		expect(wf.mode).toBe("plan");
 		await harness.pressKey("\x1bь");
-		expect(wf.mode).toBe("safe");
+		expect(wf.mode).toBe("auto");
 		await harness.pressKey("\x1b[27;3;1100~");
-		expect(wf.mode).toBe("code");
+		expect(wf.mode).toBe("always-approve");
 		await harness.pressKey("µ");
 		expect(wf.mode).toBe("plan");
 		await harness.pressKey("\x1b[181;1:3u");
 		expect(wf.mode).toBe("plan");
 		await harness.pressKey("\x1b[109;3u");
-		expect(wf.mode).toBe("safe");
+		expect(wf.mode).toBe("auto");
 		await harness.pressKey("\x1b[1100::109;3u");
-		expect(wf.mode).toBe("code");
+		expect(wf.mode).toBe("always-approve");
 
 		await harness.pressKey("\x1b[1079;7u");
 		expect(wf.mode).toBe("plan");
 		await harness.pressKey("\x1b[27;7;1079~");
-		expect(wf.mode).toBe("code");
+		expect(wf.mode).toBe("always-approve");
 		await harness.pressKey("\x1b[960;5u");
 		expect(wf.mode).toBe("plan");
 		setKittyProtocolActive(true);
 		await harness.pressKey("\x1b\x10");
-		expect(wf.mode).toBe("code");
+		expect(wf.mode).toBe("always-approve");
 		await harness.pressKey("\x1bm");
 		expect(wf.mode).toBe("plan");
 		await harness.pressKey("\x1bь");
-		expect(wf.mode).toBe("safe");
+		expect(wf.mode).toBe("auto");
 		await harness.pressKey("\x1bm");
-		expect(wf.mode).toBe("code");
+		expect(wf.mode).toBe("always-approve");
 
 		expect(getOutlineSettings().enabled).toBe(true);
 		await harness.pressKey("\x1b[1097;7u");
@@ -162,7 +162,7 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		}
 		await harness.paste("µ œ", true);
 		expect(editor.getText()).toBe("привет π© µ œ");
-		expect(wf.mode).toBe("code");
+		expect(wf.mode).toBe("always-approve");
 		expect(altYFires).toBe(4);
 	});
 
@@ -179,7 +179,7 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		const emptyScreen = harness.screen();
 		const topRow = findComposerTopRow(harness);
 		expect(emptyScreen.rowText(topRow)).toBe(`╭${"─".repeat(78)}╮`);
-		expect(emptyScreen.rowText(topRow + 1).startsWith("│ › Спроси или опиши задачу…")).toBe(true);
+		expect(emptyScreen.rowText(topRow + 1).startsWith("│ › Ask or describe a task…")).toBe(true);
 		expect(emptyScreen.rowText(topRow + 1).endsWith(" │")).toBe(true);
 		expect(emptyScreen.rowText(topRow + 2)).toBe(`╰${"─".repeat(78)}╯`);
 
@@ -192,7 +192,7 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		expect(typedScreen.rowText(typedTop)).toBe(`╭${"─".repeat(78)}╮`);
 		expect(typedScreen.rowText(typedTop + 1).startsWith("│ › Сделай рефакторинг")).toBe(true);
 		expect(typedScreen.rowText(typedTop + 1).endsWith(" │")).toBe(true);
-		expect(typedScreen.rowText(typedTop + 1)).not.toContain("Спроси или опиши задачу");
+		expect(typedScreen.rowText(typedTop + 1)).not.toContain("Ask or describe a task");
 		expect(typedScreen.rowText(typedTop + 2).startsWith("│   второй строки")).toBe(true);
 		expect(typedScreen.rowText(typedTop + 2).endsWith(" │")).toBe(true);
 		expect(typedScreen.rowText(typedTop + 3)).toBe(`╰${"─".repeat(78)}╯`);
@@ -220,7 +220,7 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		editor.setText("");
 		await harness.typeText(" ");
 		expect(harness.screen().rowText(findComposerTopRow(harness) + 1)).not.toContain(
-			"Спроси или опиши задачу",
+			"Ask or describe a task",
 		);
 
 		await harness.pressKey("\x7f");
@@ -228,7 +228,7 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 			harness
 				.screen()
 				.rowText(findComposerTopRow(harness) + 1)
-				.startsWith("│ › Спроси или опиши задачу…"),
+				.startsWith("│ › Ask or describe a task…"),
 		).toBe(true);
 	});
 
@@ -328,13 +328,13 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		expect(plainTop.startsWith("╭")).toBe(true);
 		expect(plainTop.endsWith("╮")).toBe(true);
 		expect(plainTop).toContain(" Plan ");
-		expect(plainTop).toContain(" План (1) ");
+		expect(plainTop).toContain(" Plan (1) ");
 		expect(/\p{Extended_Pictographic}/u.test(plainTop)).toBe(false);
 		expect(plainTop).not.toContain("◈");
 		expect(plainTop).not.toContain("🛡");
 		expect(plainTop).not.toContain("📋");
 
-		const planPillCol = plainTop.indexOf("План (1)");
+		const planPillCol = plainTop.indexOf("Plan (1)");
 		expect(planPillCol).toBeGreaterThan(0);
 		await harness.mouseClick(planPillCol + 2, topBorderRow);
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
@@ -345,18 +345,18 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		const modePillCol = harness.screen().rowText(findComposerTopRow(harness)).indexOf("Plan");
 		expect(modePillCol).toBeGreaterThan(0);
 		await harness.mouseClick(modePillCol + 1, findComposerTopRow(harness));
-		expect(wf.mode).toBe("code");
+		expect(wf.mode).toBe("always-approve");
 
 		harness.setTheme("light");
-		await harness.submitInput("/mode safe");
+		await harness.submitInput("/mode auto");
 		const lightTopRow = findComposerTopRow(harness);
 		const plainLightTop = harness.screen().rowText(lightTopRow);
-		expect(plainLightTop).toContain(" Auto-Safe ");
-		expect(plainLightTop).toContain(" План (1) ");
+		expect(plainLightTop).toContain(" Auto ");
+		expect(plainLightTop).toContain(" Plan (1) ");
 		expect(/\p{Extended_Pictographic}/u.test(plainLightTop)).toBe(false);
-		const safePillCol = plainLightTop.indexOf("Auto-Safe");
-		await harness.mouseClick(safePillCol + 2, lightTopRow);
-		expect(wf.mode).toBe("code");
+		const autoPillCol = plainLightTop.indexOf("Auto");
+		await harness.mouseClick(autoPillCol + 2, lightTopRow);
+		expect(wf.mode).toBe("always-approve");
 		harness.setTheme("dark");
 
 		editor.setText("abcdef");
@@ -491,12 +491,12 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		expect(composerRow.endsWith(" │")).toBe(true);
 
 		const wf = getSessionWorkflow();
-		expect(wf.mode).toBe("code");
+		expect(wf.mode).toBe("always-approve");
 
 		await harness.sendInput("\x1b[200~начало ");
 		await harness.sendInput("\x1b[109;3u");
 		await harness.sendInput("конец\x1b[201~");
-		expect(wf.mode).toBe("code");
+		expect(wf.mode).toBe("always-approve");
 		expect(editor.getText()).toContain("начало ");
 		expect(editor.getText()).toContain("конец");
 
@@ -505,8 +505,8 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		expect(editor.getText()).toBe("вставка");
 		expect(wf.mode).toBe("plan");
 		editor.setText("");
-		await harness.submitInput("/mode code");
-		expect(wf.mode).toBe("code");
+		await harness.submitInput("/mode always-approve");
+		expect(wf.mode).toBe("always-approve");
 
 		const observedDrafts: string[] = [];
 		let chipCounterState = 0;
@@ -554,12 +554,12 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 
 		const screenWithBanner = harness.screen();
-		const openPos = screenWithBanner.findText("Открыть план");
+		const openPos = screenWithBanner.findText("Open plan");
 		expect(openPos).toBeDefined();
 
 		const bannerRow = screenWithBanner.rowText(openPos!.row);
-		expect(bannerRow).not.toContain("кликни для построчных комментариев");
 		expect(bannerRow).not.toContain("кликни");
+		expect(bannerRow).not.toContain("click for line comments");
 
 		await harness.mouseClick(openPos!.col + 2, openPos!.row);
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);

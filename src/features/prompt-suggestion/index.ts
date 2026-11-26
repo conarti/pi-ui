@@ -14,6 +14,7 @@ import {
 	updatePiUiUserConfig,
 } from "../../shared/pi-ui-config.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
+import { t } from "../../shared/i18n.ts";
 import {
 	getActiveComposerEditor,
 	registerFeatureComposerHooks,
@@ -43,7 +44,6 @@ export {
 } from "./supersede-external.ts";
 
 const SUGGESTIONS_MODES = ["on", "off"] as const;
-const SUGGESTIONS_USAGE = "Использование: /suggestions [on|off]";
 
 function resolveActiveTui() {
 	return getActiveHostRuntime()?.tui ?? getActiveComposerEditor()?.getTui();
@@ -91,7 +91,7 @@ export function registerPromptSuggestionFeature(pi: ExtensionAPI): void {
 
 	withConartiInternalRegistration(() => {
 		pi.registerCommand("suggestions", {
-			description: "Включить или выключить Prompt Suggestion (/suggestions [on|off])",
+			description: t("suggestions.command"),
 			getArgumentCompletions: (prefix) => {
 				const typed = prefix.trimStart().toLowerCase();
 				const items = SUGGESTIONS_MODES.filter(
@@ -102,7 +102,7 @@ export function registerPromptSuggestionFeature(pi: ExtensionAPI): void {
 			handler: async (args, ctx) => {
 				const arg = args.trim().toLowerCase();
 				if (arg !== "" && arg !== "on" && arg !== "off") {
-					ctx.ui.notify(SUGGESTIONS_USAGE, "warning");
+					ctx.ui.notify(t("suggestions.usage"), "warning");
 					return;
 				}
 
@@ -115,7 +115,7 @@ export function registerPromptSuggestionFeature(pi: ExtensionAPI): void {
 					requestRender();
 				}
 				ctx.ui.notify(
-					`Prompt Suggestion: ${enabled ? "включены (on)" : "выключены (off)"}`,
+					t("suggestions.toggled", { state: enabled ? t("state.on") : t("state.off") }),
 					"info",
 				);
 			},
