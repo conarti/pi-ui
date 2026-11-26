@@ -5,7 +5,9 @@ import { clearMarkdownCopyTimers, installMarkdownCardsAndHeadings } from "./mark
 import {
 	clearRecordedThinkingTimings,
 	installAssistantTranscriptBlocks,
+	noteThinkingTurnStart,
 	observeAssistantThinkingMessage,
+	resetGlobalThinkingExpandState,
 	stopThinkingWave,
 } from "./thinking-block.ts";
 import {
@@ -23,7 +25,16 @@ export function registerTranscriptFeature(pi: ExtensionAPI): void {
 	pi.on("session_start", async (event) => {
 		if (event.reason !== "reload") {
 			clearRecordedThinkingTimings();
+			resetGlobalThinkingExpandState();
 		}
+	});
+
+	pi.on("agent_start", async () => {
+		noteThinkingTurnStart();
+	});
+
+	pi.on("turn_start", async () => {
+		noteThinkingTurnStart();
 	});
 
 	pi.on("message_start", async (event: any) => {
@@ -58,6 +69,7 @@ export function registerTranscriptFeature(pi: ExtensionAPI): void {
 		stopThinkingWave();
 		stopAllAnimations();
 		clearRecordedThinkingTimings();
+		resetGlobalThinkingExpandState();
 		clearPendingUserMessageTimestamps();
 		clearUserPromptCopyTimers();
 		clearMarkdownCopyTimers();

@@ -212,6 +212,10 @@ function openAnsiRgb(set: 38 | 48, r: number, g: number, b: number, theme?: unkn
 		: `\x1b[${set};2;${rr};${gg};${bb}m`;
 }
 
+export function fgRgbPrefix(rgb: RgbTuple, theme?: unknown): string {
+	return openAnsiRgb(38, rgb[0], rgb[1], rgb[2], theme);
+}
+
 export function themeFgRgb(theme: unknown, rgb: RgbTuple, text: string): string {
 	return `${openAnsiRgb(38, rgb[0], rgb[1], rgb[2], theme)}${text}\x1b[39m`;
 }
