@@ -23,6 +23,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { fgRgb, isLightTheme, renderPill, type HitBox, type RgbTuple } from "../../shared/ansi.ts";
 import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
+import { unwrapHostTui } from "../../shared/host-runtime.ts";
 import { t } from "../../shared/i18n.ts";
 import { matchesLayoutChord } from "../../shared/keyboard-layout.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
@@ -43,7 +44,12 @@ import {
 	sendNowDraftMidTurn,
 	sendNowTopQueuedMidTurnItem,
 } from "./mid-turn-queue.ts";
-import { bindComposerWorkingIndicator, buildWaveIndicator } from "./working-indicator.ts";
+import {
+	bindComposerWorkingIndicator,
+	buildWaveIndicator,
+	isComposerWorkingSuppressed,
+	renderWorkingStatusRow,
+} from "./working-indicator.ts";
 
 export { buildWaveIndicator };
 
@@ -222,6 +228,10 @@ export class PiUiComposerEditor extends CustomEditor {
 	private bottomHits: HitBox[] = [];
 	private manualScrollActive = false;
 	private totalVisualLineCount = 1;
+	private workingRowOffset = 0;
+	private workingStatusRowY = -1;
+	private workingStopHit: HitBox | undefined;
+	private workingStopHovered = false;
 	private undoSnapshots: unknown[] = [];
 	private redoStack: ComposerRedoEntry[] = [];
 	private pendingUndoCapture: { hasValue: boolean; value: unknown } | undefined;
@@ -1180,10 +1190,12 @@ export class PiUiComposerEditor extends CustomEditor {
 		const anySelf = this as unknown as {
 			embedWorkingStatus?: boolean;
 			workingStatusIndicator?: {
+				kind?: string;
 				renderInBorder?: (maxWidth: number) => string;
 				renderSpinnerInBorder?: (maxWidth: number) => string;
 			};
 		};
+		/* Индикатор kind === "working" рендерится отдельной строкой над Composer; в рамке остаются transient hints и retry/compaction */
 		if (activeTransientHint) {
 			const hintRgb: RgbTuple = isLightTheme(theme) ? [180, 83, 9] : [229, 192, 123];
 			const maxHintW = Math.max(1, spanWidth - pillsWidth - 4);
@@ -1191,7 +1203,11 @@ export class PiUiComposerEditor extends CustomEditor {
 			if (visibleWidth(clippedHint) > 0 && visibleWidth(clippedHint) + pillsWidth + 3 <= spanWidth) {
 				leftStatus = `${bLine("─")} ${fgRgb(hintRgb, clippedHint)} `;
 			}
-		} else if (anySelf.embedWorkingStatus && anySelf.workingStatusIndicator) {
+		} else if (
+			anySelf.embedWorkingStatus &&
+			anySelf.workingStatusIndicator &&
+			anySelf.workingStatusIndicator.kind !== "working"
+		) {
 			const maxStatusW = Math.max(1, spanWidth - pillsWidth - 4);
 			let statusCandidate = anySelf.workingStatusIndicator.renderInBorder?.(maxStatusW) ?? "";
 			if (visibleWidth(statusCandidate) + pillsWidth + 4 > spanWidth) {
@@ -1442,9 +1458,71 @@ export class PiUiComposerEditor extends CustomEditor {
 		return fitExactWidth(styled, innerWidth);
 	}
 
+	private abortActiveTurn(): void {
+		if (typeof this.deps.ctx.abort === "function") {
+			this.deps.ctx.abort();
+			return;
+		}
+		this.actionHandlers.get("app.interrupt")?.();
+	}
+
+	private hasNonSpacerAboveWidgets(): boolean {
+		const isSpacerNode = (node: unknown): boolean =>
+			typeof node === "object" && node !== null && node.constructor?.name === "Spacer";
+		const containsThis = (node: unknown): boolean => {
+			if (node === this) return true;
+			if (!node || typeof node !== "object") return false;
+			const children = (node as { children?: unknown[] }).children;
+			if (Array.isArray(children)) {
+				for (const child of children) {
+					const comp =
+						child && typeof child === "object" && "component" in child
+							? (child as { component?: unknown }).component
+							: child;
+					if (containsThis(comp)) return true;
+				}
+			}
+			return false;
+		};
+		const findPrecedingSibling = (node: unknown): unknown => {
+			if (!node || typeof node !== "object") return undefined;
+			const rawChildren = (node as { children?: unknown[] }).children;
+			if (!Array.isArray(rawChildren)) return undefined;
+			const comps = rawChildren.map((child) =>
+				child && typeof child === "object" && "component" in child
+					? (child as { component?: unknown }).component
+					: child,
+			);
+			for (let i = 0; i < comps.length; i += 1) {
+				const comp = comps[i];
+				if (comp === this) return i > 0 ? comps[i - 1] : undefined;
+				if (containsThis(comp)) {
+					const deeper = findPrecedingSibling(comp);
+					if (deeper !== undefined) return deeper;
+					return i > 0 ? comps[i - 1] : undefined;
+				}
+			}
+			return undefined;
+		};
+
+		const host = unwrapHostTui(this.tui) as unknown as {
+			layoutRoot?: unknown;
+			children?: unknown[];
+		};
+		const prevSibling =
+			(host.layoutRoot ? findPrecedingSibling(host.layoutRoot) : undefined) ??
+			findPrecedingSibling(host);
+		const widgetChildren = (prevSibling as { children?: unknown[] } | undefined)?.children;
+		if (!Array.isArray(widgetChildren) || widgetChildren.length === 0) return false;
+		return widgetChildren.some((child) => !isSpacerNode(child));
+	}
+
 	override render(width: number): string[] {
 		this.topHits = [];
 		this.bottomHits = [];
+		this.workingRowOffset = 0;
+		this.workingStatusRowY = -1;
+		this.workingStopHit = undefined;
 		if (width <= 0) return [""];
 		const bLine = (s: string) => this.paintBorder(s);
 		if (width === 1) return [bLine("╭"), bLine("│"), bLine("╰")];
@@ -1536,7 +1614,39 @@ export class PiUiComposerEditor extends CustomEditor {
 			}
 		}
 
-		const out: string[] = [this.renderRoundedTopBorder(boxWidth, outerPad)];
+		const out: string[] = [];
+		const activeIndicator = (
+			this as unknown as {
+				embedWorkingStatus?: boolean;
+				workingStatusIndicator?: {
+					kind?: string;
+					renderInBorder?: (maxWidth: number) => string;
+				};
+			}
+		).workingStatusIndicator;
+		if (activeIndicator?.kind === "working") {
+			const hasWidgetsAbove = this.hasNonSpacerAboveWidgets();
+			if (hasWidgetsAbove) {
+				out.push(" ".repeat(width));
+			}
+			const customText = isComposerWorkingSuppressed()
+				? activeIndicator.renderInBorder?.(Math.max(1, width - 8))
+				: undefined;
+			const renderedStatus = renderWorkingStatusRow(width, {
+				theme,
+				stopHovered: this.workingStopHovered,
+				customText,
+				onStop: () => this.abortActiveTurn(),
+			});
+			this.workingStatusRowY = out.length;
+			this.workingStopHit = renderedStatus.stopHit;
+			out.push(renderedStatus.line);
+			this.workingRowOffset = out.length;
+		} else {
+			this.workingStopHovered = false;
+		}
+
+		out.push(this.renderRoundedTopBorder(boxWidth, outerPad));
 
 		for (let i = 0; i < visibleRows; i++) {
 			const visualIdx = internal.scrollOffset + i;
@@ -1574,20 +1684,69 @@ export class PiUiComposerEditor extends CustomEditor {
 	override handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		const hooks = getComposerHooks();
 		const totalWidth = event.width ?? 80;
+
+		if (this.workingStatusRowY >= 0 && event.y === this.workingStatusRowY) {
+			const hit = this.workingStopHit;
+			const onStop = Boolean(hit && event.x >= hit.xStart && event.x < hit.xEnd);
+			if (event.type === "move") {
+				claimHover(this, () => {
+					if (this.workingStopHovered || this.editorHovered || this.hoveredBadge) {
+						this.workingStopHovered = false;
+						this.editorHovered = false;
+						this.hoveredBadge = null;
+						hooks?.onPointerOrCursorChange?.({ hovered: false }, this);
+						this.tui.requestRender();
+					}
+				});
+				const changed = this.workingStopHovered !== onStop || this.editorHovered || this.hoveredBadge !== null;
+				this.workingStopHovered = onStop;
+				this.editorHovered = false;
+				this.hoveredBadge = null;
+				return changed ? { handled: true, render: true } : undefined;
+			}
+			if (onStop && event.button === "left") {
+				if (event.type === "press") {
+					return { handled: true, render: false };
+				}
+				if (event.type === "click") {
+					hit!.onClick();
+					return { handled: true, render: true };
+				}
+			}
+			return undefined;
+		}
+
+		if (this.workingRowOffset > 0 && event.y < this.workingRowOffset) {
+			if (this.workingStopHovered || this.editorHovered || this.hoveredBadge) {
+				this.workingStopHovered = false;
+				this.editorHovered = false;
+				this.hoveredBadge = null;
+				hooks?.onPointerOrCursorChange?.({ hovered: false }, this);
+				return { handled: true, render: true };
+			}
+			return undefined;
+		}
+
+		const boxEvent: TuiMouseEvent =
+			this.workingRowOffset > 0 ? { ...event, y: event.y - this.workingRowOffset } : event;
 		const { compact, leftOffset, innerWidth, visualLines } = this.resolveBoxLayout(totalWidth);
 		const internal = this.internals();
 		const visibleRows = internal.renderedVisibleLineCount ?? 1;
 		const bottomBorderRow = visibleRows + 1;
 		const autocompleteStartRow = visibleRows + 2;
-		const inBox = event.y >= 0 && event.y < autocompleteStartRow;
+		const inBox = boxEvent.y >= 0 && boxEvent.y < autocompleteStartRow;
 		let hoverStateChanged = false;
+		if (this.workingStopHovered) {
+			this.workingStopHovered = false;
+			hoverStateChanged = true;
+		}
 
 		/* Локальная прокрутка переполненного черновика Composer с overscroll = "contain" */
-		if (event.type === "wheel" && event.wheelDelta && inBox) {
+		if (boxEvent.type === "wheel" && boxEvent.wheelDelta && inBox) {
 			if (visualLines.length > visibleRows) {
 				const maxScroll = Math.max(0, visualLines.length - visibleRows);
 				const prevScroll = internal.scrollOffset ?? 0;
-				const nextScroll = Math.max(0, Math.min(maxScroll, prevScroll + event.wheelDelta));
+				const nextScroll = Math.max(0, Math.min(maxScroll, prevScroll + boxEvent.wheelDelta));
 				const changed = nextScroll !== prevScroll;
 				this.manualScrollActive = true;
 				if (changed) {
@@ -1603,12 +1762,13 @@ export class PiUiComposerEditor extends CustomEditor {
 			return undefined;
 		};
 
-		if (event.type === "move") {
+		if (boxEvent.type === "move") {
 			if (inBox) {
 				claimHover(this, () => {
-					if (this.editorHovered || this.hoveredBadge) {
+					if (this.editorHovered || this.hoveredBadge || this.workingStopHovered) {
 						this.editorHovered = false;
 						this.hoveredBadge = null;
+						this.workingStopHovered = false;
 						hooks?.onPointerOrCursorChange?.({ hovered: false }, this);
 						this.tui.requestRender();
 					}
@@ -1616,15 +1776,15 @@ export class PiUiComposerEditor extends CustomEditor {
 				hooks?.onPointerOrCursorChange?.(
 					{
 						hovered: true,
-						mouseX: event.x,
-						mouseY: event.y,
-						screenX: event.screenX,
-						screenY: event.screenY,
+						mouseX: boxEvent.x,
+						mouseY: boxEvent.y,
+						screenX: boxEvent.screenX,
+						screenY: boxEvent.screenY,
 						width: totalWidth,
 					},
 					this,
 				);
-				const nextBadge = findBorderHit(event.x, event.y)?.id ?? null;
+				const nextBadge = findBorderHit(boxEvent.x, boxEvent.y)?.id ?? null;
 				if (!this.editorHovered || nextBadge !== this.hoveredBadge) {
 					this.editorHovered = true;
 					this.hoveredBadge = nextBadge;
@@ -1643,22 +1803,22 @@ export class PiUiComposerEditor extends CustomEditor {
 
 		/* Перехватываем press на пилюлях и зонах рамок, чтобы быстрый повторный клик (<500мс) не запускал выделение слова */
 		if (
-			event.type === "press" &&
-			event.button === "left" &&
-			(event.y === 0 || event.y === bottomBorderRow)
+			boxEvent.type === "press" &&
+			boxEvent.button === "left" &&
+			(boxEvent.y === 0 || boxEvent.y === bottomBorderRow)
 		) {
-			const hit = findBorderHit(event.x, event.y);
+			const hit = findBorderHit(boxEvent.x, boxEvent.y);
 			if (hit) {
 				return { handled: true, focus: true, render: false };
 			}
 		}
 
 		if (
-			event.type === "click" &&
-			event.button === "left" &&
-			(event.y === 0 || event.y === bottomBorderRow)
+			boxEvent.type === "click" &&
+			boxEvent.button === "left" &&
+			(boxEvent.y === 0 || boxEvent.y === bottomBorderRow)
 		) {
-			const hit = findBorderHit(event.x, event.y);
+			const hit = findBorderHit(boxEvent.x, boxEvent.y);
 			if (hit) {
 				hit.onClick();
 				return { handled: true, focus: true, render: true };
@@ -1666,9 +1826,9 @@ export class PiUiComposerEditor extends CustomEditor {
 			return { handled: true, focus: true };
 		}
 
-		if (event.type === "click" && event.y >= 1 && event.y <= visibleRows) {
+		if (boxEvent.type === "click" && boxEvent.y >= 1 && boxEvent.y <= visibleRows) {
 			this.manualScrollActive = false;
-			if (event.button === "left" && event.y === 1 && this.isDraftCompletelyEmpty()) {
+			if (boxEvent.button === "left" && boxEvent.y === 1 && this.isDraftCompletelyEmpty()) {
 				for (const featureHook of listAllComposerHooks()) {
 					if (featureHook.onEmptyPlaceholderClick?.(this)) {
 						return { handled: true, focus: true, render: true };
@@ -1678,31 +1838,31 @@ export class PiUiComposerEditor extends CustomEditor {
 		}
 
 		if (
-			event.y >= autocompleteStartRow &&
-			event.type !== "wheel" &&
-			(event.x < leftOffset || event.x >= leftOffset + innerWidth)
+			boxEvent.y >= autocompleteStartRow &&
+			boxEvent.type !== "wheel" &&
+			(boxEvent.x < leftOffset || boxEvent.x >= leftOffset + innerWidth)
 		) {
-			if (event.type === "click") {
+			if (boxEvent.type === "click") {
 				return { handled: true, focus: true, ...(hoverStateChanged ? { render: true } : {}) };
 			}
 			return hoverStateChanged ? { handled: true, render: true } : undefined;
 		}
 
 		const translatedWidth = compact ? Math.max(3, innerWidth) : innerWidth;
-		const translatedX = Math.max(0, Math.min(innerWidth, event.x - leftOffset));
+		const translatedX = Math.max(0, Math.min(innerWidth, boxEvent.x - leftOffset));
 		const superResult = super.handleMouse({
-			...event,
+			...boxEvent,
 			x: translatedX,
 			width: translatedWidth,
 		});
-		if (event.type === "click") {
+		if (boxEvent.type === "click") {
 			hooks?.onPointerOrCursorChange?.(
 				{
 					hovered: this.editorHovered,
-					mouseX: event.x,
-					mouseY: event.y,
-					screenX: event.screenX,
-					screenY: event.screenY,
+					mouseX: boxEvent.x,
+					mouseY: boxEvent.y,
+					screenX: boxEvent.screenX,
+					screenY: boxEvent.screenY,
 					width: totalWidth,
 				},
 				this,

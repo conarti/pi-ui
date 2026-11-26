@@ -289,7 +289,10 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 			const pendingTurn = harness.submitInput(`Stream probe ${themeMode}`);
 			await waitForCondition(() => activeStream !== undefined);
 			harness.flushFrame();
-			expect(harness.screen().rowText(findComposerTopRow(harness))).toContain("Working");
+			const workingRowText = harness.screen().rowText(findComposerTopRow(harness) - 1);
+			expect(workingRowText).toContain("✦ ");
+			expect(workingRowText).toContain("[stop]");
+			expect(workingRowText).not.toContain("esc to interrupt");
 			const streamingRgb = readComposerBorderRgb(harness);
 
 			const doneMsg: AssistantMessage = {

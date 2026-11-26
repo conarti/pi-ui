@@ -29,16 +29,16 @@ import { hookMethod } from "../../shared/runtime-hooks.ts";
 import { formatDurationMs, type RowStatus } from "./core.ts";
 import {
 	densityPalette,
+	formatAllGroupedSummary,
 	formatDensityDuration,
-	formatExploredSummary,
 } from "./density.ts";
-import { getTextResult } from "./invocation.ts";
+import { getTextResult, hasImageContent } from "./invocation.ts";
 import { outputPadLines } from "./layout.ts";
 import { chromePainter, paintIndicator } from "./palette.ts";
 import type { ToolRuntime } from "./runtime.ts";
 import { findChat, isKind, isSilent } from "./silent.ts";
 import { captureViewport } from "./viewport.ts";
-import type { ToolArgs } from "./types.ts";
+import type { ToolArgs, ToolDensity } from "./types.ts";
 
 /** Claude Code's words for each way of looking around, in the order it lists them. */
 const PHRASES: ReadonlyArray<{ kind: LookKind; running: string; done: string; singular: string; plural: string }> = [
@@ -215,6 +215,7 @@ export class ToolGroupComponent extends Container {
 		private readonly onToggle: (expanded: boolean) => void,
 		/** Lines beneath an opened group's members, which a click closes too. */
 		footer?: (width: number) => string[],
+		compactTree = false,
 	) {
 		super();
 		/* Сворачивание одной строки внутри раскрытой группы не должно закрывать всю группу целиком. */
@@ -259,63 +260,178 @@ export class ToolGroupComponent extends Container {
 			handleMouse: handleHeaderMouse,
 		} as Component);
 		if (!state.expanded) return;
-		for (const member of members) this.addChild(member as Component);
+		if (compactTree) {
+			/* В раскрытой группе пресетов Tool Density рисуем дочерние шаги компактным деревом `│ …` без пустых строк. */
+			for (const member of members) {
+				if (isKind(member, ToolExecutionComponent) || isKind(member, AssistantMessageComponent)) {
+					const comp = member as Component;
+					let strippedTopBlank = false;
+					this.addChild({
+						render: (w: number) => {
+							const innerW = Math.max(8, w - 2);
+							const rendered = comp.render(innerW);
+							strippedTopBlank =
+								rendered.length > 1 && stripTerminalSequences(rendered[0] ?? "").trim() === "";
+							const body = strippedTopBlank ? rendered.slice(1) : rendered;
+							const hostTheme = getActiveHostRuntime()?.ctx.ui.theme as Theme | undefined;
+							const guide = hostTheme ? densityPalette(hostTheme).rail(" │") : " │";
+							return body.map((line) => {
+								const trimmedLead = line.startsWith("  ")
+									? line.slice(1)
+									: line.startsWith(" ")
+										? line
+										: ` ${line}`;
+								return truncateToWidth(`${guide}${trimmedLead}`, Math.max(1, w), "…");
+							});
+						},
+						invalidate: () => comp.invalidate(),
+						handleMouse: (ev: unknown) => {
+							if (typeof (comp as { handleMouse?: (e: unknown) => unknown }).handleMouse !== "function") {
+								return undefined;
+							}
+							const mouseEv = ev as { x?: number; y?: number; width?: number };
+							return (comp as { handleMouse: (e: unknown) => unknown }).handleMouse({
+								...mouseEv,
+								...(typeof mouseEv.x === "number" ? { x: Math.max(0, mouseEv.x - 2) } : {}),
+								...(typeof mouseEv.y === "number"
+									? { y: mouseEv.y + (strippedTopBlank ? 1 : 0) }
+									: {}),
+								...(typeof mouseEv.width === "number"
+									? { width: Math.max(8, mouseEv.width - 2) }
+									: {}),
+							});
+						},
+					} as Component);
+				} else if (!isKind(member, Spacer)) {
+					this.addChild(member as Component);
+				}
+			}
+		} else {
+			for (const member of members) this.addChild(member as Component);
+		}
 		if (footer) this.addChild({ render: footer, invalidate() {}, handleMouse: handleFooterMouse } as Component);
 	}
 }
 
 export type GroupStyle = "density" | "claude" | "codex";
+export type GroupBucket = "all" | "explore" | "edit" | "command" | "custom";
 
-function isGroupable(child: unknown, style: GroupStyle = "claude"): child is ToolRowLike {
-	if (!isKind(child, ToolExecutionComponent)) return false;
-	return style === "codex" ? exploreOf(child as ToolRowLike) !== undefined : kindOf(child as ToolRowLike) !== undefined;
+function resolveRowGroupBucket(
+	child: unknown,
+	style: GroupStyle,
+	density: ToolDensity = "balanced",
+): GroupBucket | undefined {
+	if (!isKind(child, ToolExecutionComponent)) return undefined;
+	const row = child as ToolRowLike;
+	/* Строки с инлайн-изображениями никогда не складываем в свёрнутую текстовую группу. */
+	if (hasImageContent(row.result)) return undefined;
+
+	if (style === "codex") {
+		return exploreOf(row) !== undefined ? "explore" : undefined;
+	}
+	if (style === "claude") {
+		return kindOf(row) !== undefined ? "explore" : undefined;
+	}
+	if (density === "compact") {
+		return "all";
+	}
+	if (density === "grouped") {
+		if (kindOf(row) !== undefined) return "explore";
+		if (row.toolName === "edit" || row.toolName === "write") return "edit";
+		if (
+			row.toolName === "bash" ||
+			row.toolName === "powershell" ||
+			row.toolName === "codemode"
+		) {
+			return "command";
+		}
+		return "custom";
+	}
+	return kindOf(row) !== undefined ? "explore" : undefined;
 }
 
-type AssistantLike = { lastMessage?: { content?: Array<{ type: string; text?: string }> } };
+type AssistantLike = {
+	isStreaming?: boolean;
+	thinkingVisibilityOverrides?: Map<number, boolean>;
+	lastMessage?: { content?: Array<{ type: string; text?: string; thinking?: string }> };
+};
 
-/** A turn with no text for the reader: it only thought, then handed off to tools. */
+function isUnexpandedTextlessAssistant(child: unknown): AssistantLike | undefined {
+	if (!isKind(child, AssistantMessageComponent)) return undefined;
+	const assistant = child as AssistantLike;
+	/* Стримящийся или вручную раскрытый Thinking не сворачиваем внутрь группы. */
+	if (assistant.isStreaming) return undefined;
+	if (assistant.thinkingVisibilityOverrides) {
+		for (const hidden of assistant.thinkingVisibilityOverrides.values()) {
+			if (hidden === false) return undefined;
+		}
+	}
+	const content = assistant.lastMessage?.content ?? [];
+	if (content.some((block) => block.type === "text" && block.text?.trim())) return undefined;
+	return assistant;
+}
+
+/** Текстово-пустой шаг ассистента с реальным блоком `thinking`, который можно сложить в Compact-группу. */
 function isThinkingOnly(child: unknown): boolean {
-	if (!isKind(child, AssistantMessageComponent)) return false;
-	const content = (child as AssistantLike).lastMessage?.content ?? [];
-	return !content.some((block) => block.type === "text" && block.text?.trim());
+	const assistant = isUnexpandedTextlessAssistant(child);
+	if (!assistant) return false;
+	const content = assistant.lastMessage?.content ?? [];
+	return content.some((block) => block.type === "thinking" && block.thinking?.trim());
 }
 
 /**
- * What may sit between two calls of one group: a turn that only thought, and the
- * status lines Pi writes into the chat itself, such as "Tool output: collapsed".
+ * What may sit between two calls of one group: a settled turn that only thought
+ * or only dispatched tool calls, and the status lines Pi writes into the chat itself.
  */
 function isFoldable(child: unknown): boolean {
-	return isThinkingOnly(child) || isKind(child, Text) || isKind(child, Spacer);
+	return isUnexpandedTextlessAssistant(child) !== undefined || isKind(child, Text) || isKind(child, Spacer);
 }
 
 /**
- * Replace each run of reads, searches, and listings with one group. What sits
- * between two of them folds into the group, as Claude Code keeps thinking out
- * of the way; anything else, text, a command, an edit, ends the run.
+ * Replace runs of groupable tool calls with summary groups according to active Tool Density.
  */
 export function groupChildren(
 	children: readonly unknown[],
 	makeGroup: (rows: ToolRowLike[], members: unknown[]) => Component,
 	style: GroupStyle = "claude",
+	density: ToolDensity = "balanced",
 ): unknown[] {
 	const grouped: unknown[] = [];
 	let rows: ToolRowLike[] = [];
 	let members: unknown[] = [];
 	let pending: unknown[] = [];
+	let leadingThinking: unknown[] = [];
+	let currentBucket: GroupBucket | undefined;
+	const allowLeadThinkingFold = style === "density" && density === "compact";
+
 	const flush = () => {
-		if (style === "density" && rows.length === 1) {
-			grouped.push(...members);
+		const hasLeadThought = leadingThinking.some((item) => isThinkingOnly(item));
+		if (style === "density" && rows.length === 1 && !hasLeadThought) {
+			grouped.push(...leadingThinking, ...members);
 		} else if (rows.length > 0) {
-			grouped.push(makeGroup(rows, members));
+			grouped.push(makeGroup(rows, [...leadingThinking, ...members]));
+		} else if (leadingThinking.length > 0) {
+			grouped.push(...leadingThinking);
 		}
 		rows = [];
 		members = [];
+		leadingThinking = [];
+		currentBucket = undefined;
 	};
 	for (const child of children) {
-		if (isGroupable(child, style)) {
-			rows.push(child);
+		const bucket = resolveRowGroupBucket(child, style, density);
+		if (bucket !== undefined) {
+			if (currentBucket !== undefined && currentBucket !== bucket) {
+				flush();
+			}
+			currentBucket = bucket;
+			rows.push(child as ToolRowLike);
 			members.push(...pending, child);
 			pending = [];
+			continue;
+		}
+		if (rows.length === 0 && allowLeadThinkingFold && isFoldable(child)) {
+			leadingThinking.push(child);
 			continue;
 		}
 		if (rows.length > 0 && isFoldable(child)) {
@@ -356,7 +472,12 @@ export class ToolGroupController {
 				const children = self.children as unknown[];
 				this.paint = this.resolvePaint();
 				openExplorations.clear();
-				self.children = groupChildren(children, (rows, members) => this.makeGroup(rows, members, resolvedHost.tui), style);
+				self.children = groupChildren(
+					children,
+					(rows, members) => this.makeGroup(rows, members, resolvedHost.tui),
+					style,
+					this.runtime.config.density,
+				);
 				try {
 					return original.apply(self, args);
 				} finally {
@@ -395,9 +516,23 @@ export class ToolGroupController {
 		const groupState = state;
 		const draw = (group: readonly ToolRowLike[], width: number, expanded: boolean) => {
 			const pad = group[0]?.outputPad;
-			return outputPadLines(this.drawCached(group, width + (pad === 0 ? 1 : 0), expanded, groupState), width, pad);
+			return outputPadLines(
+				this.drawCached(group, width + (pad === 0 ? 1 : 0), expanded, groupState, members),
+				width,
+				pad,
+			);
 		};
-		if (this.runtime.config.style !== "codex") return new ToolGroupComponent(rows, members, state, draw, () => tui.requestRender());
+		if (this.runtime.config.style !== "codex") {
+			return new ToolGroupComponent(
+				rows,
+				members,
+				state,
+				draw,
+				() => tui.requestRender(),
+				undefined,
+				this.runtime.config.style === "density",
+			);
+		}
 		// Codex opens a group to the whole of each call, and closes it from one "− Show less" beneath them.
 		const toggle = (expanded: boolean) => {
 			for (const row of rows) row.setExpanded?.(expanded);
@@ -425,7 +560,10 @@ export class ToolGroupController {
 		const theme = this.context?.ui.theme;
 		if (!theme) return undefined;
 		const chrome = chromePainter(theme);
-		const densityKey = this.runtime.config.style === "density" ? densityPalette(theme).key : "";
+		const densityKey =
+			this.runtime.config.style === "density"
+				? `${this.runtime.config.density}:${densityPalette(theme).key}`
+				: "";
 		// The style is part of the key: a group drawn in one style is never reused in another.
 		const key =
 			this.runtime.config.style +
@@ -441,12 +579,18 @@ export class ToolGroupController {
 	 * expansion, or the theme changes, so those lines are kept. A running group's
 	 * line pulses and counts time, so it is drawn every frame.
 	 */
-	private drawCached(rows: readonly ToolRowLike[], width: number, expanded: boolean, state: GroupState): string[] {
+	private drawCached(
+		rows: readonly ToolRowLike[],
+		width: number,
+		expanded: boolean,
+		state: GroupState,
+		members: readonly unknown[] = rows,
+	): string[] {
 		const paint = this.paint ?? this.resolvePaint();
 		if (!paint) return [];
-		if (lastRunning(rows, this.canRun)) return this.draw(rows, width, expanded, paint);
+		if (lastRunning(rows, this.canRun)) return this.draw(rows, width, expanded, paint, members);
 		if (state.header && headerStill(state.header, rows, paint.key, width, expanded)) return state.header.lines;
-		const lines = this.draw(rows, width, expanded, paint);
+		const lines = this.draw(rows, width, expanded, paint, members);
 		state.header = {
 			paint: paint.key,
 			width,
@@ -462,8 +606,16 @@ export class ToolGroupController {
 	}
 
 	/** Claude's quiet completed exploration; active and interrupted calls keep a status cue. */
-	private draw(rows: readonly ToolRowLike[], width: number, expanded: boolean, paint: Paint): string[] {
-		if (this.runtime.config.style === "density") return this.drawDensity(rows, width, expanded, paint);
+	private draw(
+		rows: readonly ToolRowLike[],
+		width: number,
+		expanded: boolean,
+		paint: Paint,
+		members: readonly unknown[] = rows,
+	): string[] {
+		if (this.runtime.config.style === "density") {
+			return this.drawDensity(rows, width, expanded, paint, members);
+		}
 		if (this.runtime.config.style === "codex") return this.drawCodex(rows, width, expanded, paint);
 		// Ctrl+O replaces the summary with individual calls, as Claude's transcript
 		// does. A locally clicked group retains its header as a collapse target.
@@ -546,7 +698,13 @@ export class ToolGroupController {
 		return lines;
 	}
 
-	private drawDensity(rows: readonly ToolRowLike[], width: number, expanded: boolean, paint: Paint): string[] {
+	private drawDensity(
+		rows: readonly ToolRowLike[],
+		width: number,
+		expanded: boolean,
+		paint: Paint,
+		members: readonly unknown[] = rows,
+	): string[] {
 		const pal = densityPalette(paint.theme);
 		const fit = (line: string) => truncateToWidth(line, Math.max(1, width), "…");
 		const running = lastRunning(rows, this.canRun);
@@ -560,17 +718,31 @@ export class ToolGroupController {
 			}
 		}
 
+		const failedCount = statuses.filter((s) => s === "error").length;
+		const allFailed = failedCount > 0 && failedCount === rows.length;
+		/* При частичной ошибке заголовок остаётся нейтральным; красным красится только счётчик `N failed`. */
 		const status: RowStatus = running
 			? "running"
-			: statuses.includes("error")
+			: allFailed
 				? "error"
 				: statuses.includes("pending")
 					? "pending"
 					: "success";
 
-		const summary = formatExploredSummary(rows, this.canRun);
+		const groupedInfo = formatAllGroupedSummary(rows, this.canRun);
 		const diamond = pal.diamond(status, expanded);
-		const styledSummary = pal.title(summary, status, expanded);
+		const styledSummary = pal.title(groupedInfo.summary, status, expanded);
+		const foldedThoughts =
+			this.runtime.config.density === "compact"
+				? members.filter((member) => isThinkingOnly(member)).length
+				: 0;
+
+		let diffBadge = "";
+		if (groupedInfo.changes && !running) {
+			const plus = pal.theme.fg("toolDiffAdded", `+${groupedInfo.changes.added}`);
+			const minus = pal.theme.fg("toolDiffRemoved", `-${groupedInfo.changes.removed}`);
+			diffBadge = ` ${plus} ${minus}`;
+		}
 
 		let meta = "";
 		if (running) {
@@ -579,7 +751,6 @@ export class ToolGroupController {
 			const dur = elapsed >= 1000 ? formatDensityDuration(elapsed) : undefined;
 			if (dur) meta = ` ${pal.dim(`(${dur})`)}`;
 		} else {
-			const failedCount = statuses.filter((s) => s === "error").length;
 			let totalMs = 0;
 			let hasDuration = false;
 			for (const row of rows) {
@@ -598,13 +769,24 @@ export class ToolGroupController {
 					hasDuration = true;
 				}
 			}
-			const parts: string[] = [];
-			if (failedCount > 0) parts.push(`${failedCount} failed`);
+			const styledParts: string[] = [];
+			if (foldedThoughts > 0) {
+				styledParts.push(pal.dim(`${foldedThoughts} ${foldedThoughts === 1 ? "thought" : "thoughts"}`));
+			}
+			if (failedCount > 0) {
+				styledParts.push(
+					allFailed
+						? pal.dim(`${failedCount} failed`)
+						: pal.theme.fg("error", `${failedCount} failed`),
+				);
+			}
 			const dur = hasDuration ? formatDensityDuration(totalMs) : undefined;
-			if (dur) parts.push(dur);
-			if (parts.length > 0) meta = ` ${pal.dim(`(${parts.join(" · ")})`)}`;
+			if (dur) styledParts.push(pal.dim(dur));
+			if (styledParts.length > 0) {
+				meta = ` ${pal.dim("(")}${styledParts.join(pal.dim(" · "))}${pal.dim(")")}`;
+			}
 		}
 
-		return ["", fit(` ${diamond} ${styledSummary}${meta}`)];
+		return ["", fit(` ${diamond} ${styledSummary}${diffBadge}${meta}`)];
 	}
 }

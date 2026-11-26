@@ -1,19 +1,46 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import {
 	BREATHING_FPS,
 	BREATHING_PERIOD_MS,
 	BREATHING_TICK_MS,
+	POLARIS_SECONDARY,
+	POLARIS_STAR,
 	WAVE_ROWS,
+	computeGlimmerPeriodMs,
 	getAnimationElapsedMs,
 	paintBreathingWaveGlyph,
+	paintGlimmerSweepText,
 	paintRunningCommandBar,
 	paintRunningToolDiamond,
 	renderComposerWorkingFrame,
 	sampleBreathingWaveRgb,
+	sampleGlimmerSweepRgb,
 	stopAllAnimations,
 	subscribeAnimationTicks,
 } from "../src/shared/animation-scheduler.ts";
-import { formatThinkingDuration, formatThoughtLabel } from "../src/features/transcript/thinking-block.ts";
+import { parseAnsiColorRgb, rgbHueDegrees } from "../src/shared/ansi.ts";
+import { TOOL_DIAMOND, indicatorGlyph } from "../src/features/tool-calls/core.ts";
+import {
+	STREAMING_THINKING_PAGE_LINES,
+	STREAMING_THINKING_PAGE_STEP,
+	computeThinkingWindow,
+	formatThinkingDuration,
+	formatThinkingProseLines,
+	formatThoughtLabel,
+	reduceThinkingWheelScroll,
+	registerThinkingDisplayProvider,
+	resolveThinkingDisplayText,
+} from "../src/features/transcript/thinking-block.ts";
+import {
+	WORKING_CONTEXTUAL_HOLD_MS,
+	WORKING_TOOL_COMPLETION_HOLD_MS,
+	WORKING_VERBS,
+	WorkingStatusController,
+	extractThinkingHeading,
+	formatWorkingToolAction,
+	renderWorkingStatusRow,
+} from "../src/features/chrome/working-indicator.ts";
 import { loadPackageThemes } from "./harness/index.ts";
 
 describe("animation-scheduler (30 fps monotonic clock)", () => {
@@ -98,22 +125,100 @@ describe("animation-scheduler (30 fps monotonic clock)", () => {
 			}
 		}
 
+		expect(POLARIS_STAR).toBe("✦");
+		expect(POLARIS_SECONDARY).toBe("•");
+		expect(TOOL_DIAMOND).toBe("✦");
+		expect(indicatorGlyph("running", 0)).toBe("✦");
+		expect(indicatorGlyph("success", 0)).toBe("✦");
+
 		expect(paintBreathingWaveGlyph(0, "┃", { theme: darkTheme, elapsedMs: 0 })).toBe(
 			"\x1b[38;2;125;207;255m┃\x1b[39m",
 		);
 		expect(paintRunningToolDiamond({ theme: darkTheme, elapsedMs: 1200 })).toBe(
-			"\x1b[38;2;64;82;112m◆\x1b[39m",
+			"\x1b[38;2;64;82;112m✦\x1b[39m",
 		);
 		expect(paintRunningCommandBar(8, { theme: lightTheme, elapsedMs: 0 })).toBe(
 			"\x1b[38;2;78;132;212m▎\x1b[39m",
 		);
 		expect(renderComposerWorkingFrame({ theme: lightTheme, elapsedMs: 0 })).toBe(
-			"\x1b[38;2;37;99;235m◆\x1b[39m",
+			"\x1b[38;2;37;99;235m✦\x1b[39m",
 		);
 
 		expect(sampleBreathingWaveRgb(Number.NaN, { theme: darkTheme, elapsedMs: Number.NaN })).toEqual([
 			125, 207, 255,
 		]);
+	});
+
+	it("paints a 30 fps asymmetric caustic wave with C∞ cycle continuity, zero inner SGR resets, and strict blue-azure hue bounds on dark and light themes", async () => {
+		const { dark: darkTheme, light: lightTheme } = await loadPackageThemes();
+		const sample = "✦ Tinkering through modules…";
+		const periodMs = computeGlimmerPeriodMs(sample);
+		expect(periodMs).toBeGreaterThanOrEqual(1900);
+
+		for (const theme of [darkTheme, lightTheme]) {
+			const frame0 = paintGlimmerSweepText(sample, { theme, elapsedMs: 0 });
+			const frameEnd = paintGlimmerSweepText(sample, { theme, elapsedMs: periodMs });
+			expect(stripTerminalSequences(frame0)).toBe(sample);
+			expect(frameEnd).toBe(frame0);
+
+			/* Прямая ANSI-покраска: допускается только один завершающий \x1b[39m без внутренних сбросов */
+			const innerBody = frame0.endsWith("\x1b[39m") ? frame0.slice(0, -"\x1b[39m".length) : frame0;
+			expect(innerBody.includes("\x1b[39m")).toBe(false);
+
+			/* Плавность перехода через границу цикла (t = periodMs - 33 -> t = 0) */
+			const spanChars = [...sample].length;
+			for (let idx = 0; idx < spanChars; idx += 1) {
+				const beforeWrap = sampleGlimmerSweepRgb(idx, spanChars, {
+					theme,
+					elapsedMs: periodMs - BREATHING_TICK_MS,
+				});
+				const atWrap = sampleGlimmerSweepRgb(idx, spanChars, { theme, elapsedMs: 0 });
+				const maxDelta = Math.max(
+					Math.abs(beforeWrap[0] - atWrap[0]),
+					Math.abs(beforeWrap[1] - atWrap[1]),
+					Math.abs(beforeWrap[2] - atWrap[2]),
+				);
+				expect(maxDelta).toBeLessThanOrEqual(28);
+			}
+
+			/* Строго сине-лазурный диапазон оттенков без фиолетового (255°-320°) и бирюзового (165°-198°) */
+			for (let step = 0; step < 12; step += 1) {
+				const elapsedMs = Math.round((periodMs * step) / 12);
+				const painted = paintGlimmerSweepText(sample, { theme, elapsedMs });
+				const inner = painted.endsWith("\x1b[39m") ? painted.slice(0, -5) : painted;
+				expect(inner.includes("\x1b[39m")).toBe(false);
+
+				const colorMatches = [...painted.matchAll(/\x1b\[38;2;\d+;\d+;\d+m/g)];
+				expect(colorMatches.length).toBeGreaterThan(4);
+				for (const m of colorMatches) {
+					const rgb = parseAnsiColorRgb(m[0]);
+					expect(rgb).toBeDefined();
+					const { hue, saturation } = rgbHueDegrees(rgb!);
+					if (saturation > 0.04) {
+						const inTurquoise = hue >= 165 && hue <= 198;
+						const inPurple = hue >= 255 && hue <= 320;
+						expect(inTurquoise, `turquoise hue ${hue.toFixed(1)} for ${m[0]}`).toBe(false);
+						expect(inPurple, `purple hue ${hue.toFixed(1)} for ${m[0]}`).toBe(false);
+						expect(hue).toBeGreaterThan(198);
+						expect(hue).toBeLessThan(255);
+					}
+				}
+			}
+		}
+
+		/* Проверка поддержки 256color без внутренних сбросов */
+		const prevTrueColor = process.env.PI_TRUE_COLOR;
+		process.env.PI_TRUE_COLOR = "0";
+		try {
+			const painted256 = paintGlimmerSweepText(sample, { light: false, elapsedMs: 420 });
+			expect(stripTerminalSequences(painted256)).toBe(sample);
+			expect(painted256).toContain("\x1b[38;5;");
+			const inner256 = painted256.endsWith("\x1b[39m") ? painted256.slice(0, -5) : painted256;
+			expect(inner256.includes("\x1b[39m")).toBe(false);
+		} finally {
+			if (prevTrueColor === undefined) delete process.env.PI_TRUE_COLOR;
+			else process.env.PI_TRUE_COLOR = prevTrueColor;
+		}
 	});
 
 	it("notifies subscriber onStop hooks when stopAllAnimations forcibly detaches active ticks", () => {
@@ -155,5 +260,170 @@ describe("animation-scheduler (30 fps monotonic clock)", () => {
 		expect(formatThoughtLabel(undefined)).toBe("Thought");
 		expect(formatThoughtLabel(4200)).toBe("Thought for 4s");
 		expect(formatThoughtLabel(75_000)).toBe("Thought for 1m 15s");
+	});
+
+	it("samples 1 verb per turn, extracts thinking headings and toolSummary actions with anti-flicker holds, switches to Drafting…, and formats the x=4 working row with clickable [stop]", async () => {
+		expect(WORKING_CONTEXTUAL_HOLD_MS).toBe(4500);
+		expect(WORKING_TOOL_COMPLETION_HOLD_MS).toBe(1800);
+		expect(WORKING_VERBS.length).toBeGreaterThanOrEqual(16);
+		for (const verb of WORKING_VERBS) {
+			expect(verb.endsWith("ing…")).toBe(true);
+		}
+
+		expect(extractThinkingHeading("Regular prose without a heading")).toBeUndefined();
+		expect(extractThinkingHeading("**Inspecting layout hooks**\nChecking details")).toBe(
+			"Inspecting layout hooks…",
+		);
+		expect(extractThinkingHeading("### Auditing wheel routing\nDetails\n```\n### Ignored fence\n```")).toBe(
+			"Auditing wheel routing…",
+		);
+
+		expect(
+			formatWorkingToolAction("bash", { command: "npm test", toolSummary: "Running unit tests" }, "/repo"),
+		).toBe("Running unit tests…");
+		expect(
+			formatWorkingToolAction("read", { path: "/repo/src/shared/ansi.ts" }, "/repo"),
+		).toBe("Reading src/shared/ansi.ts…");
+		expect(
+			formatWorkingToolAction("edit", { path: "/repo/src/index.ts" }, "/repo"),
+		).toBe("Editing src/index.ts…");
+
+		const ctrl = new WorkingStatusController();
+		ctrl.beginTurn(1000);
+		const snap0 = ctrl.snapshot(1000);
+		expect(snap0.active).toBe(true);
+		expect(WORKING_VERBS).toContain(snap0.label);
+
+		/* Один глагол на ход во время TTFT и неразмеченного мышления */
+		ctrl.onThinkingDelta("Plain untitled thought", 6000);
+		expect(ctrl.snapshot(6000).label).toBe(snap0.label);
+
+		/* Заголовок из thinking_delta удерживается минимум 4.5s */
+		ctrl.onThinkingDelta("**Tracing animation timers**\nDetails", 7000);
+		expect(ctrl.snapshot(7000).label).toBe("Tracing animation timers…");
+		ctrl.onThinkingDelta("**Tracing animation timers**\n\n**Second heading too soon**", 9000);
+		expect(ctrl.snapshot(9000).label).toBe("Tracing animation timers…");
+		ctrl.onThinkingDelta("**Tracing animation timers**\n\n**Second heading after hold**", 11_600);
+		expect(ctrl.snapshot(11_600).label).toBe("Second heading after hold…");
+
+		/* Выполнение инструмента: >= 4.5s hold + 1.8s completion hold */
+		ctrl.onToolStart("call-1", "read", { path: "/repo/src/a.ts", toolSummary: "Inspecting module A" }, "/repo", 16_500);
+		expect(ctrl.snapshot(16_500).label).toBe("Inspecting module A…");
+		ctrl.onToolStart("call-2", "read", { path: "/repo/src/b.ts" }, "/repo", 18_000);
+		expect(ctrl.snapshot(18_000).label).toBe("Inspecting module A…");
+		ctrl.onToolEnd("call-1", 19_000);
+		ctrl.onToolEnd("call-2", 19_000);
+		expect(ctrl.snapshot(20_000).label).toBe("Inspecting module A…");
+		expect(ctrl.snapshot(20_900).label).toBe(snap0.label);
+
+		/* Финальный текст немедленно переключается на Drafting… */
+		ctrl.onTextStream(21_000);
+		expect(ctrl.snapshot(21_000).label).toBe("Drafting…");
+
+		/* Строка статуса: ✦ на x=4, справа <elapsed> [stop], без (esc to interrupt) и ↓tokens */
+		const { dark: darkTheme } = await loadPackageThemes();
+		const rendered = renderWorkingStatusRow(80, {
+			theme: darkTheme,
+			snapshot: ctrl.snapshot(22_400),
+			animElapsedMs: 330,
+		});
+		const plain = stripTerminalSequences(rendered.line);
+		expect(plain.indexOf("✦")).toBe(4);
+		expect(plain).toContain("✦ Drafting…");
+		expect(plain).toContain("21s [stop]");
+		expect(plain).not.toContain("esc to interrupt");
+		expect(plain).not.toContain("↓");
+		expect(rendered.stopHit).toBeDefined();
+		expect(plain.slice(rendered.stopHit!.xStart, rendered.stopHit!.xEnd)).toBe("[stop]");
+
+		ctrl.endTurn();
+		expect(ctrl.snapshot(23_000).active).toBe(false);
+	});
+
+	it("paginates streaming Thinking in 6-line windows with 3-line steps, handles wheel pause/resume, formats fence-stripped prose, and routes through ThinkingDisplayProvider", () => {
+		expect(STREAMING_THINKING_PAGE_LINES).toBe(6);
+		expect(STREAMING_THINKING_PAGE_STEP).toBe(3);
+
+		/* 1..6 строк помещаются без сдвига */
+		expect(computeThinkingWindow(4, 0)).toEqual({
+			startIndex: 0,
+			endIndex: 4,
+			hiddenAbove: 0,
+			scrollFromBottom: 0,
+			isPaused: false,
+		});
+		expect(computeThinkingWindow(6, 0)).toEqual({
+			startIndex: 0,
+			endIndex: 6,
+			hiddenAbove: 0,
+			scrollFromBottom: 0,
+			isPaused: false,
+		});
+
+		/* Шаг 3 строки: 7..9 скрывают ровно 3 строки, 10 скрывает 6 */
+		expect(computeThinkingWindow(7, 0)).toEqual({
+			startIndex: 3,
+			endIndex: 7,
+			hiddenAbove: 3,
+			scrollFromBottom: 0,
+			isPaused: false,
+		});
+		expect(computeThinkingWindow(9, 0)).toEqual({
+			startIndex: 3,
+			endIndex: 9,
+			hiddenAbove: 3,
+			scrollFromBottom: 0,
+			isPaused: false,
+		});
+		expect(computeThinkingWindow(10, 0)).toEqual({
+			startIndex: 6,
+			endIndex: 10,
+			hiddenAbove: 6,
+			scrollFromBottom: 0,
+			isPaused: false,
+		});
+
+		/* Колесо вверх ставит на паузу, вниз возвращает к живому хвосту на 0 */
+		const afterUp1 = reduceThinkingWheelScroll({ totalLines: 12, scrollFromBottom: 0 }, -2);
+		expect(afterUp1).toBe(2);
+		expect(computeThinkingWindow(12, afterUp1)).toEqual({
+			startIndex: 4,
+			endIndex: 10,
+			hiddenAbove: 4,
+			scrollFromBottom: 2,
+			isPaused: true,
+		});
+		const afterUpClamp = reduceThinkingWheelScroll({ totalLines: 12, scrollFromBottom: afterUp1 }, -20);
+		expect(afterUpClamp).toBe(6);
+		const afterDownResume = reduceThinkingWheelScroll({ totalLines: 12, scrollFromBottom: afterUpClamp }, 10);
+		expect(afterDownResume).toBe(0);
+		expect(computeThinkingWindow(12, afterDownResume).isPaused).toBe(false);
+
+		/* Проза без code fences с мягкой подсветкой inline code */
+		const prose = formatThinkingProseLines(
+			"### Step\nCheck `parseToken` in **auth.ts**\n```ts\nconst x = 1;\n```",
+			60,
+			false,
+		);
+		const plainProse = prose.map((l) => stripTerminalSequences(l));
+		expect(plainProse).toContain("Step");
+		expect(plainProse).toContain("Check parseToken in auth.ts");
+		expect(plainProse).toContain("const x = 1;");
+		expect(plainProse.join("\n")).not.toContain("```");
+		const codeLine = prose.find((l) => stripTerminalSequences(l).includes("parseToken"))!;
+		expect(codeLine).toContain("\x1b[38;2;132;168;206mparseToken");
+
+		/* ThinkingDisplayProvider без мутации исходных данных */
+		try {
+			registerThinkingDisplayProvider({
+				transformStreaming: (raw, key) => `[stream:${key}] ${raw}`,
+				transformCompleted: (raw, key) => `[done:${key}] ${raw}`,
+			});
+			expect(resolveThinkingDisplayText("raw thought", "100:0", true)).toBe("[stream:100:0] raw thought");
+			expect(resolveThinkingDisplayText("raw thought", "100:0", false)).toBe("[done:100:0] raw thought");
+		} finally {
+			registerThinkingDisplayProvider(undefined);
+		}
+		expect(resolveThinkingDisplayText("raw thought", "100:0", true)).toBe("raw thought");
 	});
 });

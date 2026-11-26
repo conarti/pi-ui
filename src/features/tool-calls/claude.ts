@@ -3,7 +3,9 @@ import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { normalizeLineEndings } from "./core.ts";
 import {
 	countEditChanges,
+	formatImageResultSummary,
 	formatResultLineSummary,
+	hasImageContent,
 	summarizeCustomArguments,
 	summarizeFailure,
 } from "./invocation.ts";
@@ -285,7 +287,10 @@ export function claudeOutcome(
 	const lines = countOf(formatResultLineSummary(name, args, result, output));
 	const count = (value: number, singular: string) => `${bold(String(value))} ${plural(value, singular)}`;
 	switch (name) {
-		case "read": return result.content.some((block) => block.type === "image") ? "Read image" : `Read ${count(lines, "line")}`;
+		case "read":
+			return hasImageContent(result)
+				? (formatImageResultSummary(result) ?? "image")
+				: `Read ${count(lines, "line")}`;
 		case "grep": return `Found ${count(lines, "line")}`;
 		case "find": return `Found ${count(lines, "file")}`;
 		case "ls": return `Listed ${count(lines, "path")}`;

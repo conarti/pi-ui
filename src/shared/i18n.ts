@@ -280,6 +280,13 @@ export const EN_MESSAGES = {
 	"askUser.questionSingular": "question",
 	"askUser.questionPlural": "questions",
 	"askUser.cancelled": "Questionnaire cancelled",
+	/* Working Status & Thinking */
+	"working.drafting": "Drafting…",
+	"working.stop": "[stop]",
+	"thinking.streaming": "Thinking…",
+	"thinking.thought": "Thought",
+	"thinking.thoughtFor": "Thought for {duration}",
+
 	"askUser.notePrefix": "Note: {note}",
 	"askUser.globalNotePrefix": "Global note: {note}",
 	"askUser.wantsToChat": "User wants to chat about this",
