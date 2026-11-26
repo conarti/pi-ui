@@ -106,6 +106,8 @@ export async function showQuotesManagerModal(
 			let mode: "inspect" | "edit" = "inspect";
 			let editingQuoteNumber: number | undefined;
 			let editBuffer: Editor | undefined;
+			const editUndoStack: string[] = [];
+			const editRedoStack: string[] = [];
 
 			const getItems = (): ActiveDraftQuoteItem[] =>
 				listActiveDraftQuotes(registry, readComposerDraftText(ctx));
@@ -119,6 +121,8 @@ export async function showQuotesManagerModal(
 				const ed = new Editor(tui, createEmbeddedEditorTheme(theme), { paddingX: 0 });
 				ed.focused = true;
 				ed.setText(item.entry.text);
+				editUndoStack.length = 0;
+				editRedoStack.length = 0;
 				editBuffer = ed;
 				mode = "edit";
 				return true;
@@ -417,6 +421,24 @@ export async function showQuotesManagerModal(
 							tui.requestRender();
 							return;
 						}
+						if (matchesLayoutChord(data, "ctrl+shift+z") || matchesLayoutChord(data, "ctrl+y")) {
+							const redoText = editRedoStack.pop();
+							if (redoText !== undefined) {
+								editUndoStack.push(editBuffer.getText());
+								editBuffer.setText(redoText);
+								tui.requestRender();
+							}
+							return;
+						}
+						if (matchesLayoutChord(data, "ctrl+z")) {
+							const undoText = editUndoStack.pop();
+							if (undoText !== undefined) {
+								editRedoStack.push(editBuffer.getText());
+								editBuffer.setText(undoText);
+								tui.requestRender();
+							}
+							return;
+						}
 						const isCommit =
 							data === "\r" ||
 							data === "\n" ||
@@ -428,7 +450,14 @@ export async function showQuotesManagerModal(
 							tui.requestRender();
 							return;
 						}
+						const beforeText = editBuffer.getText();
 						editBuffer.handleInput(data);
+						const afterText = editBuffer.getText();
+						if (afterText !== beforeText) {
+							editUndoStack.push(beforeText);
+							if (editUndoStack.length > 100) editUndoStack.shift();
+							editRedoStack.length = 0;
+						}
 						tui.requestRender();
 						return;
 					}

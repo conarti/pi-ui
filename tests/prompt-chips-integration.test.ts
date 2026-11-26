@@ -879,9 +879,9 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await flushClipboardAction(harness);
 		await harness.pressKey("\x16");
 		await flushClipboardAction(harness);
-		expect(editor.getText()).toBe("[🖼 Image #1][🖼 Image #2]");
+		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2]");
 		await harness.pressKey("\x17");
-		expect(editor.getText()).toBe("[🖼 Image #1]");
+		expect(editor.getText()).toBe("[🖼 Image #1] ");
 		editor.setText("");
 
 		getActiveHostRuntime()!.scroll!.scrollTo(0, { disableFollow: true });

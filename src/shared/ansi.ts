@@ -304,6 +304,9 @@ export interface ThemeSurfacePalette {
 	readonly isLight: boolean;
 	readonly surfaceBg: RgbTuple;
 	readonly popupSurfaceBg: RgbTuple;
+	readonly popupHeaderBg: RgbTuple;
+	readonly userCardBg: RgbTuple;
+	readonly userCardHoverBg: RgbTuple;
 	readonly selectedRowBg: RgbTuple;
 	readonly hoveredRowBg: RgbTuple;
 	readonly noteRowBg: RgbTuple;
@@ -311,6 +314,7 @@ export interface ThemeSurfacePalette {
 	readonly pillNeutralBg: RgbTuple;
 	readonly pillNeutralHoverBg: RgbTuple;
 	readonly border: RgbTuple;
+	readonly borderSubtle: RgbTuple;
 	readonly accent: RgbTuple;
 	readonly accentBright: RgbTuple;
 	readonly headingSubtle: RgbTuple;
@@ -325,6 +329,7 @@ export interface ThemeSurfacePalette {
 	readonly codeHeaderBg: RgbTuple;
 	readonly codeHeaderActiveBg: RgbTuple;
 	readonly codeBodyBg: RgbTuple;
+	readonly codeFooterBg: RgbTuple;
 	readonly codeRailFg: RgbTuple;
 	readonly codeMetaFg: RgbTuple;
 	readonly codeMetaActiveFg: RgbTuple;
@@ -337,6 +342,9 @@ const DARK_SURFACE_PALETTE: ThemeSurfacePalette = {
 	isLight: false,
 	surfaceBg: [27, 35, 50],
 	popupSurfaceBg: [31, 41, 58],
+	popupHeaderBg: [35, 46, 65],
+	userCardBg: [27, 35, 50],
+	userCardHoverBg: [33, 43, 60],
 	selectedRowBg: [39, 52, 74],
 	hoveredRowBg: [31, 39, 54],
 	noteRowBg: [40, 39, 33],
@@ -344,6 +352,7 @@ const DARK_SURFACE_PALETTE: ThemeSurfacePalette = {
 	pillNeutralBg: [36, 43, 56],
 	pillNeutralHoverBg: [48, 59, 78],
 	border: [97, 175, 239],
+	borderSubtle: [66, 82, 108],
 	accent: [97, 175, 239],
 	accentBright: [125, 207, 255],
 	headingSubtle: [122, 162, 247],
@@ -358,6 +367,7 @@ const DARK_SURFACE_PALETTE: ThemeSurfacePalette = {
 	codeHeaderBg: [35, 42, 54],
 	codeHeaderActiveBg: [42, 52, 68],
 	codeBodyBg: [27, 32, 41],
+	codeFooterBg: [33, 40, 52],
 	codeRailFg: [64, 78, 102],
 	codeMetaFg: [127, 142, 166],
 	codeMetaActiveFg: [145, 165, 194],
@@ -370,6 +380,9 @@ const LIGHT_SURFACE_PALETTE: ThemeSurfacePalette = {
 	isLight: true,
 	surfaceBg: [237, 243, 252],
 	popupSurfaceBg: [243, 247, 253],
+	popupHeaderBg: [234, 241, 251],
+	userCardBg: [237, 243, 252],
+	userCardHoverBg: [228, 238, 252],
 	selectedRowBg: [214, 230, 252],
 	hoveredRowBg: [232, 240, 251],
 	noteRowBg: [252, 244, 224],
@@ -377,6 +390,7 @@ const LIGHT_SURFACE_PALETTE: ThemeSurfacePalette = {
 	pillNeutralBg: [226, 235, 247],
 	pillNeutralHoverBg: [207, 224, 246],
 	border: [37, 99, 235],
+	borderSubtle: [148, 168, 196],
 	accent: [29, 78, 216],
 	accentBright: [2, 132, 199],
 	headingSubtle: [3, 105, 161],
@@ -391,6 +405,7 @@ const LIGHT_SURFACE_PALETTE: ThemeSurfacePalette = {
 	codeHeaderBg: [226, 234, 245],
 	codeHeaderActiveBg: [214, 226, 242],
 	codeBodyBg: [240, 245, 251],
+	codeFooterBg: [229, 236, 246],
 	codeRailFg: [148, 163, 184],
 	codeMetaFg: [71, 85, 105],
 	codeMetaActiveFg: [51, 65, 85],
@@ -399,7 +414,7 @@ const LIGHT_SURFACE_PALETTE: ThemeSurfacePalette = {
 	badgeCopiedBg: [220, 242, 228],
 };
 
-function mixRgb(base: RgbTuple, accent: RgbTuple, accentWeight: number): [number, number, number] {
+export function mixRgb(base: RgbTuple, accent: RgbTuple, accentWeight: number): [number, number, number] {
 	const baseWeight = 1 - accentWeight;
 	return [
 		Math.round(base[0] * baseWeight + accent[0] * accentWeight),

@@ -122,11 +122,16 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 
 			await harness.mouseMove(12, cardMidRow);
 			const hoveredScreen = harness.screen();
-			expect(hoveredScreen.rowText(cardMidRow - 1)).toContain("Copy");
-			expect(hoveredScreen.rowText(cardMidRow)).toBe(midRow);
+			expect(hoveredScreen.rowText(cardMidRow - 1).trim()).toBe("");
+			expect(hoveredScreen.rowText(cardMidRow)).toContain("Copy");
+			expect(hoveredScreen.rowText(cardMidRow)).not.toContain("15:14");
+			const tsCol = midRow.lastIndexOf("19 Apr, 15:14");
+			expect(tsCol).toBeGreaterThan(20);
+			expect(hoveredScreen.rowText(cardMidRow).slice(0, tsCol)).toBe(midRow.slice(0, tsCol));
 
 			const copyPos = hoveredScreen.findText("Copy");
 			expect(copyPos).toBeDefined();
+			expect(copyPos!.row).toBe(cardMidRow);
 			expect(copyPos!.col).toBeGreaterThan(30);
 
 			const writesBeforeCopy = harness.terminal.writes.length;
@@ -139,8 +144,9 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			);
 
 			const copiedScreen = harness.screen();
-			expect(copiedScreen.rowText(cardMidRow - 1)).toContain("Copied");
-			expect(copiedScreen.rowText(cardMidRow)).toBe(midRow);
+			expect(copiedScreen.rowText(cardMidRow - 1).trim()).toBe("");
+			expect(copiedScreen.rowText(cardMidRow)).toContain("Copied");
+			expect(copiedScreen.rowText(cardMidRow).slice(0, tsCol)).toBe(midRow.slice(0, tsCol));
 
 			vi.useFakeTimers();
 			await harness.mouseClick(copyPos!.col + 1, copyPos!.row);
@@ -769,8 +775,10 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 		const headerRows = 3;
 		await harness.mouseWheel("up", 20, 10, 5);
 		const scrolled = harness.screen();
-		expect(scrolled.sliceText(headerRows + 1, 0, 46)).toContain("First split-pane prompt");
-		expect(scrolled.rowText(headerRows + 1).trimEnd().endsWith("10:15")).toBe(true);
+		expect(
+			`${scrolled.sliceText(headerRows + 1, 0, 46)} ${scrolled.sliceText(headerRows + 2, 0, 46)}`,
+		).toContain("First split-pane");
+		expect(scrolled.rowText(headerRows + 1).trimEnd().endsWith("19 Apr, 10:15")).toBe(true);
 
 		const railSlices = Array.from({ length: scrolled.height }, (_, r) =>
 			scrolled.sliceText(r, 44, 46),

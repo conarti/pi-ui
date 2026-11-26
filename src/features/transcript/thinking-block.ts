@@ -746,6 +746,12 @@ export function installAssistantTranscriptBlocks(): void {
 			const markdownBlock = (kind: string, text: string, create: () => Markdown) => {
 				const slot = previousSlots[self.markdownSlots.length];
 				const markdown = slot?.kind === kind ? slot.markdown : create();
+				const mdAny = markdown as unknown as { __conartiStreaming?: boolean };
+				const nextStreaming = Boolean(isStreaming);
+				if (mdAny.__conartiStreaming !== nextStreaming) {
+					mdAny.__conartiStreaming = nextStreaming;
+					markdown.invalidate();
+				}
 				markdown.setText(text);
 				self.markdownSlots.push({ kind, markdown });
 				return markdown;

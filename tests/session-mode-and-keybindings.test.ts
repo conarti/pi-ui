@@ -114,18 +114,27 @@ describe("Canonical Session Mode & Shift+Tab / Alt+T keybindings", () => {
 		expect(wf.mode).toBe("always-approve");
 		expect(harness.session.thinkingLevel).toBe("off");
 
-		/* Alt+T (EN), macOS Option+T (†) и кириллический Alt+Е циклически переключают уровень рассуждений */
+		/* Alt+T (EN), macOS Option+T (†) и кириллический Alt+Е открывают поповер Thinking */
 		await harness.pressKey("\x1b[116;3u");
+		expect(harness.screen().text()).toContain("Thinking");
+		await harness.pressKey("\x1b[B");
+		await harness.pressKey("\r");
 		const levelAfterEn = harness.session.thinkingLevel;
 		expect(levelAfterEn).not.toBe("off");
 		expect(wf.mode).toBe("always-approve");
 
 		await harness.pressKey("\x1b[1077;3u");
+		expect(harness.screen().text()).toContain("Thinking");
+		await harness.pressKey("\x1b[B");
+		await harness.pressKey("\r");
 		const levelAfterRu = harness.session.thinkingLevel;
 		expect(levelAfterRu).not.toBe(levelAfterEn);
 		expect(wf.mode).toBe("always-approve");
 
 		await harness.pressKey("†");
+		expect(harness.screen().text()).toContain("Thinking");
+		await harness.pressKey("\x1b[B");
+		await harness.pressKey("\r");
 		const levelAfterOption = harness.session.thinkingLevel;
 		expect(levelAfterOption).not.toBe(levelAfterRu);
 

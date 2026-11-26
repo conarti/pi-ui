@@ -14,6 +14,7 @@ import {
 	type SessionMode,
 } from "../../shared/session-workflow.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
+import { openComposerPopover } from "../chrome/composer-popovers.ts";
 import { confirmSafeToolCall, showPlanStudio } from "./studio-overlay.ts";
 
 export { extractPlanSteps };
@@ -439,6 +440,10 @@ export function registerPlanStudioFeature(pi: ExtensionAPI): void {
 			const normalized = normalizeSessionMode(args);
 			if (normalized) {
 				setSessionMode(pi, ctx, normalized);
+				return;
+			}
+			if (ctx.mode === "tui" && ctx.hasUI && args.trim() === "") {
+				openComposerPopover(pi, ctx, "mode");
 				return;
 			}
 			cycleSessionMode(pi, ctx);

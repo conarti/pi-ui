@@ -268,8 +268,10 @@ describe("Session Workflow on real InteractiveMode", () => {
 			executingPlan: false,
 		});
 
+		/* Alt+M открывает поповер Session Mode; выбор Plan сохраняет черновик плана и комментарии */
 		await harness.pressKey("\x1bm");
-		await harness.pressKey("\x1bm");
+		await harness.pressKey("\x1b[B");
+		await harness.pressKey("\r");
 		expect(getLatestPersistedState(harness)).toMatchObject({
 			mode: "plan",
 			planRaw: "# Migration Plan\n1. Extract workflow\n2. Wire commands",

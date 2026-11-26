@@ -1,6 +1,16 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerAskUserFeature } from "./features/ask-user/index.ts";
-import { mountComposer, setActiveComposerEditor } from "./features/chrome/composer.ts";
+import {
+	getActiveComposerEditor,
+	mountComposer,
+	setActiveComposerEditor,
+} from "./features/chrome/composer.ts";
+import {
+	closeActiveComposerPopover,
+	openComposerPopover,
+} from "./features/chrome/composer-popovers.ts";
+import { resetMidTurnQueueUi } from "./features/chrome/mid-turn-queue.ts";
+import { disposeShortcutsBar, mountShortcutsBar } from "./features/chrome/shortcuts-bar.ts";
 import { registerComposerWorkingAnimation } from "./features/chrome/working-indicator.ts";
 import { createPinnedSessionHeaderSlot, mountSessionHeader } from "./features/chrome/header.ts";
 import { registerCommandPaletteFeature } from "./features/command-palette/index.ts";
@@ -110,6 +120,7 @@ function registerUnifiedConfigCommands(pi: ExtensionAPI): void {
 
 			if (sub === "clear" || sub === "reset") {
 				updatePiUiUserConfig({ slotOwners: {} });
+				mountShortcutsBar(pi, ctx);
 				requestRender();
 				ctx.ui.notify(t("slots.cleared"), "info");
 				return;
@@ -119,6 +130,9 @@ function registerUnifiedConfigCommands(pi: ExtensionAPI): void {
 				const [slot, owner] = parts as [string, string];
 				const existing = loadPiUiUserConfig().slotOwners;
 				updatePiUiUserConfig({ slotOwners: { ...existing, [slot]: owner } });
+				if (slot === "footer") {
+					mountShortcutsBar(pi, ctx);
+				}
 				requestRender();
 				ctx.ui.notify(t("slots.updated", { slot, owner }), "info");
 				return;
@@ -178,7 +192,7 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 
 	pi.registerShortcut("alt+m", {
 		description: t("sessionMode.shortcut.cycle"),
-		handler: async (ctx) => cycleSessionMode(pi, ctx),
+		handler: async (ctx) => openComposerPopover(pi, ctx, "mode"),
 	});
 
 	pi.registerShortcut("ctrl+alt+p", {
@@ -230,6 +244,7 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 		}
 		mountSessionHeader(pi, ctx);
 		mountComposer(pi, ctx);
+		mountShortcutsBar(pi, ctx);
 		updatePlanWidget(pi, ctx);
 
 		const hostRuntime = await acquireHostRuntime(ctx);
@@ -271,12 +286,16 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", () => {
+		closeActiveComposerPopover();
+		resetMidTurnQueueUi();
+		disposeShortcutsBar();
 		getSessionWorkflow().endAgentTurn();
 		unsubscribeStickyKey?.();
 		unsubscribeStickyKey = undefined;
 		disposeShell?.();
 		disposeShell = undefined;
 		activeStickyBar = undefined;
+		getActiveComposerEditor()?.dispose();
 		setActiveComposerEditor(undefined);
 		disposeActiveHostRuntime();
 		resetUiActionBridge();

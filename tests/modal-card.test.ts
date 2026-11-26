@@ -496,6 +496,9 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		expect(harness.screen().text()).not.toContain("⌘ Command Palette");
 		expect(harness.screen().text()).toContain("☐ Storage");
 
+		/* Первый Esc паркует фокус в транскрипт, второй Esc отменяет опросник */
+		await harness.pressKey("\x1b");
+		expect(harness.screen().text()).toContain("Tab return to question");
 		await harness.pressKey("\x1b");
 		await askTurn;
 

@@ -1,8 +1,14 @@
-import { UserMessageComponent, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	SkillInvocationMessageComponent,
+	UserMessageComponent,
+	type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { Container, stripTerminalSequences, type Component } from "@earendil-works/pi-tui";
 import { reconstructTurnPromptText } from "../features/prompt-chips/registry.ts";
 import type { FullscreenShellContext } from "./fullscreen-layout.ts";
 import { t } from "./i18n.ts";
+import { loadPiUiUserConfig, type TimestampDisplayMode } from "./pi-ui-config.ts";
+import { extractSkillInvocations, serializeSkillBlockTag } from "./skill-tags.ts";
 
 export type StickyDisplayMode = "auto" | "always";
 
@@ -20,12 +26,12 @@ export interface IndexedTurn extends BranchTurn {
 	readonly start: number;
 	readonly end: number;
 	readonly height: number;
-	readonly component?: UserMessageComponent;
+	readonly component?: UserMessageComponent | SkillInvocationMessageComponent;
 	readonly mounted: boolean;
 }
 
 export interface MountedUserMetric {
-	readonly component: UserMessageComponent;
+	readonly component: UserMessageComponent | SkillInvocationMessageComponent;
 	readonly start: number;
 	readonly end: number;
 	readonly height: number;
@@ -49,15 +55,52 @@ export function sanitizeTurnText(text: string): string {
 }
 
 export function summarizeTurnTitle(prompt: string, ordinal: number): string {
-	const oneLine = prompt.replace(/\s+/g, " ").trim();
+	const preview = extractSkillInvocations(prompt).previewText;
+	const oneLine = preview.replace(/\s+/g, " ").trim();
 	return oneLine || t("turn.fallbackTitle", { ordinal });
 }
 
-export function formatTurnTime(timestamp: number | string | undefined): string {
+const SHORT_MONTHS = [
+	"Jan",
+	"Feb",
+	"Mar",
+	"Apr",
+	"May",
+	"Jun",
+	"Jul",
+	"Aug",
+	"Sep",
+	"Oct",
+	"Nov",
+	"Dec",
+] as const;
+
+export interface FormatTurnTimeOptions {
+	readonly mode?: TimestampDisplayMode;
+	readonly now?: Date;
+}
+
+export function formatTurnTime(
+	timestamp: number | string | undefined,
+	options?: FormatTurnTimeOptions,
+): string {
 	if (timestamp === undefined) return "";
+	const mode = options?.mode ?? loadPiUiUserConfig().timestamps;
+	if (mode === "off") return "";
 	const date = new Date(timestamp);
 	if (Number.isNaN(date.getTime())) return "";
-	return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+	const hh = String(date.getHours()).padStart(2, "0");
+	const mm = String(date.getMinutes()).padStart(2, "0");
+	if (mode === "time") {
+		return `${hh}:${mm}`;
+	}
+	const day = date.getDate();
+	const month = SHORT_MONTHS[date.getMonth()] ?? "Jan";
+	const refYear = (options?.now ?? new Date()).getFullYear();
+	if (date.getFullYear() !== refYear) {
+		return `${day} ${month} ${date.getFullYear()}, ${hh}:${mm}`;
+	}
+	return `${day} ${month}, ${hh}:${mm}`;
 }
 
 const EXISTING_IMAGE_TOKEN_RE = /\[(?:Image #(\d+):[^\]]+|🖼 Image #(\d+))\]/gu;
@@ -133,6 +176,12 @@ function isWalkableContainer(node: Component): node is Container {
 	);
 }
 
+function isStandaloneSkillTurnComponent(node: Component): node is SkillInvocationMessageComponent {
+	if (!(node instanceof SkillInvocationMessageComponent)) return false;
+	const sb = (node as unknown as { skillBlock?: { name?: string; userMessage?: string } }).skillBlock;
+	return Boolean(sb?.name && !sb.userMessage);
+}
+
 /**
  * Walks the transcript container hierarchy structurally to compute exact top-row offsets
  * and rendered heights for each mounted `UserMessageComponent` without full-document
@@ -144,7 +193,7 @@ export function collectStructuralUserMetrics(doc: Component, width: number): Mou
 
 	const visit = (node: Component | undefined): void => {
 		if (!node) return;
-		if (node instanceof UserMessageComponent) {
+		if (node instanceof UserMessageComponent || isStandaloneSkillTurnComponent(node)) {
 			const lines = node.render(width);
 			const height = lines.length;
 			if (height > 0) {
@@ -174,7 +223,7 @@ export function collectStructuralUserMetrics(doc: Component, width: number): Mou
 
 function countMountedUserComponents(node: Component | undefined): number {
 	if (!node) return 0;
-	if (node instanceof UserMessageComponent) return 1;
+	if (node instanceof UserMessageComponent || isStandaloneSkillTurnComponent(node)) return 1;
 	if (isWalkableContainer(node)) {
 		let count = 0;
 		for (const child of node.children) {
@@ -305,8 +354,15 @@ export class TranscriptTurnIndex {
 		let indexed: IndexedTurn[];
 
 		const buildMountedTurn = (metric: MountedUserMetric, idx: number): IndexedTurn => {
-			const rawText: unknown = Reflect.get(metric.component, "text");
-			const prompt = sanitizeTurnText(typeof rawText === "string" ? rawText : "").trim();
+			let rawPromptText = "";
+			if (isStandaloneSkillTurnComponent(metric.component)) {
+				const sb = (metric.component as unknown as { skillBlock?: { name?: string; location?: string; content?: string } }).skillBlock;
+				rawPromptText = sb ? serializeSkillBlockTag(sb) : "";
+			} else {
+				const rawText: unknown = Reflect.get(metric.component, "text");
+				rawPromptText = typeof rawText === "string" ? rawText : "";
+			}
+			const prompt = sanitizeTurnText(rawPromptText).trim();
 			const ordinal = idx + 1;
 			const rawId: unknown = Reflect.get(metric.component, "messageId");
 			const id = String(rawId ?? ordinal);

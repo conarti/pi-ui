@@ -1,6 +1,8 @@
 import type { ExtensionContext, KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import {
 	CURSOR_MARKER,
+	Input,
+	isKeyRelease,
 	matchesKey,
 	renderFakeCursor,
 	truncateToWidth,
@@ -9,6 +11,7 @@ import {
 	type OverlayOptions,
 	type TUI,
 	type TuiMouseEvent,
+	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 import {
 	fgRgb,
@@ -20,6 +23,7 @@ import {
 	type RgbTuple,
 	type ThemeSurfacePalette,
 } from "./ansi.ts";
+import { matchesLayoutChord } from "./keyboard-layout.ts";
 import { claimHover } from "./runtime-hooks.ts";
 
 export { getThemeSurfacePalette, type PillVariant, type RgbTuple, type ThemeSurfacePalette };
@@ -118,7 +122,10 @@ export interface SingleLineInput {
 	getValue(): string;
 	setValue(next: string): void;
 	clear(): void;
+	isCursorAtStart(): boolean;
+	isCursorAtEnd(): boolean;
 	handleInput(data: string): SingleLineInputResult;
+	handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined;
 	render(opts: {
 		theme: Theme;
 		focused: boolean;
@@ -129,65 +136,174 @@ export interface SingleLineInput {
 
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
+function firstSingleLineGrapheme(text: string): string {
+	for (const seg of graphemeSegmenter.segment(text)) {
+		return seg.segment;
+	}
+	return text[0] ?? " ";
+}
+
+/**
+ * Однострочный ввод поверх хостового `Input` с поддержкой навигации (`←/→`, `Home/End`, `Alt+←/→`),
+ * вставки, Undo/Redo (`Ctrl+Z` / `Ctrl+Shift+Z` / `Ctrl+Y`) и явного блочного курсора `CURSOR_MARKER + renderFakeCursor`.
+ */
 export function createSingleLineInput(initialValue = ""): SingleLineInput {
-	let value = initialValue;
+	const input = new Input({ prompt: "", placeholder: "" });
+	input.setValue(initialValue);
+
+	interface InputSnapshot {
+		readonly value: string;
+		readonly cursor: number;
+	}
+
+	const getCursorPos = (): number => {
+		const raw = (input as unknown as { cursor?: number }).cursor;
+		return typeof raw === "number" ? raw : input.getValue().length;
+	};
+	const setCursorPos = (pos: number): void => {
+		const clamped = Math.max(0, Math.min(input.getValue().length, pos));
+		(input as unknown as { cursor: number }).cursor = clamped;
+	};
+
+	const undoStack: InputSnapshot[] = [];
+	const redoStack: InputSnapshot[] = [];
+
+	const captureSnapshot = (): InputSnapshot => ({
+		value: input.getValue(),
+		cursor: getCursorPos(),
+	});
+
+	const restoreSnapshot = (snap: InputSnapshot): void => {
+		input.setValue(snap.value);
+		setCursorPos(snap.cursor);
+	};
 
 	return {
 		getValue() {
-			return value;
+			return input.getValue();
 		},
 		setValue(next: string) {
-			value = next;
+			input.setValue(next);
+			setCursorPos(next.length);
+			undoStack.length = 0;
+			redoStack.length = 0;
 		},
 		clear() {
-			value = "";
+			input.setValue("");
+			setCursorPos(0);
+			undoStack.length = 0;
+			redoStack.length = 0;
+		},
+		isCursorAtStart() {
+			return getCursorPos() <= 0;
+		},
+		isCursorAtEnd() {
+			return getCursorPos() >= input.getValue().length;
 		},
 		handleInput(data: string): SingleLineInputResult {
-			if (matchesKey(data, "ctrl+u")) {
-				const changed = value.length > 0;
-				value = "";
-				return { handled: true, changed, cleared: true };
+			if (!data || isKeyRelease(data)) {
+				return { handled: false, changed: false };
 			}
-			if (matchesKey(data, "backspace")) {
-				if (value.length === 0) return { handled: true, changed: false };
-				const segments = [...graphemeSegmenter.segment(value)];
-				segments.pop();
-				value = segments.map((s) => s.segment).join("");
-				return { handled: true, changed: true };
-			}
-			if (data.length >= 1 && !data.startsWith("\x1b")) {
-				// Filter out control characters (e.g. Enter, Tab, DEL)
-				const clean = data.replace(/[\x00-\x1f\x7f]/g, "");
-				if (clean.length > 0) {
-					value += clean;
-					return { handled: true, changed: true };
+			const isPaste = data.includes("\x1b[200~");
+			if (!isPaste) {
+				if (
+					matchesKey(data, "enter") ||
+					matchesKey(data, "return") ||
+					matchesKey(data, "escape") ||
+					matchesKey(data, "up") ||
+					matchesKey(data, "down") ||
+					matchesKey(data, "tab") ||
+					matchesKey(data, "shift+tab") ||
+					matchesKey(data, "pageUp") ||
+					matchesKey(data, "pageDown")
+				) {
+					return { handled: false, changed: false };
 				}
-			}
-			return { handled: false, changed: false };
-		},
-		render(opts): string {
-			const palette = getThemeSurfacePalette(opts.theme);
-			const marker = opts.focused ? CURSOR_MARKER : "";
-			const cursor = renderFakeCursor(" ");
-			if (!value) {
-				const placeholder = opts.placeholder ? opts.theme.fg("dim", opts.placeholder) : "";
-				return truncateToWidth(`${marker}${cursor}${placeholder}`, Math.max(2, opts.maxWidth), "…");
+
+				if (matchesLayoutChord(data, "ctrl+shift+z") || matchesLayoutChord(data, "ctrl+y")) {
+					const next = redoStack.pop();
+					if (!next) return { handled: true, changed: false };
+					undoStack.push(captureSnapshot());
+					const before = input.getValue();
+					restoreSnapshot(next);
+					return { handled: true, changed: input.getValue() !== before };
+				}
+
+				if (matchesLayoutChord(data, "ctrl+z")) {
+					const prev = undoStack.pop();
+					if (!prev) return { handled: true, changed: false };
+					redoStack.push(captureSnapshot());
+					const before = input.getValue();
+					restoreSnapshot(prev);
+					return { handled: true, changed: input.getValue() !== before };
+				}
+
+				if (matchesKey(data, "ctrl+u")) {
+					const before = input.getValue();
+					if (before.length > 0) {
+						undoStack.push(captureSnapshot());
+						redoStack.length = 0;
+						input.setValue("");
+						setCursorPos(0);
+					}
+					return { handled: true, changed: before.length > 0, cleared: true };
+				}
 			}
 
-			const availText = Math.max(1, opts.maxWidth - 1);
-			let shown = value;
-			if (visibleWidth(shown) > availText) {
-				const segments = [...graphemeSegmenter.segment(shown)].map((s) => s.segment);
-				let tail = "";
-				for (let i = segments.length - 1; i >= 0; i--) {
-					const candidate = segments[i]! + tail;
-					if (visibleWidth(`…${candidate}`) > availText) break;
-					tail = candidate;
-				}
-				shown = `…${tail}`;
+			const beforeSnap = captureSnapshot();
+			input.handleInput(data);
+			const afterValue = input.getValue();
+			const afterCursor = getCursorPos();
+			const changed = afterValue !== beforeSnap.value;
+			if (changed) {
+				undoStack.push(beforeSnap);
+				if (undoStack.length > 100) undoStack.shift();
+				redoStack.length = 0;
+				return { handled: true, changed: true };
 			}
-			const styledText = fgRgb(palette.inputText, shown);
-			return `${styledText}${marker}${cursor}`;
+			const cursorMoved = afterCursor !== beforeSnap.cursor;
+			const isEditKey =
+				isPaste ||
+				matchesKey(data, "backspace") ||
+				matchesKey(data, "delete") ||
+				matchesKey(data, "left") ||
+				matchesKey(data, "right") ||
+				matchesKey(data, "home") ||
+				matchesKey(data, "end") ||
+				matchesKey(data, "ctrl+a") ||
+				matchesKey(data, "ctrl+e") ||
+				matchesKey(data, "ctrl+w") ||
+				matchesKey(data, "ctrl+k") ||
+				matchesKey(data, "alt+left") ||
+				matchesKey(data, "alt+right") ||
+				matchesKey(data, "alt+b") ||
+				matchesKey(data, "alt+f");
+			return { handled: cursorMoved || isEditKey, changed: false };
+		},
+		handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+			return input.handleMouse(event);
+		},
+		render(opts): string {
+			const safeWidth = Math.max(2, opts.maxWidth);
+			const value = input.getValue();
+			if (!value) {
+				const marker = opts.focused ? CURSOR_MARKER : "";
+				const placeholder = opts.placeholder
+					? truncateToWidth(opts.placeholder, safeWidth, "…")
+					: "";
+				if (!placeholder) {
+					return `${marker}${renderFakeCursor(" ")}`;
+				}
+				const head = firstSingleLineGrapheme(placeholder);
+				const rest = placeholder.slice(head.length);
+				const cursor = renderFakeCursor(opts.theme.fg("dim", head));
+				return `${marker}${cursor}${rest ? opts.theme.fg("dim", rest) : ""}`;
+			}
+
+			input.focused = opts.focused;
+			const rendered = input.render(safeWidth)[0] ?? "";
+			const palette = getThemeSurfacePalette(opts.theme);
+			return fgRgb(palette.inputText, rendered);
 		},
 	};
 }
