@@ -93,11 +93,20 @@ describe("Tool Calls: O(1) step-summary index and semantic fallbacks (pure seam)
 			resolveExternalToolSummary("inline-3", { input: { toolSummary: "Nested input summary" } }),
 		).toBe("Nested input summary");
 
-		/* После запоминания из аргументов резолвер возвращает кешированный summary даже без args */
-		expect(resolveExternalToolSummary("inline-1", {})).toBe("Check git history");
+		const source: unknown[] = [];
+		resolveExternalToolSummary("inline-1", { toolSummary: "Check git history" }, source);
+		expect(resolveExternalToolSummary("inline-1", {}, source)).toBe("Check git history");
 
-		rememberLiveToolSummary("live-only-1", "Format markdown table");
-		expect(resolveExternalToolSummary("live-only-1", {})).toBe("Format markdown table");
+		rememberLiveToolSummary("live-only-1", "Format markdown table", source);
+		expect(resolveExternalToolSummary("live-only-1", {}, source)).toBe("Format markdown table");
+	});
+
+	it("isolates live labels from other sessions reusing the same call ID", () => {
+		const first: unknown[] = [];
+		const second = [{ type: "custom", customType: AGY_TOOL_SUMMARIES_ENTRY_TYPE, data: { summaries: { "call-1": "Second session" } } }];
+		expect(resolveExternalToolSummary("call-1", { toolSummary: "First session" }, first)).toBe("First session");
+		expect(resolveExternalToolSummary("call-1", {}, second)).toBe("Second session");
+		expect(resolveExternalToolSummary("call-1", {}, first)).toBe("First session");
 	});
 
 	it("formats workspace-relative and ~/... paths cleanly", () => {

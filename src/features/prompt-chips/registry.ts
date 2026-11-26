@@ -249,7 +249,7 @@ interface StagedDraftSnapshot {
 	readonly bindings: ReadonlyMap<string, string>;
 }
 
-const LEGACY_IMAGE_MARKER_RE = /\[Image #(\d+):\s*([^\]]+)\]/g;
+export const IMAGE_MARKER_RE = /\[Image #(\d+)(?::[^\S\n]*([^\]\n]*))?\]/g;
 const IMAGE_PLACEHOLDER_TOKEN_RE = /\[изображение\]/gu;
 /* AgentSession._normalizePromptImages дописывает в конец текста метки вида [Image: original WxH, displayed at ...] или [Image skipped: ...] */
 const TRAILING_IMAGE_PLACEHOLDER_RE =
@@ -717,7 +717,7 @@ export class PromptChipRegistry {
 			const chunkBefore = inputText.slice(cursor, span.start);
 
 			if (entry.kind === "image") {
-				expanded += `${chunkBefore}[Image #${span.number}: ${entry.filePath}]`;
+				expanded += `${chunkBefore}[Image #${span.number}${entry.filePath ? `: ${entry.filePath}` : ""}]`;
 				if (entry.base64Data && !seenImageChipIds.has(entry.id)) {
 					seenImageChipIds.add(entry.id);
 					attachedImages.push({
@@ -1040,9 +1040,9 @@ export class PromptChipRegistry {
 
 		const fallbackChips: SerializedPromptChip[] = [];
 		let rebuilt = clean.includes("[Image #")
-			? clean.replace(LEGACY_IMAGE_MARKER_RE, (_full, numStr: string, rawPath: string) => {
+			? clean.replace(IMAGE_MARKER_RE, (_full, numStr: string, rawPath: string | undefined) => {
 					const number = Number.parseInt(numStr, 10);
-					const chip = buildFallbackImageChip(number, rawPath.trim());
+					const chip = buildFallbackImageChip(number, rawPath?.trim());
 					fallbackChips.push(chip);
 					return chip.token;
 				})

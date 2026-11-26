@@ -47,6 +47,8 @@ import {
 	trimDiffContext,
 	type CodeDiffLine,
 } from "./layout.ts";
+import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
+import { markSelectionChrome } from "../../shared/selection-copy.ts";
 import { buildStepHeaderParts } from "./step-summaries.ts";
 import type { RowState, ToolArgs, ToolDensity } from "./types.ts";
 
@@ -566,6 +568,26 @@ class DensityLiveLines implements Component {
 	}
 }
 
+function pendingDiffLines(name: string, args: ToolArgs): CodeDiffLine[] {
+	const rows: CodeDiffLine[] = [];
+	const append = (value: unknown, kind: "add" | "remove", hunk: number) => {
+		if (typeof value !== "string" || value === "") return;
+		for (const [index, content] of normalizeLineEndings(value).replace(/\n$/u, "").split("\n").entries()) {
+			rows.push({ kind, content, lineNumber: index + 1, hunk });
+		}
+	};
+	if (name === "write") append(args.content, "add", 0);
+	if (name === "edit") {
+		const edits = Array.isArray(args.edits) ? args.edits : [args];
+		for (const [hunk, edit] of edits.entries()) {
+			if (!edit || typeof edit !== "object") continue;
+			append(edit.oldText, "remove", hunk);
+			append(edit.newText, "add", hunk);
+		}
+	}
+	return rows;
+}
+
 function expandedCallArguments(name: string, args: ToolArgs, status: RowStatus): ToolArgs {
 	const omitted = new Set(["toolSummary", "toolAction"]);
 	/* Команды, скрипты и успешные правки имеют собственное представление ниже заголовка. */
@@ -645,6 +667,7 @@ export function renderDensityCall(options: {
 							idx === 0 ? chunk : `   ${chunk}`,
 						)
 					: [truncateToWidth(head, width, "…")];
+			if (!expanded && getActiveHostRuntime()?.isFullscreen) lines[0] = markSelectionChrome(lines[0]!);
 
 			const rail = pal.rail("   │ ");
 			const avail = Math.max(1, width - 5);
@@ -660,6 +683,10 @@ export function renderDensityCall(options: {
 			}
 
 			if (expanded) {
+				if (status === "running" && (name === "edit" || name === "write")) {
+					const preview = renderTailDiff(pendingDiffLines(name, args), pathOf(args), pal.theme, rail);
+					if (preview) lines.push(...preview.render(width));
+				}
 				const details = expandedCallArguments(name, args, status);
 				if (Object.keys(details).length > 0) lines.push(...renderArguments(details, pal.theme, rail).render(width));
 			}

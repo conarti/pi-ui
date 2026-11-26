@@ -7,8 +7,8 @@ import {
 	registerSupersededExtensionPredicate,
 } from "../../shared/extension-superseder.ts";
 
-const EXTERNAL_SUGGESTION_PATH_RE =
-	/(?:^|[/\\]|npm:)pi-next-prompt(?:$|[/\\]|\.[cm]?[jt]s$)|[/\\]next-prompt\.[cm]?[jt]s$/i;
+const EXTERNAL_SUGGESTION_PACKAGE_RE =
+	/(?:^npm:|[/\\]node_modules[/\\])pi-next-prompt(?:$|[/\\]|@)/i;
 const INLINE_SUGGESTION_PROMPT_RE =
 	/\[Suggestion mode\]\s*Predict what the user will type next/i;
 const GUARDED_APIS = new WeakSet<object>();
@@ -65,7 +65,7 @@ export function isSupersededExternalSuggestionExtension(ext: unknown): boolean {
 	const cached = EXTENSION_MATCH_CACHE.get(ext);
 	if (cached !== undefined) return cached;
 
-	if (matchesExtensionSourcePath(ext, EXTERNAL_SUGGESTION_PATH_RE)) {
+	if (matchesExtensionSourcePath(ext, EXTERNAL_SUGGESTION_PACKAGE_RE)) {
 		EXTENSION_MATCH_CACHE.set(ext, true);
 		return true;
 	}
@@ -126,11 +126,6 @@ export function installExternalSuggestionSuperseder(pi: ExtensionAPI): void {
 	pi.on = ((event: string, handler: (...args: unknown[]) => unknown) => {
 		if (isConartiInternalRegistrationActive()) {
 			return origOn(event as never, handler as never);
-		}
-
-		const stack = new Error().stack ?? "";
-		if (EXTERNAL_SUGGESTION_PATH_RE.test(stack)) {
-			return (() => {}) as never;
 		}
 
 		const sig = captureExternalCallerSignature();

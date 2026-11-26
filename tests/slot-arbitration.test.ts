@@ -561,8 +561,47 @@ describe("Dynamic capability-based Slot Arbitration (ADR-0007)", () => {
 		expect(harness.screen().text()).toContain("CAPITALIZED_STATS");
 	});
 
+	it("keeps the sole enabled footer when its saved owner is absent", async () => {
+		const agentDir = allocateTempDir("pi-ui-absent-footer-");
+		writeFileSync(join(agentDir, "pi-ui.json"), JSON.stringify({ slotOwners: { footer: "gone" } }));
+		harness = await createInteractiveHarness({ agentDir, width: 112 });
+		expect(harness.screen().text()).toContain("Ctrl+K");
+	});
+
+	it("waits for a startup dialog before showing the collision batch", async () => {
+		harness = await createInteractiveHarness({ width: 112, height: 32, extensionFactories: [(pi) => {
+			pi.on("session_start", (_event, ctx) => {
+				ctx.ui.setFooter(() => new Text("EXTERNAL FOOTER"));
+				void ctx.ui.custom((_tui, _theme, _kb, done) => ({
+					invalidate() {},
+					render: () => ["Startup question"],
+					handleInput: (data: string) => { if (data === "\x1b") done(undefined); },
+				}), { overlay: true });
+			});
+		}] });
+		await flushDeferredUi(harness);
+		expect(harness.screen().text()).toContain("Startup question");
+		expect(harness.screen().text()).not.toContain("Slot Arbitration");
+		await harness.pressKey("\x1b");
+		await waitForCondition(() => harness!.screen().text().includes("Slot Arbitration"));
+	});
+
+	it("does not contend for the footer while Shortcuts Bar is disabled", async () => {
+		const agentDir = allocateTempDir("pi-ui-disabled-footer-");
+		writeFileSync(join(agentDir, "pi-ui.json"), JSON.stringify({ showShortcutsBar: false }));
+		harness = await createInteractiveHarness({ agentDir, width: 112, extensionFactories: [(pi) => {
+			pi.on("session_start", (_event, ctx) => ctx.ui.setFooter(() => new Text("EXTERNAL FOOTER")));
+		}] });
+		await flushDeferredUi(harness);
+		expect(harness.screen().text()).toContain("EXTERNAL FOOTER");
+		expect(harness.screen().text()).not.toContain("Slot Arbitration");
+	});
+
 	it("batches and switches locally dispatched Composer and Sticky Prompt shortcuts", async () => {
 		const plugin: ExtensionFactory = (pi) => {
+			pi.on("session_start", (_event, ctx) => {
+				ctx.ui.setEditorComponent((tui, theme, kb) => new CustomEditor(tui, theme, kb));
+			});
 			for (const chord of ["ctrl+l", "alt+t", "alt+s"] as const) {
 				pi.registerShortcut(chord, {
 					description: `Third-party ${chord}`,
@@ -576,6 +615,7 @@ describe("Dynamic capability-based Slot Arbitration (ADR-0007)", () => {
 			expect(harness.screen().text()).toContain(`Shortcut ${chord}`);
 		}
 		await harness.pressKey("\r");
+		await harness.submitInput("/slots editor inline-1");
 		for (const [chord, sequence] of [["ctrl+l", "\x0c"], ["alt+t", "\x1bt"], ["alt+s", "\x1bs"]] as const) {
 			await harness.submitInput(`/slots shortcut:${chord} inline-1`);
 			await harness.pressKey(sequence);
@@ -616,6 +656,24 @@ describe("Dynamic capability-based Slot Arbitration (ADR-0007)", () => {
 		await harness.pressKey("\r");
 		await harness.submitInput("/report-health");
 		expect(harness.screen().text()).toContain("HEALTH_CHECK_PASSED");
+	});
+
+	it("keeps additive commands from unrelated scripts with legacy basenames", async () => {
+		const dir = allocateTempDir("pi-ui-innocent-basenames-");
+		const paths = ["pi-quote-blocks", "pi-next-prompt"].map((name, index) => {
+			const path = join(dir, `${name}.ts`);
+			writeFileSync(path, `export default (pi) => pi.registerCommand("unrelated-${index}", {
+				description: "Additive command",
+				handler: async (_args, ctx) => ctx.ui.notify("ADDITIVE-${index}", "info"),
+			});`);
+			return path;
+		});
+		harness = await createInteractiveHarness({ additionalExtensionPaths: paths });
+		for (const index of [0, 1]) {
+			await harness.submitInput(`/unrelated-${index}`);
+			expect(harness.screen().text()).toContain(`ADDITIVE-${index}`);
+		}
+		expect(harness.screen().text()).not.toContain("Slot Arbitration");
 	});
 
 	it("silently supersedes absorbed legacy first-party scripts without triggering Slot Arbitration", async () => {

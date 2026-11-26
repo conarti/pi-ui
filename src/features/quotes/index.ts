@@ -98,9 +98,8 @@ export function registerQuotesFeature(pi: ExtensionAPI): void {
 	let unsubscribeInput: (() => void) | undefined;
 
 	const copySelectedAndFlash = (selectedText: string, tui: NonNullable<ReturnType<typeof getActiveHostRuntime>>["tui"]) => {
-		const cleaned = selectedText.trim();
-		if (!cleaned) return;
-		copyToClipboard(cleaned);
+		if (!selectedText.trim()) return;
+		copyToClipboard(selectedText);
 		const renderer = unwrapHostTui(tui) as unknown as {
 			resetTextSelection?: () => void;
 			clearTextSelection?: () => void;

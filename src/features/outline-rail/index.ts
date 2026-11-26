@@ -1,8 +1,9 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { visibleWidth, type OverlayHandle, type OverlayOptions } from "@earendil-works/pi-tui";
+import { isKeyRelease, matchesKey, visibleWidth, type OverlayHandle, type OverlayOptions } from "@earendil-works/pi-tui";
 import type { FullscreenShellContext } from "../../shared/fullscreen-layout.ts";
 import {
 	getActiveHostRuntime,
+	installPrimaryScrollDismissHooks,
 	registerTransientHoverDismisser,
 } from "../../shared/host-runtime.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
@@ -129,12 +130,21 @@ export function createOutlineRailSlot(
 		},
 	);
 
-	const unregisterHoverDismisser = registerTransientHoverDismisser("outlineRail.preview", () =>
-		hidePopup(true),
-	);
+	const dismiss = () => rail.clearHover(true);
+	const unregisterHoverDismisser = registerTransientHoverDismisser("outlineRail.preview", dismiss);
+	installPrimaryScrollDismissHooks("outlineRail.preview", () => popupVisible, dismiss);
+	const unsubscribeEscape = ctx.ui.onTerminalInput((data) => {
+		if (!popupVisible) return;
+		const blocked = hasBlockingModalOverlay(shell.tui);
+		if (!blocked && (isKeyRelease(data) || !matchesKey(data, "escape"))) return;
+		dismiss();
+		shell.requestRender();
+		return blocked ? undefined : { consume: true };
+	});
 
 	return Object.assign(rail, {
 		dispose() {
+			unsubscribeEscape();
 			unregisterHoverDismisser();
 			hidePopup();
 		},

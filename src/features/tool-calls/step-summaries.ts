@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { basename, isAbsolute, relative } from "node:path";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
+import { t } from "../../shared/i18n.ts";
 import { normalizeLineEndings, type RowStatus } from "./core.ts";
 import type { ToolArgs } from "./types.ts";
 
@@ -13,6 +14,7 @@ interface CachedSummaryIndex {
 }
 
 export interface SessionSummarySource {
+	getSessionId?: () => string;
 	getEntryCount?: () => number;
 	getEntries?: () => readonly unknown[];
 	getBranch?: () => readonly unknown[];
@@ -20,7 +22,17 @@ export interface SessionSummarySource {
 
 const managerSummaryCache = new WeakMap<object, CachedSummaryIndex>();
 const arraySummaryCache = new WeakMap<readonly unknown[], CachedSummaryIndex>();
-const liveSummaryOverrides = new Map<string, string>();
+const liveSummaryOverrides = new WeakMap<object, { sessionId?: string; entries: Map<string, string> }>();
+
+function liveEntries(source: SessionSummarySource | readonly unknown[]): Map<string, string> {
+	const sessionId = (source as SessionSummarySource).getSessionId?.();
+	const existing = liveSummaryOverrides.get(source);
+	if (existing && existing.sessionId === sessionId) return existing.entries;
+	const entries = new Map<string, string>();
+	liveSummaryOverrides.set(source, { sessionId, entries });
+	if (existing) managerSummaryCache.delete(source);
+	return entries;
+}
 const MAX_LIVE_OVERRIDES = 1_000;
 
 export function cleanStepSummaryText(value: unknown): string | undefined {
@@ -29,13 +41,14 @@ export function cleanStepSummaryText(value: unknown): string | undefined {
 	return cleaned.length > 0 ? cleaned : undefined;
 }
 
-export function rememberLiveToolSummary(toolCallId: string, summary: string | undefined): void {
+export function rememberLiveToolSummary(toolCallId: string, summary: string | undefined, source: SessionSummarySource | readonly unknown[]): void {
 	const cleaned = cleanStepSummaryText(summary);
 	if (!toolCallId || !cleaned) return;
-	liveSummaryOverrides.set(toolCallId, cleaned);
-	if (liveSummaryOverrides.size > MAX_LIVE_OVERRIDES) {
-		const oldest = liveSummaryOverrides.keys().next().value;
-		if (oldest !== undefined) liveSummaryOverrides.delete(oldest);
+	const entries = liveEntries(source);
+	entries.set(toolCallId, cleaned);
+	if (entries.size > MAX_LIVE_OVERRIDES) {
+		const oldest = entries.keys().next().value;
+		if (oldest !== undefined) entries.delete(oldest);
 	}
 }
 
@@ -87,16 +100,14 @@ export function resolveExternalToolSummary(
 ): string | undefined {
 	const inline = extractInlineToolSummary(args);
 	if (inline) {
-		if (toolCallId) rememberLiveToolSummary(toolCallId, inline);
+		if (toolCallId && sessionSource) rememberLiveToolSummary(toolCallId, inline, sessionSource);
 		return inline;
 	}
-	if (!toolCallId) return undefined;
-	const live = liveSummaryOverrides.get(toolCallId);
-	if (live) return live;
-	if (!sessionSource) return undefined;
+	if (!toolCallId || !sessionSource) return undefined;
+	const live = liveEntries(sessionSource).get(toolCallId);
 
 	if (Array.isArray(sessionSource)) {
-		if (sessionSource.length === 0) return undefined;
+		if (sessionSource.length === 0) return live;
 		let cached = arraySummaryCache.get(sessionSource);
 		if (!cached || cached.scannedLength > sessionSource.length) {
 			cached = { scannedCount: 0, scannedLength: 0, byCallId: new Map() };
@@ -107,7 +118,7 @@ export function resolveExternalToolSummary(
 			cached.scannedLength = sessionSource.length;
 			cached.scannedCount = sessionSource.length;
 		}
-		return cached.byCallId.get(toolCallId);
+		return cached.byCallId.get(toolCallId) ?? live;
 	}
 
 	/* SessionManager.getEntries() возвращает новую копию массива, поэтому кешируем по самому менеджеру
@@ -116,7 +127,7 @@ export function resolveExternalToolSummary(
 	const count = typeof manager.getEntryCount === "function" ? manager.getEntryCount() : undefined;
 	let cached = managerSummaryCache.get(manager);
 	if (cached && count !== undefined && cached.scannedCount === count) {
-		return cached.byCallId.get(toolCallId);
+		return cached.byCallId.get(toolCallId) ?? live;
 	}
 
 	const entries = manager.getEntries?.() ?? manager.getBranch?.();
@@ -124,7 +135,7 @@ export function resolveExternalToolSummary(
 		if (count !== undefined) {
 			managerSummaryCache.set(manager, { scannedCount: count, scannedLength: 0, byCallId: new Map() });
 		}
-		return undefined;
+		return live;
 	}
 	if (!cached || cached.scannedLength > entries.length || (count !== undefined && count < cached.scannedCount)) {
 		cached = { scannedCount: 0, scannedLength: 0, byCallId: new Map() };
@@ -135,7 +146,7 @@ export function resolveExternalToolSummary(
 		cached.scannedLength = entries.length;
 	}
 	cached.scannedCount = count ?? entries.length;
-	return cached.byCallId.get(toolCallId);
+	return cached.byCallId.get(toolCallId) ?? live;
 }
 
 /**
@@ -182,12 +193,11 @@ export function summarizeCodemodeIntentFallback(
 	cwd?: string,
 ): { verb: string; target: string } {
 	const code = typeof args.code === "string" ? normalizeLineEndings(stripTerminalSequences(args.code)) : "";
-	const running = status === "running";
-	const failed = status === "error";
+	const phase = status === "error" ? "failed" : status === "running" ? "running" : "done";
 
 	if (!code.trim()) {
 		return {
-			verb: failed ? "Failed batch" : running ? "Running batch" : "Ran batch",
+			verb: t(`toolStep.batch.${phase}`),
 			target: "",
 		};
 	}
@@ -209,22 +219,14 @@ export function summarizeCodemodeIntentFallback(
 
 	if (counts.size === 1 && counts.has("read") && fileTargets.length > 0) {
 		return {
-			verb: failed ? "Failed read" : running ? "Reading" : "Read",
+			verb: t(`toolStep.read.${phase}`),
 			target: fileTargets.join(", "),
 		};
 	}
 	if (counts.size === 1 && (counts.has("edit") || counts.has("write")) && fileTargets.length > 0) {
-		const isEdit = counts.has("edit");
+		const tool = counts.has("edit") ? "edit" : "write";
 		return {
-			verb: failed
-				? `Failed ${isEdit ? "edit" : "write"}`
-				: running
-					? isEdit
-						? "Editing"
-						: "Writing"
-					: isEdit
-						? "Edited"
-						: "Wrote",
+			verb: t(`toolStep.${tool}.${phase}`),
 			target: fileTargets.join(", "),
 		};
 	}
@@ -235,21 +237,21 @@ export function summarizeCodemodeIntentFallback(
 	const cmds = (counts.get("bash") ?? 0) + (counts.get("powershell") ?? 0);
 	const searches = (counts.get("grep") ?? 0) + (counts.get("find") ?? 0) + (counts.get("ls") ?? 0);
 
-	if (edits > 0) parts.push(`${edits} ${edits === 1 ? "edit" : "edits"}`);
-	if (reads > 0) parts.push(`${reads} ${reads === 1 ? "read" : "reads"}`);
-	if (cmds > 0) parts.push(`${cmds} ${cmds === 1 ? "command" : "commands"}`);
-	if (searches > 0) parts.push(`${searches} ${searches === 1 ? "search" : "searches"}`);
+	if (edits > 0) parts.push(t(edits === 1 ? "toolStep.count.edit" : "toolStep.count.edits", { count: edits }));
+	if (reads > 0) parts.push(t(reads === 1 ? "toolStep.count.read" : "toolStep.count.reads", { count: reads }));
+	if (cmds > 0) parts.push(t(cmds === 1 ? "toolStep.count.command" : "toolStep.count.commands", { count: cmds }));
+	if (searches > 0) parts.push(t(searches === 1 ? "toolStep.count.search" : "toolStep.count.searches", { count: searches }));
 
 	if (parts.length > 0) {
 		const fileHint = fileTargets.length > 0 ? ` (${fileTargets.slice(0, 2).join(", ")})` : "";
 		return {
-			verb: failed ? "Failed batch" : running ? "Running batch" : "Ran batch",
+			verb: t(`toolStep.batch.${phase}`),
 			target: `${parts.join(", ")}${fileHint}`,
 		};
 	}
 
 	return {
-		verb: failed ? "Failed script" : running ? "Running script" : "Ran script",
+		verb: t(`toolStep.script.${phase}`),
 		target: "codemode",
 	};
 }
@@ -286,8 +288,9 @@ export function buildStepHeaderParts(options: {
 	const { name, args, status, rawPath, stepSummary, cwd, expanded = false, summarizeCustomArgs } = options;
 	const running = status === "running";
 	const failed = status === "error";
+	const phase = failed ? "failed" : running ? "running" : "done";
 	const relPath = formatWorkspacePath(rawPath, cwd);
-	const summaryVerb = stepSummary && (failed ? `Failed: ${stepSummary}` : stepSummary);
+	const summaryVerb = stepSummary && (failed ? t("toolStep.failedSummary", { summary: stepSummary }) : stepSummary);
 
 	switch (name) {
 		case "read": {
@@ -300,59 +303,59 @@ export function buildStepHeaderParts(options: {
 						? `:${offset}+`
 						: "";
 			return {
-				verb: summaryVerb || (failed ? "Failed read" : running ? "Reading" : "Read"),
+				verb: summaryVerb || t(`toolStep.read.${phase}`),
 				target: `${relPath}${rangeSuffix}`,
 			};
 		}
 		case "edit":
 			return {
-				verb: summaryVerb || (failed ? "Failed to edit" : running ? "Editing" : "Edited"),
+				verb: summaryVerb || t(`toolStep.edit.${phase}`),
 				target: relPath,
 			};
 		case "write":
 			return {
-				verb: summaryVerb || (failed ? "Failed to write" : running ? "Writing" : "Wrote"),
+				verb: summaryVerb || t(`toolStep.write.${phase}`),
 				target: relPath,
 			};
 		case "grep": {
-			if (stepSummary) {
+			if (summaryVerb) {
 				return {
-					verb: failed ? `Failed: ${stepSummary}` : stepSummary,
+					verb: summaryVerb,
 					target: relPath || "",
 				};
 			}
 			const rawGrepPat = typeof args.pattern === "string" ? args.pattern.replace(/\s+/gu, " ").trim() : "…";
 			const pat = expanded ? rawGrepPat : rawGrepPat.slice(0, 48);
 			return {
-				verb: failed ? "Failed grep" : running ? "Searching" : "Searched",
-				target: relPath ? `/${pat}/ in ${relPath}` : `/${pat}/`,
+				verb: t(`toolStep.grep.${phase}`),
+				target: relPath ? t("toolStep.pathFilter", { pattern: `/${pat}/`, path: relPath }) : `/${pat}/`,
 			};
 		}
 		case "find": {
-			if (stepSummary) {
+			if (summaryVerb) {
 				return {
-					verb: failed ? `Failed: ${stepSummary}` : stepSummary,
+					verb: summaryVerb,
 					target: relPath || "",
 				};
 			}
 			const rawFindPat = typeof args.pattern === "string" ? args.pattern.replace(/\s+/gu, " ").trim() : "…";
 			const pat = expanded ? rawFindPat : rawFindPat.slice(0, 48);
 			return {
-				verb: failed ? "Failed find" : running ? "Finding" : "Found",
-				target: relPath ? `${pat} in ${relPath}` : pat,
+				verb: t(`toolStep.find.${phase}`),
+				target: relPath ? t("toolStep.pathFilter", { pattern: pat, path: relPath }) : pat,
 			};
 		}
 		case "ls":
 			return {
-				verb: summaryVerb || (failed ? "Failed ls" : running ? "Listing" : "Listed"),
+				verb: summaryVerb || t(`toolStep.ls.${phase}`),
 				target: relPath || ".",
 			};
 		case "bash":
 		case "powershell": {
 			const rawCmd = typeof args.command === "string" ? normalizeLineEndings(stripTerminalSequences(args.command)) : "";
-			if (stepSummary) {
+			if (summaryVerb) {
 				return {
-					verb: failed ? `Failed: ${stepSummary}` : stepSummary,
+					verb: summaryVerb,
 					target: cleanCommandDisplayHint(rawCmd, cwd),
 				};
 			}
@@ -363,14 +366,14 @@ export function buildStepHeaderParts(options: {
 					? `${firstLine.slice(0, 83).trimEnd()}…`
 					: firstLine;
 			return {
-				verb: failed ? "Failed" : running ? "Running" : "Ran",
+				verb: t(`toolStep.command.${phase}`),
 				target: clipped || name,
 			};
 		}
 		case "codemode": {
-			if (stepSummary) {
+			if (summaryVerb) {
 				return {
-					verb: failed ? `Failed: ${stepSummary}` : stepSummary,
+					verb: summaryVerb,
 					target: "",
 				};
 			}
@@ -378,15 +381,15 @@ export function buildStepHeaderParts(options: {
 		}
 		default: {
 			const cleanName = cleanToolDisplayName(name);
-			if (stepSummary) {
+			if (summaryVerb) {
 				return {
-					verb: failed ? `Failed: ${stepSummary}` : stepSummary,
+					verb: summaryVerb,
 					target: cleanName !== name ? cleanName : "",
 				};
 			}
 			const argText = summarizeCustomArgs(args);
 			return {
-				verb: failed ? `Failed ${cleanName}` : running ? `Calling ${cleanName}` : cleanName,
+				verb: failed || running ? t(failed ? "toolStep.failedTool" : "toolStep.calling", { name: cleanName }) : cleanName,
 				target: relativizeCommandPaths(argText, cwd),
 			};
 		}

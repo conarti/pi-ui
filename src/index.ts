@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Editor, isKeyRelease } from "@earendil-works/pi-tui";
 import { registerAskUserFeature } from "./features/ask-user/index.ts";
 import {
 	getActiveComposerEditor,
@@ -10,7 +11,7 @@ import {
 	openComposerPopover,
 } from "./features/chrome/composer-popovers.ts";
 import { resetMidTurnQueueUi } from "./features/chrome/mid-turn-queue.ts";
-import { disposeShortcutsBar, mountShortcutsBar } from "./features/chrome/shortcuts-bar.ts";
+import { disposeShortcutsBar, mountShortcutsBar, syncShortcutsBar } from "./features/chrome/shortcuts-bar.ts";
 import { registerComposerWorkingAnimation } from "./features/chrome/working-indicator.ts";
 import { createPinnedSessionHeaderSlot, mountSessionHeader } from "./features/chrome/header.ts";
 import { registerCommandPaletteFeature } from "./features/command-palette/index.ts";
@@ -36,11 +37,11 @@ import { registerPromptSuggestionFeature } from "./features/prompt-suggestion/in
 import { registerQuotesFeature } from "./features/quotes/index.ts";
 import { registerSlotArbitrationFeature } from "./features/slot-arbitration/index.ts";
 import { registerTranscriptFeature } from "./features/transcript/index.ts";
-import { acquireHostRuntime, disposeActiveHostRuntime } from "./shared/host-runtime.ts";
+import { acquireHostRuntime, disposeActiveHostRuntime, getActiveHostRuntime, getFocusedHostComponent } from "./shared/host-runtime.ts";
 import { t } from "./shared/i18n.ts";
-import {
-	installKeyboardLayoutSupport,
-} from "./shared/keyboard-layout.ts";
+import { installKeyboardLayoutSupport, matchesLayoutChord } from "./shared/keyboard-layout.ts";
+import { hasBlockingModalOverlay } from "./shared/modal-card.ts";
+import { dispatchLocalShortcut } from "./shared/slot-arbitration.ts";
 import { loadPiUiUserConfig, updatePiUiUserConfig } from "./shared/pi-ui-config.ts";
 import {
 	getSessionWorkflow,
@@ -77,6 +78,7 @@ function registerUnifiedConfigCommands(pi: ExtensionAPI): void {
 			const current = loadPiUiUserConfig().showShortcutsBar;
 			const next = arg === "on" ? true : arg === "off" ? false : !current;
 			const updated = updatePiUiUserConfig({ showShortcutsBar: next });
+			syncShortcutsBar();
 			requestRender();
 			ctx.ui.notify(
 				t("shortcutsBar.toggled", {
@@ -94,7 +96,16 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 
 	/* Синхронизируем app.thinking.cycle -> alt+t до чтения keybindings.json в InteractiveMode */
 	syncThinkingCycleKeybinding();
-	installKeyboardLayoutSupport(pi);
+	installKeyboardLayoutSupport(pi, (data) => {
+		const tui = getActiveHostRuntime()?.tui;
+		if (!tui || !(getFocusedHostComponent(tui) instanceof Editor) || hasBlockingModalOverlay(tui) || isKeyRelease(data)) return false;
+		for (const chord of ["ctrl+l", "alt+t"] as const) {
+			if (!matchesLayoutChord(data, chord)) continue;
+			void dispatchLocalShortcut(chord);
+			return true;
+		}
+		return false;
+	});
 
 	/* 0. Получаем общий Host Runtime один раз при session_start до подписки фич */
 	pi.on("session_start", async (_event, ctx) => {

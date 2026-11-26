@@ -441,7 +441,7 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		const acScreen = harness.screen();
 		const acTopRow = findComposerTopRow(harness);
 		const acBottomBorderRow = acTopRow + 2;
-		expect(acScreen.rowText(acBottomBorderRow)).toBe(`╰${"─".repeat(14)}╯`);
+		expect(acScreen.rowText(acBottomBorderRow)).toBe(`  ╰${"─".repeat(10)}╯  `);
 		const firstSuggestionRow = acBottomBorderRow + 1;
 		expect(acScreen.rowText(firstSuggestionRow)).toContain("→");
 

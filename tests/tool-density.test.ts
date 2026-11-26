@@ -35,6 +35,7 @@ import {
 	fauxAssistantMessage,
 	fauxThinking,
 	fauxToolCall,
+	waitForCondition,
 	type AssistantMessage,
 	type AssistantMessageEventStream,
 	type InteractiveHarness,
@@ -636,6 +637,22 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		const restoredText = harness.screen().text();
 		expect(restoredText).toContain("✦ Read src/a.ts");
 		expect(restoredText).toContain("AUTHOR_FULL_DIAGRAM_VIEW");
+	});
+
+	it("keeps the palette density across reload after a global slash-command choice", async () => {
+		const agentDir = createTempDir("pi-ui-unified-density-");
+		harness = await createInteractiveHarness({ agentDir, width: 104 });
+		await harness.submitInput("/density detailed global");
+		expect(existsSync(join(agentDir, "compact-tools.json"))).toBe(false);
+		await harness.pressKey("\x0b");
+		await harness.typeText("tool density");
+		await harness.pressKey("\r");
+		expect(JSON.parse(readFileSync(join(agentDir, "pi-ui.json"), "utf8")).toolDensity).toBe("balanced");
+		writeFileSync(join(agentDir, "compact-tools.json"), JSON.stringify({ density: "detailed" }));
+		await harness.dispose();
+		harness = await createInteractiveHarness({ agentDir, width: 104 });
+		await harness.submitInput("/density status");
+		expect(harness.screen().text()).toContain("Density: balanced · active style: balanced");
 	});
 
 	it("switches live without reload across all 5 presets (balanced, compact, grouped, diff-focus, detailed) via /density (including interactive selector), /compact-tools, and trusted/untrusted project scopes", async () => {
@@ -1335,6 +1352,34 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		const expandedPartialText = harness.screen().text();
 		expect(expandedPartialText).toContain(`│ ${TOOL_DIAMOND} Read src/a.ts`);
 		expect(expandedPartialText).not.toContain(`${projDir}/src/a.ts`);
+	});
+
+	it("shows pending edit replacements on expansion before the tool returns", async () => {
+		let release: (() => void) | undefined;
+		harness = await createInteractiveHarness({
+			width: 100, height: 30,
+			extensionFactories: [(pi) => {
+				pi.on("tool_call", async (event) => {
+					if (event.toolName !== "edit") return;
+					await new Promise<void>((resolve) => { release = resolve; });
+					return { block: true, reason: "Test edit complete" };
+				});
+			}],
+			responses: [fauxAssistantMessage([fauxToolCall("edit", {
+				path: "pending.txt", edits: [{ oldText: "OLD_UNIQUE_VALUE", newText: "NEW_UNIQUE_VALUE" }],
+			})], { stopReason: "toolUse" }), fauxAssistantMessage("Done.")],
+		});
+		const turn = harness.submitInput("Edit the pending file");
+		try {
+			await waitForCondition(() => Boolean(release));
+			const hit = harness.screen().findText("Editing pending.txt")!;
+			await harness.mouseClick(hit.col + 2, hit.row);
+			expect(harness.screen().text()).toContain("OLD_UNIQUE_VALUE");
+			expect(harness.screen().text()).toContain("NEW_UNIQUE_VALUE");
+		} finally {
+			release?.();
+			await turn;
+		}
 	});
 
 	it("prioritizes core-tool expanded views over competing provider registerToolRenderer wrappers and wraps full $ <command>, patterns, nested calls, and custom args without truncation", async () => {

@@ -447,9 +447,10 @@ export async function showContextInspector(
 ): Promise<void> {
 	if (ctx.mode !== "tui") return;
 
-	const branch = ctx.sessionManager.getBranch?.() ?? ctx.sessionManager.getEntries?.() ?? [];
+	const entries = ctx.sessionManager.getEntries();
+	const branch = ctx.sessionManager.getBranch();
 	const data = buildContextWindowSnapshot(pi, ctx, branch);
-	const telemetry = aggregateSessionTelemetry(branch, data.modelLabel);
+	const telemetry = aggregateSessionTelemetry(branch, data.modelLabel, entries);
 	const markdownTable = buildSessionUsageMarkdownTable(telemetry);
 	const sessionInfoText = formatSessionInfoClipboardText(data, telemetry.turnCount);
 

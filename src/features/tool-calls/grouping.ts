@@ -27,6 +27,7 @@ import {
 import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { getActiveHostRuntime, type HostRuntimeHandle } from "../../shared/host-runtime.ts";
 import { hookMethod } from "../../shared/runtime-hooks.ts";
+import { markSelectionChrome } from "../../shared/selection-copy.ts";
 import { formatDurationMs, type RowStatus } from "./core.ts";
 import {
 	densityPalette,
@@ -378,17 +379,11 @@ function isThinkingOnly(child: unknown): boolean {
 	return content.some((block) => block.type === "thinking" && block.thinking?.trim());
 }
 
-/**
- * What may sit between two calls of one group: a settled turn that only thought
- * or only dispatched tool calls, and the status lines Pi writes into the chat itself.
- */
+/* Строки хоста и шаги без видимого текста не разрывают последовательность вызовов. */
 function isFoldable(child: unknown): boolean {
 	return isUnexpandedTextlessAssistant(child) !== undefined || isKind(child, Text) || isKind(child, Spacer);
 }
 
-/**
- * Replace runs of groupable tool calls with summary groups according to active Tool Density.
- */
 export function groupChildren(
 	children: readonly unknown[],
 	makeGroup: (rows: ToolRowLike[], members: unknown[]) => Component,
@@ -785,6 +780,7 @@ export class ToolGroupController {
 		}
 
 		const margin = " ".repeat(computeOuterCanvasMargin(width) + 2);
-		return ["", fit(`${margin}${diamond} ${styledSummary}${diffBadge}${meta}`)];
+		const title = fit(`${margin}${diamond} ${styledSummary}${diffBadge}${meta}`);
+		return ["", !expanded && getActiveHostRuntime()?.isFullscreen ? markSelectionChrome(title) : title];
 	}
 }

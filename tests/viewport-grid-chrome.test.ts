@@ -169,6 +169,13 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 		const hovered = harness.screen();
 		expect(hovered.text()).toContain("First turn topic alpha");
 		expect(hovered.text()).not.toContain("Turn #1");
+		expect(hovered.text()).toContain("│ First turn topic alpha");
+		await harness.pressKey("\x1b");
+		expect(harness.screen().text()).not.toContain("│ First turn topic alpha");
+		await harness.mouseMove(width - 1, upRow + 1);
+		expect(harness.screen().text()).toContain("│ First turn topic alpha");
+		await harness.pressKey("\x1b[5~");
+		expect(harness.screen().text()).not.toContain("│ First turn topic alpha");
 
 		await harness.mouseClick(centerCol, downIndicatorRow!);
 		expect(harness.screen().text()).toContain("reply-two-20");
@@ -270,6 +277,12 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 		expect(stickyCollapsed.rowText(6)).toContain("+2 lines (Alt+s)");
 		expect(stickyCollapsed.text()).not.toContain("Long sticky line 5");
 
+		await harness.resize(23, 26);
+		expect(harness.screen().rowText(1).search(/\S/u)).toBe(2);
+		expect(findCardHorizontalSpan(harness, 3)).toEqual({ firstBgCol: 2, lastBgCol: 20 });
+		expect(harness.screen().cellAt(4, 4)?.char).toBe("›");
+		await harness.resize(80, 26);
+
 		await harness.pressKey("\x1b[200~");
 		await harness.pressKey("ß");
 		await harness.pressKey("\x1b[201~");
@@ -307,26 +320,22 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 			],
 		});
 
-		const scroll = getActiveHostRuntime()!.scroll!;
-		scroll.scrollTo(10, { disableFollow: true });
-		const baselineScrollTop = scroll.scrollTop;
-		expect(baselineScrollTop).toBeGreaterThan(0);
+		const visibleTranscript = () => harness!.screen().text().match(/wheel-body-\d+/g);
+		await harness.mouseWheel("up", 30, 12, 4);
+		const initialRows = visibleTranscript();
+		expect(initialRows?.length).toBeGreaterThan(0);
 
 		await harness.pressKey("\x0b");
-		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
+		expect(harness.screen().text()).toContain("Command Palette");
 		await harness.mouseWheel("down", 48, 12, 6);
-		await harness.mouseWheel("up", 4, 4, 6);
-		expect(scroll.scrollTop).toBe(baselineScrollTop);
+		await harness.mouseWheel("up", 4, 4, 3);
 		await harness.pressKey("\x1b");
-		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
-
-		const editor = getActiveComposerEditor()!;
+		expect(harness.screen().text()).not.toContain("Command Palette");
+		expect(visibleTranscript()).toEqual(initialRows);
 		const longPaste = Array.from({ length: 18 }, (_, i) => `paste-row-${String(i + 1).padStart(2, "0")}`).join(
 			"\n",
 		);
-		await harness.sendInput(`\x1b[200~${longPaste}\x1b[201~`);
-		expect(editor.getText()).toContain("[📋 Pasted #1");
-
+		await harness.paste(longPaste, true);
 		const chipHit = harness.screen().findText("[📋 Pasted #1");
 		expect(chipHit).toBeDefined();
 		await harness.mouseMove(chipHit!.col + 2, chipHit!.row);
@@ -336,28 +345,50 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 		expect(pasteRow01).toBeDefined();
 		expect(popupBefore.text()).not.toContain("paste-row-15");
 
-		const scrollBeforePopupWheel = scroll.scrollTop;
 		await harness.mouseWheel("down", pasteRow01!.col + 2, pasteRow01!.row, 8);
-		const popupAfterDown = harness.screen();
-		expect(popupAfterDown.text()).toContain("paste-row-15");
-		expect(scroll.scrollTop).toBe(scrollBeforePopupWheel);
-
-		/* На границе вложенного окна колесо не передаётся ленте. */
+		expect(harness.screen().text()).toContain("paste-row-15");
 		await harness.mouseWheel("down", pasteRow01!.col + 2, pasteRow01!.row, 10);
-		expect(scroll.scrollTop).toBe(scrollBeforePopupWheel);
+		const remove = harness.screen().findText("[Remove]")!;
+		await harness.mouseMove(remove.col + 2, remove.row);
+		await harness.mouseClick(remove.col + 2, remove.row);
+		expect(visibleTranscript()).toEqual(initialRows);
 
-		await harness.mouseWheel("up", 60, 5, 3);
-		expect(harness.screen().text()).not.toContain("paste-row-15");
-		expect(scroll.scrollTop).toBeLessThan(scrollBeforePopupWheel);
+		await harness.paste(longPaste, true);
+		await harness.mouseMove(chipHit!.col + 2, chipHit!.row);
+		await harness.mouseWheel("up", 90, 5, 3);
+		expect(harness.screen().text()).not.toContain("paste-row-01");
+		expect(visibleTranscript()).not.toEqual(initialRows);
 
-		editor.setText(Array.from({ length: 16 }, (_, i) => `draft-line-${i + 1}`).join("\n"));
-		harness.flushFrame(true);
-		const composerBodyHit = harness.screen().findText("draft-line-");
-		expect(composerBodyHit).toBeDefined();
-		const scrollBeforeComposerWheel = scroll.scrollTop;
-		await harness.mouseWheel("up", composerBodyHit!.col + 2, composerBodyHit!.row, 6);
-		expect(scroll.scrollTop).toBe(scrollBeforeComposerWheel);
-		expect(harness.screen().text()).toContain("draft-line-1");
+		for (let line = 1; line <= 16; line++) {
+			await harness.pressKey("\x1b[13;2u");
+			await harness.typeText(`draft-line-${line}`);
+		}
+		const composerBodyHit = harness.screen().findText("draft-line-16")!;
+		const rowsBeforeComposerWheel = visibleTranscript();
+		await harness.mouseWheel("up", composerBodyHit.col + 2, composerBodyHit.row, 20);
+		expect(visibleTranscript()).toEqual(rowsBeforeComposerWheel);
+		expect(harness.screen().findText("draft-line-1")).toBeDefined();
+	});
+
+	it("copies star-prefixed prose and soft-wrapped code without losing indentation", async () => {
+		const prose = "An ordinary paragraph.\n\n✦ This is assistant prose.";
+		const long = `const value = "${"X".repeat(80)}END_OF_STRING";`;
+		const indented = "    important()";
+		harness = await createInteractiveHarness({
+			width: 56, height: 28, clipboard: { text: "before" },
+			responses: [fauxAssistantMessage(`${prose}\n\n\`\`\`js\n${long}\n${indented}\n\`\`\``)],
+		});
+		await harness.submitInput("Show code");
+		const screen = harness.screen();
+		const start = screen.findText("An ordinary paragraph.")!;
+		const end = screen.findText("important()")!;
+		await harness.mouseDrag(start.col, start.row, end.col + "important()".length, end.row, { steps: 5 });
+		await harness.pressKey("\x03");
+		expect(await getActiveHostRuntime()!.clipboard.readText?.()).toBe(`${prose}\n\n${long}\n${indented}`);
+		await harness.mouseDrag(end.col - 4, end.row, end.col + "important()".length, end.row, { steps: 3 });
+		const copy = harness.screen().findText("[Copy]")!;
+		await harness.mouseClick(copy.col + 2, copy.row);
+		expect(await getActiveHostRuntime()!.clipboard.readText?.()).toBe(indented);
 	});
 
 	it("defaults copyOnSelect to false, mounts [Copy] [Quote · Alt+Q], copies clean text via [Copy] and Ctrl+C/Ctrl+X with ✓ Copied flash, and supports copyOnSelect = true", async () => {

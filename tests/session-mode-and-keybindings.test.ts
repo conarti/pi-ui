@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -75,6 +75,17 @@ describe("Canonical Session Mode & Shift+Tab / Alt+T keybindings", () => {
 		expect(JSON.parse(readFileSync(kbPath, "utf8"))).toEqual({
 			"app.thinking.cycle": "ctrl+shift+t",
 		});
+	});
+
+	it("synchronizes keybindings through dangling relative symlinks without replacing the links", () => {
+		const dir = allocateTempDir("pi-ui-kb-links-");
+		const path = join(dir, "keybindings.json");
+		symlinkSync("indirection.json", path);
+		symlinkSync("dotfiles/keys.json", join(dir, "indirection.json"));
+		expect(syncThinkingCycleKeybinding(dir)).toBe(true);
+		expect(lstatSync(path).isSymbolicLink()).toBe(true);
+		expect(lstatSync(join(dir, "indirection.json")).isSymbolicLink()).toBe(true);
+		expect(JSON.parse(readFileSync(join(dir, "dotfiles", "keys.json"), "utf8"))).toEqual({ "app.thinking.cycle": "alt+t" });
 	});
 
 	it("cycles Session Mode on Shift+Tab without changing thinking level, cycles thinking on Alt+T across RU/EN layouts, and supports canonical slash commands", async () => {

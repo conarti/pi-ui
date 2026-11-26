@@ -622,10 +622,11 @@ export class ThinkingBlock implements Component {
 			);
 			out.push(padFullWidth(hdrRow));
 
-			for (let i = 0; i < visibleSlice.length; i += 1) {
+			const bodyHeight = Math.min(nonEmptyProse.length, STREAMING_THINKING_PAGE_LINES);
+			for (let i = 0; i < bodyHeight; i += 1) {
 				const spine = waveAccentGlyph(i + 1, "▎", light);
 				const row = truncateToWidth(
-					`${margin}${spine} ${visibleSlice[i]!}`,
+					`${margin}${spine} ${visibleSlice[i] ?? ""}`,
 					maxRowWidth,
 					"…",
 				);

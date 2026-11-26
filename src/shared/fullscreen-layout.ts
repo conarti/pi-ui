@@ -17,8 +17,8 @@ import { hasBlockingModalOverlay } from "./modal-card.ts";
 export const OUTER_CANVAS_MARGIN = 2;
 
 export function computeOuterCanvasMargin(width: number): number {
-	/* Ниже минимальной ширины шапки уступаем поля компактному редактору. */
-	return width >= 24 ? OUTER_CANVAS_MARGIN : 0;
+	/* При двух полях рамке Composer всё ещё нужно девять колонок. */
+	return width >= 13 ? OUTER_CANVAS_MARGIN : 0;
 }
 
 export interface FullscreenShellContext {

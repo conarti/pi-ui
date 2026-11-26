@@ -313,10 +313,13 @@ export function paintThemeSurfaceRow(
 	content: string,
 	targetWidth: number,
 	rgb: RgbTuple,
+	blueSafe = false,
 ): string {
 	const clipped = truncateToWidth(content, targetWidth, "…");
 	const pad = " ".repeat(Math.max(0, targetWidth - visibleWidth(clipped)));
-	const bgEsc = openAnsiRgb(48, rgb[0], rgb[1], rgb[2], theme);
+	const bgEsc = blueSafe
+		? blueAnsiPrefix(48, clampHueOutsideForbiddenBands(rgb), theme)
+		: openAnsiRgb(48, ...rgb, theme);
 	const patched = (clipped + pad)
 		.replace(/\x1b\[0m/g, `\x1b[0m${bgEsc}`)
 		.replace(/\x1b\[49m/g, bgEsc);

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { loadPiUiUserConfig } from "../../shared/pi-ui-config.ts";
+import { loadExplicitToolDensity, loadPiUiUserConfig } from "../../shared/pi-ui-config.ts";
 import {
 	DISPLAY_MODES,
 	DISPLAY_STYLES,
@@ -188,7 +188,11 @@ export function loadConfig(cwd?: string, projectTrusted = false): CompactToolsCo
 		density: piUiDensity,
 	};
 	const globalPath = join(getAgentDir(), CONFIG_FILE);
-	const globalConfig = mergeConfig(baseConfig, readJson(globalPath), globalPath);
+	const legacyGlobal = mergeConfig(baseConfig, readJson(globalPath), globalPath);
+	const explicitDensity = loadExplicitToolDensity();
+	const globalConfig: CompactToolsConfig = explicitDensity && legacyGlobal.style !== "off"
+		? { ...legacyGlobal, style: "density", density: explicitDensity }
+		: legacyGlobal;
 	if (!cwd || !projectTrusted) return globalConfig;
 	const projectPath = join(cwd, CONFIG_DIR_NAME, CONFIG_FILE);
 	return mergeConfig(globalConfig, readJson(projectPath), projectPath);

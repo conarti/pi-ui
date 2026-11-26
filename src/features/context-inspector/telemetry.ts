@@ -358,6 +358,7 @@ export function resolveTurnTtft(branch: readonly unknown[], finalEntryId: string
 export function aggregateSessionTelemetry(
 	branch: readonly unknown[],
 	fallbackModel = "unknown",
+	usageEntries: readonly unknown[] = branch,
 ): SessionTelemetrySummary {
 	let turnCount = 0;
 	let modelCalls = 0;
@@ -380,25 +381,31 @@ export function aggregateSessionTelemetry(
 				}
 			} else if (msg.role === "assistant") {
 				modelCalls += 1;
-				if (isRecord(msg.usage)) {
-					const u = msg.usage;
-					const uncachedIn = isNonNegativeCount(u.input) ? u.input : 0;
-					const cacheRead = isNonNegativeCount(u.cacheRead) ? u.cacheRead : 0;
-					const cacheWrite = isNonNegativeCount(u.cacheWrite) ? u.cacheWrite : 0;
-					inputTokens += uncachedIn + cacheRead + cacheWrite;
-					cacheReadTokens += cacheRead;
-					outputTokens += isNonNegativeCount(u.output) ? u.output : 0;
-					reasoningTokens += isNonNegativeCount(u.reasoning) ? u.reasoning : 0;
-					if (isRecord(u.cost) && isNonNegativeCount(u.cost.total)) {
-						costTotal += u.cost.total;
-					}
-				}
 			}
 			continue;
 		}
 
 		const step = readStepMetrics(entry);
 		if (step) records.push({ turnIndex: Math.max(1, turnCount || records.length + 1), ...step });
+	}
+
+	/* Итоги затрат покрывают весь журнал сессии, а метрики ходов — только активную ветку. */
+	for (const entry of usageEntries) {
+		if (!isRecord(entry)) continue;
+		const msg = entry.type === "message" && isRecord(entry.message) ? entry.message : undefined;
+		const usage = msg?.role === "assistant" || msg?.role === "toolResult"
+			? msg.usage
+			: entry.type === "usage" || entry.type === "compaction" || entry.type === "branch_summary"
+				? entry.usage
+				: undefined;
+		if (!isRecord(usage)) continue;
+		const cacheRead = isNonNegativeCount(usage.cacheRead) ? usage.cacheRead : 0;
+		const cacheWrite = isNonNegativeCount(usage.cacheWrite) ? usage.cacheWrite : 0;
+		inputTokens += (isNonNegativeCount(usage.input) ? usage.input : 0) + cacheRead + cacheWrite;
+		cacheReadTokens += cacheRead;
+		outputTokens += isNonNegativeCount(usage.output) ? usage.output : 0;
+		reasoningTokens += isNonNegativeCount(usage.reasoning) ? usage.reasoning : 0;
+		if (isRecord(usage.cost) && isNonNegativeCount(usage.cost.total)) costTotal += usage.cost.total;
 	}
 
 	const apiTimeMs = records.reduce((acc, rec) => acc + rec.computed.totalMs, 0);

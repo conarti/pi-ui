@@ -1,8 +1,10 @@
+import { basename } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { InteractiveMode, type Theme } from "@earendil-works/pi-coding-agent";
 import {
 	Container,
+	getImageDimensions,
 	truncateToWidth,
 	visibleWidth,
 	type Component,
@@ -11,9 +13,11 @@ import {
 } from "@earendil-works/pi-tui";
 import { fgRgb, isLightTheme, type HitBox, type RgbTuple } from "../../shared/ansi.ts";
 import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
-import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
+import { getActiveHostRuntime, getFocusedHostComponent } from "../../shared/host-runtime.ts";
 import { t } from "../../shared/i18n.ts";
 import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
+import { extensionForImageMime } from "../prompt-chips/clipboard.ts";
+import { getActivePromptChipRegistry, IMAGE_MARKER_RE } from "../prompt-chips/registry.ts";
 import { getActiveComposerEditor, type PiUiComposerEditor } from "./composer.ts";
 
 export type QueuedItemKind = "steer" | "followUp";
@@ -203,16 +207,42 @@ export async function editQueuedMidTurnItem(
 	editor?: PiUiComposerEditor,
 ): Promise<boolean> {
 	const mode = getQueueState().activeMode;
-	if (!mode) return false;
+	const runtime = getActiveHostRuntime();
+	if (!mode || !runtime) return false;
+	const targetEditor = editor ?? getActiveComposerEditor();
+	const composer = getFocusedHostComponent(runtime.tui) === targetEditor ? targetEditor : undefined;
+	const ui = runtime.ctx.ui;
+	const current = ui.getEditorText();
 	const item = takeQueuedItem(mode, kind, index);
 	if (!item) return false;
+
+	const registry = getActivePromptChipRegistry();
+	const before = registry.captureUndoSnapshot();
+	const images = item.removed.images ?? [];
+	const register = (image: ImageContent, path = "") => {
+		const dims = getImageDimensions(image.data, image.mimeType);
+		return registry.registerImage({
+			fileName: basename(path) || `image.${extensionForImageMime(image.mimeType)}`,
+			filePath: path,
+			mimeType: image.mimeType,
+			byteLength: Buffer.byteLength(image.data, "base64"),
+			base64Data: image.data,
+			widthPx: dims?.widthPx,
+			heightPx: dims?.heightPx,
+		}).token;
+	};
+	let nextImage = 0;
+	const restored = [...item.removed.text.matchAll(IMAGE_MARKER_RE)].length === images.length
+		? item.removed.text.replace(IMAGE_MARKER_RE, (marker, _number: string, path: string | undefined) => {
+			const image = images[nextImage++];
+			return image ? register(image, path) : marker;
+		})
+		: item.removed.text;
+	const draft = [restored, ...images.slice(nextImage).map((image) => register(image))].filter(Boolean).join(" ");
+	const combined = [draft, current].filter((part) => part.trim().length > 0).join("\n\n");
+	if (composer) composer.setTextWithUndoSnapshot(combined, before);
+	else ui.setEditorText(combined);
 	await reenqueueItems(mode, item.remaining);
-	const targetEditor = editor ?? getActiveComposerEditor();
-	if (targetEditor) {
-		const current = targetEditor.getText();
-		const combined = [item.removed.text, current].filter((part) => part.trim().length > 0).join("\n\n");
-		targetEditor.setText(combined);
-	}
 	mode.updatePendingMessagesDisplay();
 	mode.ui.requestRender();
 	return true;

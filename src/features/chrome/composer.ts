@@ -31,7 +31,6 @@ import { loadPiUiUserConfig } from "../../shared/pi-ui-config.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import { getSessionWorkflow, MODE_META } from "../../shared/session-workflow.ts";
 import {
-	dispatchLocalShortcut,
 	isSlotOwnedByPiUi,
 	PI_UI_OWNER_ID,
 	registerSlotOwnershipChangeListener,
@@ -940,14 +939,6 @@ export class PiUiComposerEditor extends CustomEditor {
 			!isKeyRelease(data) &&
 			!hasBlockingModalOverlay(this.tui)
 		) {
-			if (matchesLayoutChord(data, "ctrl+l")) {
-				void dispatchLocalShortcut("ctrl+l");
-				return;
-			}
-			if (matchesLayoutChord(data, "alt+t")) {
-				void dispatchLocalShortcut("alt+t");
-				return;
-			}
 			if (matchesLayoutChord(data, "alt+m") && isSlotOwnedByPiUi("shortcut:alt+m")) {
 				openComposerPopover(this.deps.pi, this.deps.ctx, "mode");
 				return;

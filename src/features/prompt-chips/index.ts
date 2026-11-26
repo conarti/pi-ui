@@ -34,7 +34,7 @@ import {
 } from "../../shared/host-runtime.ts";
 import { matchesLayoutChord } from "../../shared/keyboard-layout.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
-import { hookMethod } from "../../shared/runtime-hooks.ts";
+import { copyToClipboard, hookMethod } from "../../shared/runtime-hooks.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
 import {
 	extractPastedImageFilesSync,
@@ -410,7 +410,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 		resolveImageData: resolveChipImageSource,
 		resolveFullText: resolveChipFullText,
 		onCopy: (_chip, fullText) => {
-			void resolveActiveClipboardProvider().writeText?.(fullText);
+			copyToClipboard(fullText);
 			requestRender();
 		},
 		onEdit: (chip) => {
@@ -675,15 +675,22 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 	};
 
 	let markSentPopupOpened: (() => void) | undefined;
+	let sentPreviewFromHover = false;
 
-	const toggleSentPillPreview = (chip: SerializedPromptChip, screenX: number, screenY: number): void => {
+	const showSentPillPreview = (chip: SerializedPromptChip, screenX: number, screenY: number, hover: boolean): void => {
 		const tui = resolveEditorTui(lastEditor);
 		const expectedKey = `sent-pill:${chip.id}:${chip.token}`;
 		if (overlayController.source === "sent-pill" && overlayController.chipKey === expectedKey) {
-			overlayController.hide(["sent-pill"]);
-			requestRender();
+			if (!hover && !sentPreviewFromHover) {
+				overlayController.hide(["sent-pill"]);
+				requestRender();
+			} else {
+				if (!hover) sentPreviewFromHover = false;
+				markSentPopupOpened?.();
+			}
 			return;
 		}
+		sentPreviewFromHover = hover;
 		overlayController.show(
 			tui,
 			chip,
@@ -754,7 +761,8 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 			pills.push({
 				id: `${context.surface}-${chip?.id ?? `${span.kind}-${span.number}`}-${idx}`,
 				label: span.token,
-				onClick: chip ? (sx, sy) => toggleSentPillPreview(chip, sx, sy) : undefined,
+				onClick: chip ? (sx, sy) => showSentPillPreview(chip, sx, sy, false) : undefined,
+				onHover: chip?.kind === "image" ? (sx, sy) => showSentPillPreview(chip, sx, sy, true) : undefined,
 			});
 		}
 		formatted += reconstructed.displayText.slice(pos).replace(/\t/g, "  ");

@@ -435,6 +435,10 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 
 		const imgPillHit = topScreen.findText("[🖼 Image #1]");
 		expect(imgPillHit).toBeDefined();
+		await harness.mouseMove(imgPillHit!.col + 2, imgPillHit!.row);
+		expect(harness.screen().text()).toContain("mockup-v2.png");
+		await harness.mouseMove(0, 0);
+		expect(harness.screen().text()).not.toContain("mockup-v2.png");
 		await harness.mouseClick(imgPillHit!.col + 2, imgPillHit!.row);
 		expect(harness.screen().text()).toContain("mockup-v2.png");
 

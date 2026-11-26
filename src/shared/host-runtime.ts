@@ -29,6 +29,7 @@ import {
 	hookMethod,
 	registerRuntimeClipboardSink,
 } from "./runtime-hooks.ts";
+import { stripSelectionCopyMetadata } from "./selection-copy.ts";
 import { setRequestRender } from "./ui-action-bridge.ts";
 
 export type { FullscreenShellContext, MountedViewportSlots };
@@ -170,6 +171,10 @@ function getCompositorMap(): WeakMap<object, ViewportChromeCompositor> {
 		g[COMPOSITOR_MAP_KEY] = new WeakMap();
 	}
 	return g[COMPOSITOR_MAP_KEY]!;
+}
+
+export function getFocusedHostComponent(tui: TUI | undefined): Component | null | undefined {
+	return (tui as (TUI & { getFocusedComponent?: () => Component | null }) | undefined)?.getFocusedComponent?.();
 }
 
 /**
@@ -342,7 +347,8 @@ function installViewportChromeHooks(): void {
 			const screen = args[0] as string[];
 			const layout = args[1] as { root?: any } | undefined;
 			const width = Number(args[2] ?? self.terminal?.columns ?? 80);
-			return compositor.compositeFrame(screen, layout, width);
+			/* Метки остаются в строках документа для выделения, но не отправляются в терминал. */
+			return compositor.compositeFrame(screen, layout, width).map(stripSelectionCopyMetadata);
 		},
 		["pi.grok-ui.hook.chat.timelineComposite"],
 	);
@@ -771,7 +777,7 @@ export function installClickedHoverPopupDismissHooks(
 	return () => { opened += 1; };
 }
 
-function installPrimaryScrollDismissHooks(namespace: string, isActive: () => boolean, onDismiss: () => void): void {
+export function installPrimaryScrollDismissHooks(namespace: string, isActive: () => boolean, onDismiss: () => void): void {
 	const scrollProto = (ScrollView as unknown as { prototype?: object } | undefined)?.prototype;
 	if (scrollProto) {
 		for (const methodName of ["scrollTo", "scrollBy", "scrollToStart", "scrollToEnd"] as const) {

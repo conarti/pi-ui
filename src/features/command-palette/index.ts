@@ -34,6 +34,7 @@ import {
 	TOOL_DENSITY_PRESETS,
 	updatePiUiUserConfig,
 } from "../../shared/pi-ui-config.ts";
+import { syncShortcutsBar } from "../chrome/shortcuts-bar.ts";
 import { notifyLiveToolDensityChange } from "../tool-calls/command.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import { COMMAND_PALETTE_CHORD, dispatchLocalShortcut } from "../../shared/slot-arbitration.ts";
@@ -228,6 +229,7 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 			run: () => {
 				const next = !loadPiUiUserConfig().showShortcutsBar;
 				updatePiUiUserConfig({ showShortcutsBar: next });
+				syncShortcutsBar();
 				requestRender();
 				ctx.ui.notify(
 					t("shortcutsBar.toggled", { state: next ? t("state.on") : t("state.off") }),
