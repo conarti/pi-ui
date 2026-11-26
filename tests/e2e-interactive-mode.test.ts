@@ -449,16 +449,13 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		await flushUiAsync(harness);
 
 		const editor = getActiveComposerEditor()!;
-		expect(editor.getText()).toBe("[❝ Quote #1 · 2 lines]");
+		expect(editor.getText()).toBe("[❝ Quote #1 · 2 lines] ");
 
-		await harness.typeText(" ");
 		await harness.pressKey("\x1bq");
 		await flushUiAsync(harness);
 
-		await harness.typeText(" ");
 		await harness.paste("log-line-1\nlog-line-2\nlog-line-3\nlog-line-4", true);
 
-		await harness.typeText(" ");
 		await harness.pressKey("\x16");
 		await flushUiAsync(harness);
 
@@ -821,7 +818,7 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(quotePopupAfterSwitch).toBeDefined();
 		await harness.mouseClick(quotePopupAfterSwitch!.col + 2, quotePopupAfterSwitch!.row);
 		await flushUiAsync(harness);
-		expect(getActiveComposerEditor()!.getText()).toBe("[❝ Quote #1 · 1 line]");
+		expect(getActiveComposerEditor()!.getText()).toBe("[❝ Quote #1 · 1 line] ");
 		getActiveComposerEditor()!.setText("");
 
 		const altProto = TuiAltScreen.prototype as unknown as { handleMouseEvent: unknown };

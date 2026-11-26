@@ -139,9 +139,12 @@ export class StickyPromptBar implements Component {
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-		if (!this.active || event.y < 0 || event.y >= this.lastRenderedHeight) return undefined;
+		if (!this.active || this.lastVisibleHeight <= 0 || event.y < 0 || event.y >= this.lastVisibleHeight) {
+			return undefined;
+		}
+		const contentRowY = event.y + this.lastPushOffset;
 		const matchedPill = this.pillHits.find(
-			(hit) => event.y === hit.y && event.x >= hit.xStart && event.x < hit.xEnd,
+			(hit) => contentRowY === hit.y && event.x >= hit.xStart && event.x < hit.xEnd,
 		);
 
 		if (event.type === "move") {
@@ -195,10 +198,39 @@ export class StickyPromptBar implements Component {
 			};
 		}
 
-		const nextTurn = this.findAdjacentMountedTurn(this.active, "next");
 		const scrollTop = this.shell.scroll.scrollTop ?? 0;
+		/* Пока сама карточка длинного промпта в ленте ещё занимает не меньше строк, чем Sticky Prompt,
+		 * не рисуем усечённую плашку поверх её собственной нижней части */
+		if (
+			this.config.mode === "auto" &&
+			this.active.start <= scrollTop &&
+			this.active.end - scrollTop >= lines.length
+		) {
+			this.lastVisibleHeight = 0;
+			this.lastPushOffset = 0;
+			return {
+				lines: [],
+				visibleLines: [],
+				fullHeight: 0,
+				pushOffset: 0,
+			};
+		}
+
+		const nextTurn = this.findAdjacentMountedTurn(this.active, "next");
 		const push = computeStickyPushOffset(lines.length, scrollTop, nextTurn?.start);
-		const visibleLines = push.pushOffset > 0 ? lines.slice(push.pushOffset) : lines;
+		let visibleLines = push.pushOffset > 0 ? lines.slice(push.pushOffset) : lines;
+		/* Когда карточка следующего промпта упирается снизу в Sticky Prompt, делаем нижнюю пустую строку-отступ прозрачной (цвета фона холста), чтобы две плашки визуально не слипались */
+		if (
+			nextTurn !== undefined &&
+			nextTurn.start - scrollTop <= lines.length &&
+			visibleLines.length > 0
+		) {
+			if (visibleLines.length === 1) {
+				visibleLines = [];
+			} else {
+				visibleLines = [...visibleLines.slice(0, -1), " ".repeat(width)];
+			}
+		}
 		this.lastPushOffset = push.pushOffset;
 		this.lastVisibleHeight = visibleLines.length;
 		return {

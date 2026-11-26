@@ -191,19 +191,20 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 
 		const fourLineSnippet = 'fn main() {\n  let x = 1;\n  println!("{x}");\n}';
 		await harness.paste(fourLineSnippet, true);
-		expect(editor.getText()).toBe("[🖼 Image #1] [📋 Pasted #2 · 4 lines]");
+		expect(editor.getText()).toBe("[🖼 Image #1] [📋 Pasted #2 · 4 lines] ");
 
 		harness.setClipboard({
 			image: null,
 			text: "L".repeat(312),
 		});
-		await harness.typeText(" ");
 		await harness.pressKey("\x1b[118;9u");
 		await flushClipboardAction(harness);
 		expect(editor.getText()).toBe(
-			"[🖼 Image #1] [📋 Pasted #2 · 4 lines] [📋 Pasted #3 · 312 chars]",
+			"[🖼 Image #1] [📋 Pasted #2 · 4 lines] [📋 Pasted #3 · 312 chars] ",
 		);
 
+		/* Отступаем через завершающий пробел на сам чип #3 */
+		await harness.pressKey("\x1b[D");
 		await harness.pressKey("\x1b[D");
 		for (const mode of ["dark", "light"] as const) {
 			harness.setTheme(mode);
@@ -224,23 +225,25 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 
 		await harness.pressKey("\x01");
 		await harness.pressKey("\x1b[3~");
-		expect(editor.getText()).toBe(" [📋 Pasted #1 · 4 lines] [📋 Pasted #2 · 312 chars]");
+		expect(editor.getText()).toBe(" [📋 Pasted #1 · 4 lines] [📋 Pasted #2 · 312 chars] ");
 
 		await harness.pressKey("\x1b[1103;9u");
-		expect(editor.getText()).toBe(" [📋 Pasted #1 · 4 lines] [📋 Pasted #2 · 312 chars]");
+		expect(editor.getText()).toBe(" [📋 Pasted #1 · 4 lines] [📋 Pasted #2 · 312 chars] ");
 
 		await harness.pressKey("\x1b[45;5u");
 		expect(editor.getText()).toBe(
-			"[🖼 Image #1] [📋 Pasted #2 · 4 lines] [📋 Pasted #3 · 312 chars]",
+			"[🖼 Image #1] [📋 Pasted #2 · 4 lines] [📋 Pasted #3 · 312 chars] ",
 		);
 
 		await harness.pressKey("\x05");
 		await harness.pressKey("\x7f");
+		await harness.pressKey("\x7f");
 		expect(editor.getText()).toBe("[🖼 Image #1] [📋 Pasted #2 · 4 lines] ");
 
 		await harness.pressKey("\x1f");
+		await harness.pressKey("\x1f");
 		expect(editor.getText()).toBe(
-			"[🖼 Image #1] [📋 Pasted #2 · 4 lines] [📋 Pasted #3 · 312 chars]",
+			"[🖼 Image #1] [📋 Pasted #2 · 4 lines] [📋 Pasted #3 · 312 chars] ",
 		);
 
 		await harness.submitDraft();
@@ -404,7 +407,7 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 			"retryable: true",
 		].join("\n");
 		await harness.paste(fiveLineLog, true);
-		expect(editor.getText()).toBe("Review [🖼 Image #1] and [📋 Pasted #2 · 5 lines]");
+		expect(editor.getText()).toBe("Review [🖼 Image #1] and [📋 Pasted #2 · 5 lines] ");
 
 		await harness.pressKey("\r");
 		await toolEnteredPromise;
@@ -413,7 +416,7 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		const steerPaste = "step A\nstep B\nstep C\nstep D";
 		await harness.typeText("Steer with ");
 		await harness.paste(steerPaste, true);
-		expect(editor.getText()).toBe("Steer with [📋 Pasted #1 · 4 lines]");
+		expect(editor.getText()).toBe("Steer with [📋 Pasted #1 · 4 lines] ");
 		await harness.pressKey("\r");
 		await flushClipboardAction(harness);
 
@@ -1130,11 +1133,11 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await flushClipboardAction(harness);
 		await harness.typeText("log ");
 		await harness.paste("TRACE line 1\nTRACE line 2\nTRACE line 3\nTRACE line 4", true);
-		await harness.typeText(" ref ");
+		await harness.typeText("ref ");
 		await harness.pressKey("\x1b[113;3u");
 		await flushClipboardAction(harness);
 		expect(getActiveComposerEditor()!.getText()).toBe(
-			"Check [🖼 Image #1] log [📋 Pasted #2 · 4 lines] ref [❝ Quote #3 · 2 lines]",
+			"Check [🖼 Image #1] log [📋 Pasted #2 · 4 lines] ref [❝ Quote #3 · 2 lines] ",
 		);
 		await harness.submitDraft();
 
@@ -1234,7 +1237,6 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 			expect(pastePopupText).not.toContain("|---|");
 
 			/* Добавляем цитату с Markdown через Alt+Q и проверяем рендер **bold** и `code` без сырых звёздочек */
-			await harness.typeText(" ");
 			await harness.pressKey("\x1b[113;3u");
 			await flushClipboardAction(harness);
 			const quotePopupText = harness.screen().text();
@@ -1264,5 +1266,59 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		} finally {
 			rmSync(tmpCwd, { recursive: true, force: true });
 		}
+	});
+
+	it("anchors Composer chip preview popups directly above the chip's own visual line in a multiline draft rather than above the entire Composer box", async () => {
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 100,
+			height: 36,
+			clipboard: {
+				image: { bytes: TINY_PNG_BYTES, mimeType: "image/png" },
+				text: null,
+			},
+		});
+
+		await harness.typeText("1. First line of multiline prompt");
+		await harness.pressKey("\x1b[13;2u");
+		await harness.typeText("2. ");
+		harness.setClipboard({ image: null, text: "Quoted line alpha\nQuoted line beta" });
+		await harness.pressKey("\x1b[113;3u");
+		await flushClipboardAction(harness);
+		await harness.typeText("question after quote");
+		await harness.pressKey("\x1b[13;2u");
+		await harness.typeText("3. Third line");
+		await harness.pressKey("\x1b[13;2u");
+		await harness.typeText("4. Fourth line");
+		await harness.pressKey("\x1b[13;2u");
+		await harness.typeText("5. ");
+		harness.setClipboard({
+			image: { bytes: TINY_PNG_BYTES, mimeType: "image/png" },
+			text: null,
+		});
+		await harness.pressKey("\x16");
+		await flushClipboardAction(harness);
+		await harness.typeText("after image");
+
+		const composerTop = findComposerTopRow(harness);
+		const baseScreen = harness.screen();
+		const quoteHit = baseScreen.findText("[❝ Quote #1 · 2 lines]")!;
+		const imageHit = baseScreen.findText("[🖼 Image #2]")!;
+		expect(quoteHit).toBeDefined();
+		expect(imageHit).toBeDefined();
+		expect(imageHit.row).toBeGreaterThan(composerTop + 4);
+
+		/* При наведении на [🖼 Image #2] на 5-й строке нижняя рамка попапа стоит ровно над строкой [🖼 Image #2], а не над верхней рамкой Composer */
+		await harness.mouseMove(imageHit.col + 2, imageHit.row);
+		const imgPopScreen = harness.screen();
+		expect(imgPopScreen.rowText(imageHit.row - 1)).toContain("╰─");
+		expect(imgPopScreen.rowText(imageHit.row)).toContain("[🖼 Image #2]");
+
+		/* Снимаем фокус с открытого попапа чипа #2 и наводим мышь на [❝ Quote #1] на 2-й строке: попап стоит на quoteHit.row - 1 */
+		await harness.mouseMove(95, 1);
+		await harness.mouseMove(quoteHit.col + 2, quoteHit.row);
+		const quotePopScreen = harness.screen();
+		expect(quotePopScreen.rowText(quoteHit.row - 1)).toContain("╰─");
+		expect(quotePopScreen.rowText(quoteHit.row)).toContain("[❝ Quote #1 · 2 lines]");
 	});
 });

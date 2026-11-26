@@ -550,4 +550,136 @@ export default function (pi) {
 		await harness.pressKey("\x1b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 	});
+
+	it("keeps ttft · tok/s visible below folded tool groups when parallel read steps place streamed thinking metrics after the first tool call", async () => {
+		const projDir = allocateTempDir("pi-ui-parallel-group-metrics-");
+		writeFileSync(join(projDir, "a.txt"), "alpha\n", "utf8");
+		writeFileSync(join(projDir, "b.txt"), "beta\n", "utf8");
+		writeFileSync(join(projDir, "c.txt"), "gamma\n", "utf8");
+
+		const t0 = new Date(2026, 10, 26, 23, 0, 0).getTime();
+		const entries: unknown[] = [
+			makeUserEntry("u-1", null, "Inspect all three files", t0),
+			{
+				type: "message",
+				id: "a-1",
+				parentId: "u-1",
+				timestamp: new Date(t0 + 20_000).toISOString(),
+				message: {
+					role: "assistant",
+					model: "gemini-4-carbon",
+					stopReason: "toolUse",
+					content: [
+						{ type: "thinking", thinking: "Inspecting alpha, beta, and gamma in parallel." },
+						{ type: "toolCall", id: "tc-1", name: "read", arguments: { path: "a.txt" } },
+					],
+					usage: { input: 2000, cacheRead: 10000, cacheWrite: 0, output: 566, reasoning: 141, totalTokens: 12566 },
+					timestamp: t0 + 100,
+				},
+			},
+			{
+				type: "message",
+				id: "tr-1",
+				parentId: "a-1",
+				timestamp: new Date(t0 + 20_010).toISOString(),
+				message: {
+					role: "toolResult",
+					toolCallId: "tc-1",
+					toolName: "read",
+					content: [{ type: "text", text: "alpha\n" }],
+					isError: false,
+					timestamp: t0 + 20_010,
+				},
+			},
+			{
+				type: "custom",
+				id: "m-1",
+				parentId: "tr-1",
+				timestamp: new Date(t0 + 20_020).toISOString(),
+				customType: METRICS_ENTRY_TYPE,
+				data: {
+					version: 1,
+					timestamp: t0 + 100,
+					firstContentAt: t0 + 6_600,
+					completedAt: t0 + 19_670,
+					streamedThinkingChars: 228,
+					streamDeltaCount: 67,
+					outputTokens: 566,
+					reasoningTokens: 141,
+					model: "gemini-4-carbon",
+					thinkingLevel: "high",
+					stopReason: "toolUse",
+				} satisfies ResponseMetricsData,
+			},
+			{
+				type: "message",
+				id: "a-2",
+				parentId: "m-1",
+				timestamp: new Date(t0 + 20_100).toISOString(),
+				message: {
+					role: "assistant",
+					model: "gemini-4-carbon",
+					stopReason: "toolUse",
+					content: [{ type: "toolCall", id: "tc-2", name: "read", arguments: { path: "b.txt" } }],
+					usage: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0, totalTokens: 0 },
+					timestamp: t0 + 20_050,
+				},
+			},
+			{
+				type: "message",
+				id: "tr-2",
+				parentId: "a-2",
+				timestamp: new Date(t0 + 20_110).toISOString(),
+				message: {
+					role: "toolResult",
+					toolCallId: "tc-2",
+					toolName: "read",
+					content: [{ type: "text", text: "beta\n" }],
+					isError: false,
+					timestamp: t0 + 20_110,
+				},
+			},
+			{
+				type: "message",
+				id: "a-3",
+				parentId: "tr-2",
+				timestamp: new Date(t0 + 20_200).toISOString(),
+				message: {
+					role: "assistant",
+					model: "gemini-4-carbon",
+					stopReason: "toolUse",
+					content: [{ type: "toolCall", id: "tc-3", name: "read", arguments: { path: "c.txt" } }],
+					usage: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0, totalTokens: 0 },
+					timestamp: t0 + 20_150,
+				},
+			},
+			{
+				type: "message",
+				id: "tr-3",
+				parentId: "a-3",
+				timestamp: new Date(t0 + 20_210).toISOString(),
+				message: {
+					role: "toolResult",
+					toolCallId: "tc-3",
+					toolName: "read",
+					content: [{ type: "text", text: "gamma\n" }],
+					isError: false,
+					timestamp: t0 + 20_210,
+				},
+			},
+		];
+
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			cwd: projDir,
+			width: 104,
+			height: 28,
+			initialEntries: entries as never,
+		});
+
+		const screenText = harness.screen().text();
+		expect(screenText).toContain("Thought");
+		expect(screenText).toContain("Explored 3 files");
+		expect(screenText).toContain("ttft 6.5s · 43.3 tok/s");
+	});
 });

@@ -492,7 +492,7 @@ export class PiUiComposerEditor extends CustomEditor {
 		mouseY: number,
 		totalWidth: number,
 		findSpans: (logicalLine: string) => ReadonlyArray<TSpan>,
-	): { readonly span: TSpan; readonly col: number } | undefined {
+	): { readonly span: TSpan; readonly col: number; readonly rowOffset: number } | undefined {
 		const internal = this.internals();
 		const { leftOffset, visualLines } = this.resolveBoxLayout(totalWidth);
 		const visibleRows = internal.renderedVisibleLineCount ?? Math.max(1, internal.state.lines.length);
@@ -511,7 +511,7 @@ export class PiUiComposerEditor extends CustomEditor {
 			const colStart = leftOffset + visibleWidth(logicalLine.slice(vl.startCol, sliceStart));
 			const colEnd = colStart + visibleWidth(logicalLine.slice(sliceStart, sliceEnd));
 			if (mouseX >= colStart && mouseX < colEnd) {
-				return { span, col: colStart };
+				return { span, col: colStart, rowOffset: mouseY };
 			}
 		}
 		return undefined;
@@ -520,7 +520,7 @@ export class PiUiComposerEditor extends CustomEditor {
 	findSpanColumnAtCursor<TSpan extends { readonly start: number; readonly end: number }>(
 		totalWidth: number,
 		findSpans: (logicalLine: string) => ReadonlyArray<TSpan>,
-	): { readonly span: TSpan; readonly col: number } | undefined {
+	): { readonly span: TSpan; readonly col: number; readonly rowOffset: number } | undefined {
 		if (!this.focused) return undefined;
 		const internal = this.internals();
 		const line = internal.state.lines[internal.state.cursorLine] ?? "";
@@ -531,20 +531,30 @@ export class PiUiComposerEditor extends CustomEditor {
 
 		const matched =
 			spans.find((s) => s.start <= col && col < s.end) ??
-			spans.find((s) => s.end === col);
+			spans.find(
+				(s) =>
+					s.end === col ||
+					(col === s.end + 1 && line[s.end] === " " && col === line.length),
+			);
 		if (!matched) return undefined;
 
 		const { leftOffset, visualLines } = this.resolveBoxLayout(totalWidth);
-		const targetVl = visualLines.find(
+		const targetVlIdx = visualLines.findIndex(
 			(vl) =>
 				vl.logicalLine === internal.state.cursorLine &&
 				matched.start >= vl.startCol &&
 				matched.start < vl.startCol + Math.max(1, vl.length),
 		);
+		const targetVl = targetVlIdx >= 0 ? visualLines[targetVlIdx] : undefined;
 		const sliceFrom = targetVl ? targetVl.startCol : 0;
+		const visibleRows = internal.renderedVisibleLineCount ?? Math.max(1, visualLines.length);
+		const rawRowOffset =
+			targetVlIdx >= 0 ? targetVlIdx - (internal.scrollOffset ?? 0) + 1 : 1;
+		const rowOffset = Math.max(1, Math.min(visibleRows, rawRowOffset));
 		return {
 			span: matched,
 			col: leftOffset + visibleWidth(line.slice(sliceFrom, matched.start)),
+			rowOffset,
 		};
 	}
 
@@ -840,7 +850,7 @@ export class PiUiComposerEditor extends CustomEditor {
 
 	/**
 	 * Вставляет токен `Prompt Chip` с автоматическими одиночными пробелами вокруг при соседстве
-	 * с непробельным текстом; для чипов изображений всегда оставляет завершающий пробел под ввод текста.
+	 * с непробельным текстом и завершающим пробелом для всех типов чипов (`Image`, `Paste`, `Quote`).
 	 */
 	insertChipTokenWithAutoSpaces(
 		token: string,
@@ -850,7 +860,7 @@ export class PiUiComposerEditor extends CustomEditor {
 		if (!token) return;
 		const before = this.getCharBeforeCursor();
 		const after = this.getCharAfterCursor();
-		const alwaysTrailSpace = options?.trailingSpace ?? token.startsWith("[🖼");
+		const alwaysTrailSpace = options?.trailingSpace ?? true;
 		const lead = before && !/\s/u.test(before) ? " " : "";
 		const trail = alwaysTrailSpace
 			? !after || !/\s/u.test(after)
@@ -860,15 +870,8 @@ export class PiUiComposerEditor extends CustomEditor {
 				? " "
 				: "";
 		this.insertTextWithUndoSnapshot(`${lead}${token}${trail}`, preCapturedSnapshot);
-		if (alwaysTrailSpace) {
-			if (after === " " && trail === "") {
-				const internal = this.internals();
-				const currentLine = internal.state.lines[internal.state.cursorLine] ?? "";
-				if (internal.state.cursorCol < currentLine.length) {
-					internal.setCursorCol(internal.state.cursorCol + 1);
-				}
-			}
-		} else if (trail === " ") {
+		/* Если справа уже есть непробельный текст ("foo|bar"), оставляем каретку сразу за чипом ("foo [chip]| bar") для атомарного Backspace; в конце строки каретка стоит после пробела ("[chip] |") */
+		if (after && !/\s/u.test(after) && trail === " ") {
 			const internal = this.internals();
 			if (internal.state.cursorCol > 0) {
 				internal.setCursorCol(internal.state.cursorCol - 1);

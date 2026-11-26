@@ -518,4 +518,73 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 			rmSync(tempCwd, { recursive: true, force: true });
 		}
 	});
+
+	it("never overlaps a multi-line prompt with a truncated Sticky clone of itself and preserves a 1-row canvas separator during push-off", async () => {
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 110,
+			height: 32,
+			responses: [
+				fauxAssistantMessage([fauxText(buildResponseText("first-reply", 20))]),
+				fauxAssistantMessage([fauxText(buildResponseText("second-reply", 30))]),
+			],
+		});
+
+		await harness.prompt("Short first prompt");
+		const sevenLinePrompt = [
+			"1. First line of tall prompt",
+			"2. Second line of tall prompt",
+			"3. Third line of tall prompt",
+			"4. Fourth line of tall prompt",
+			"5. Fifth line of tall prompt",
+			"6. Sixth line of tall prompt",
+			"7. Seventh line of tall prompt",
+		].join("\n");
+		await harness.prompt(sevenLinePrompt);
+
+		const rt = getActiveHostRuntime()!;
+		const scroll = rt.scroll!;
+		const turns = (rt.viewportSlots?.topSlot as unknown as { turnIndex: { getTurns: (w?: number) => Array<{ start: number; end: number; height: number; mounted: boolean }> } }).turnIndex.getTurns(110);
+		const mounted = turns.filter((t) => t.mounted);
+		expect(mounted).toHaveLength(2);
+		const second = mounted[1]!;
+		expect(second.height).toBe(9);
+
+		/* Во время вытеснения первого промпта вторым между плашками всегда остаётся минимум 1 строка фона холста (не цвета карточки) */
+		for (let st = second.start - 4; st <= second.start; st += 1) {
+			scroll.scrollTo(st, { disableFollow: true });
+			harness.flushFrame();
+			const scr = harness.screen();
+			const firstHit = scr.findText("Short first prompt");
+			const secondHit = scr.findText("1. First line of tall prompt");
+			if (firstHit && secondHit) {
+				expect(secondHit.row - firstHit.row).toBeGreaterThanOrEqual(3);
+				let hasCanvasSeparator = false;
+				for (let r = firstHit.row + 1; r < secondHit.row; r += 1) {
+					if (scr.cellAt(r, 10)?.bg?.kind !== "rgb") {
+						hasCanvasSeparator = true;
+						break;
+					}
+				}
+				expect(hasCanvasSeparator).toBe(true);
+			}
+		}
+
+		/* Пока длинный 7-строчный промпт прокручивается сам (start .. end - 5), Sticky не накладывает +4 lines поверх его строк 4..7 */
+		for (let st = second.start; st <= second.end - 5; st += 1) {
+			scroll.scrollTo(st, { disableFollow: true });
+			harness.flushFrame();
+			const scrText = harness.screen().text();
+			expect(scrText).not.toContain("+4 lines");
+			expect(scrText).toContain("7. Seventh line of tall prompt");
+		}
+
+		/* Как только сама карточка почти ушла за верх (scrollTop = second.end - 4), включается аккуратный 3-строчный Sticky без хвоста снизу */
+		scroll.scrollTo(second.end - 4, { disableFollow: true });
+		harness.flushFrame();
+		const pinnedText = harness.screen().text();
+		expect(pinnedText).toContain("+4 lines");
+		expect(pinnedText).not.toContain("6. Sixth line of tall prompt");
+		expect(pinnedText).not.toContain("7. Seventh line of tall prompt");
+	});
 });

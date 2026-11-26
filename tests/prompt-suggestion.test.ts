@@ -571,13 +571,14 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		expect(harness.screen().text()).not.toContain("Обнови снапшоты тестов");
 
 		await harness.pressKey("\x7f");
+		await harness.pressKey("\x7f");
 		expect(harness.screen().text()).toContain("Обнови снапшоты тестов");
 
 		await harness.pressKey("\x16");
 		await waitForCondition(() => harness!.screen().text().includes("[🖼 Image #1]"));
 		expect(harness.screen().text()).not.toContain("Обнови снапшоты тестов");
 
-		/* Первое нажатие Backspace удаляет автоматически подставленный пробел, второе — сам чип картинки */
+		/* Первое нажатие Backspace удаляет автоматически подставленный пробел, второе — сам чип */
 		await harness.pressKey("\x7f");
 		await harness.pressKey("\x7f");
 		expect(harness.screen().text()).toContain("Обнови снапшоты тестов");
@@ -586,6 +587,7 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		expect(harness.screen().text()).toContain("[❝ Quote #1 · 1 line]");
 		expect(harness.screen().text()).not.toContain("Обнови снапшоты тестов");
 
+		await harness.pressKey("\x7f");
 		await harness.pressKey("\x7f");
 		expect(harness.screen().text()).toContain("Обнови снапшоты тестов");
 

@@ -440,7 +440,7 @@ function isFoldable(child: unknown): boolean {
 	return isUnexpandedTextlessAssistant(child) !== undefined || isKind(child, Text) || isKind(child, Spacer);
 }
 
-/* Промежуточные метрики шага toolUse складываются внутрь свёрнутой группы, а хвостовая остаётся под группой. */
+/* Промежуточные метрики шага toolUse складываются внутрь свёрнутой группы, но последняя информативная строка выносится под группу. */
 function isIntermediateStepMetricsEntry(child: unknown): boolean {
 	if (!child || typeof child !== "object") return false;
 	const entry = (child as { entry?: { type?: unknown; customType?: unknown; data?: unknown } }).entry;
@@ -450,6 +450,12 @@ function isIntermediateStepMetricsEntry(child: unknown): boolean {
 	}
 	const data = entry.data as { stopReason?: unknown } | undefined;
 	return Boolean(data && typeof data === "object" && data.stopReason === "toolUse");
+}
+
+function isStreamedIntermediateMetricsEntry(child: unknown): boolean {
+	if (!isIntermediateStepMetricsEntry(child)) return false;
+	const data = (child as { entry?: { data?: { streamDeltaCount?: unknown } } }).entry?.data;
+	return typeof data?.streamDeltaCount !== "number" || data.streamDeltaCount > 2;
 }
 
 export function groupChildren(
@@ -471,6 +477,33 @@ export function groupChildren(
 		if (style === "density" && rows.length === 1 && !hasLeadThought) {
 			grouped.push(...leadingThinking, ...members);
 		} else if (rows.length > 0) {
+			/* Если параллельные вызовы оставили строку ttft · tok/s после первого тула в members, а хвост пустой — выносим её под группу */
+			if (!pending.some(isStreamedIntermediateMetricsEntry)) {
+				let hoistIdx = -1;
+				for (let i = members.length - 1; i >= 0; i -= 1) {
+					if (isStreamedIntermediateMetricsEntry(members[i])) {
+						hoistIdx = i;
+						break;
+					}
+				}
+				if (hoistIdx === -1 && !pending.some(isIntermediateStepMetricsEntry)) {
+					for (let i = members.length - 1; i >= 0; i -= 1) {
+						if (isIntermediateStepMetricsEntry(members[i])) {
+							hoistIdx = i;
+							break;
+						}
+					}
+				}
+				if (hoistIdx !== -1) {
+					const [hoisted] = members.splice(hoistIdx, 1);
+					const displacedPendingMetrics = pending.filter(isIntermediateStepMetricsEntry);
+					if (displacedPendingMetrics.length > 0) {
+						members.push(...displacedPendingMetrics);
+						pending = pending.filter((item) => !isIntermediateStepMetricsEntry(item));
+					}
+					pending.unshift(hoisted);
+				}
+			}
 			grouped.push(makeGroup(rows, [...leadingThinking, ...members]));
 		} else if (leadingThinking.length > 0) {
 			grouped.push(...leadingThinking);

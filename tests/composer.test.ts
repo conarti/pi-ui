@@ -146,7 +146,7 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 			await harness.pressKey("\x15");
 			await harness.pressKey(seq);
 			await harness.waitForIdle();
-			expect(editor.getText()).toBe("[❝ Quote #1 · 1 line]");
+			expect(editor.getText()).toBe("[❝ Quote #1 · 1 line] ");
 		}
 		await harness.pressKey("\x15");
 

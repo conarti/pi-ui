@@ -306,7 +306,7 @@ function findHoveredComposerChip(
 	registry: PromptChipRegistry,
 	pointer: ComposerPointerInfo,
 	tui: TUI | undefined,
-): { chip: SerializedPromptChip; col: number } | undefined {
+): { chip: SerializedPromptChip; col: number; rowOffset: number } | undefined {
 	if (!pointer.hovered || pointer.mouseX === undefined || pointer.mouseY === undefined) {
 		return undefined;
 	}
@@ -318,6 +318,7 @@ function findHoveredComposerChip(
 	return {
 		chip: serializePromptChip(entry, hit.span.number),
 		col: hit.col,
+		rowOffset: hit.rowOffset,
 	};
 }
 
@@ -325,7 +326,7 @@ function findCaretComposerChip(
 	editor: PiUiComposerEditor,
 	registry: PromptChipRegistry,
 	tui: TUI | undefined,
-): { chip: SerializedPromptChip; col: number } | undefined {
+): { chip: SerializedPromptChip; col: number; rowOffset: number } | undefined {
 	const totalWidth = tui?.terminal?.columns ?? 80;
 	const hit = editor.findSpanColumnAtCursor(totalWidth, findPromptChipSpans);
 	if (!hit) return undefined;
@@ -334,6 +335,7 @@ function findCaretComposerChip(
 	return {
 		chip: serializePromptChip(entry, hit.span.number),
 		col: hit.col,
+		rowOffset: hit.rowOffset,
 	};
 }
 
@@ -451,7 +453,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 		if (hoveredMatch) {
 			const topRow = resolveComposerTopRow(tui, editor, lastPointer);
 			const chipScreenY =
-				lastPointer?.screenY ?? topRow + Math.max(1, lastPointer?.mouseY ?? 1);
+				lastPointer?.screenY ?? topRow + hoveredMatch.rowOffset;
 			const chipW = visibleWidth(hoveredMatch.chip.token);
 			overlayController.show(
 				tui,
@@ -459,7 +461,8 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 				"composer-hover",
 				{
 					col: hoveredMatch.col,
-					rowAbove: topRow,
+					rowAbove: chipScreenY,
+					rowBelow: chipScreenY + 1,
 					triggerBounds: {
 						xStart: hoveredMatch.col,
 						xEnd: hoveredMatch.col + chipW,
@@ -487,11 +490,16 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 		const caretMatch = findCaretComposerChip(editor, registry, tui);
 		if (caretMatch && caretMatch.chip.kind !== "image") {
 			const topRow = resolveComposerTopRow(tui, editor, lastPointer);
+			const caretChipScreenY = topRow + caretMatch.rowOffset;
 			overlayController.show(
 				tui,
 				caretMatch.chip,
 				"composer-caret",
-				{ col: caretMatch.col, rowAbove: topRow },
+				{
+					col: caretMatch.col,
+					rowAbove: caretChipScreenY,
+					rowBelow: caretChipScreenY + 1,
+				},
 				buildPreviewActions(),
 				() => {
 					if (lastEditor) syncComposerPreview(lastEditor);

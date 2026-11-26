@@ -81,10 +81,11 @@ export function insertQuoteIntoDraft(
 		getEditorText?: () => string;
 	};
 	if (typeof ui.pasteToEditor === "function") {
-		ui.pasteToEditor(chip.token);
+		ui.pasteToEditor(`${chip.token} `);
 	} else {
 		const prev = ui.getEditorText?.() ?? "";
-		ctx.ui.setEditorText(prev ? `${prev} ${chip.token}` : chip.token);
+		const sep = prev.length > 0 && !/\s$/u.test(prev) ? " " : "";
+		ctx.ui.setEditorText(`${prev}${sep}${chip.token} `);
 	}
 	requestRender();
 	return chip;

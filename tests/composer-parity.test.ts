@@ -1193,10 +1193,10 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 			s1!.push({ type: "start", partial: fauxAssistantMessage("") });
 			await harness.flush();
 
-			/* Отправляем во время хода /skill:retro + многострочную вставку в очередь Steer */
+			/* Отправляем во время хода /skill:retro + многострочную вставку в очередь Steer (пробел после чипа ставится автоматически) */
 			await harness.typeText("/skill:retro ");
 			await harness.paste("alpha1\nalpha2\nalpha3\nalpha4", true);
-			await harness.typeText(" review sprint");
+			await harness.typeText("review sprint");
 			await harness.pressKey("\x1b\r");
 			await harness.flush();
 
