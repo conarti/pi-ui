@@ -20,9 +20,19 @@ import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { getActiveHostRuntime, getFocusedHostComponent } from "../../shared/host-runtime.ts";
 import { t } from "../../shared/i18n.ts";
 import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
+import {
+	extractSkillInvocations,
+	renderStyledSkillChip,
+	toggleSkillPreviewPopup,
+} from "../../shared/skill-tags.ts";
 import { isSlotOwnedByPiUi } from "../../shared/slot-arbitration.ts";
 import { extensionForImageMime } from "../prompt-chips/clipboard.ts";
-import { getActivePromptChipRegistry, IMAGE_MARKER_RE } from "../prompt-chips/registry.ts";
+import { styleInlinePromptChip } from "../prompt-chips/index.ts";
+import {
+	findPromptChipSpans,
+	getActivePromptChipRegistry,
+	IMAGE_MARKER_RE,
+} from "../prompt-chips/registry.ts";
 import { getActiveComposerEditor, type PiUiComposerEditor } from "./composer.ts";
 
 export type QueuedItemKind = "steer" | "followUp";
@@ -195,6 +205,70 @@ export function hasQueuedMidTurnMessages(): boolean {
 	return getActiveQueuedEntries().length > 0;
 }
 
+function restoreQueuedPayloadToDraft(item: QueuedPayload, cwd: string): string {
+	const registry = getActivePromptChipRegistry();
+	const images = item.images ?? [];
+	const register = (image: ImageContent, path = "") => {
+		const dims = getImageDimensions(image.data, image.mimeType);
+		return registry.registerImage({
+			fileName: basename(path) || `image.${extensionForImageMime(image.mimeType)}`,
+			filePath: path,
+			mimeType: image.mimeType,
+			byteLength: Buffer.byteLength(image.data, "base64"),
+			base64Data: image.data,
+			widthPx: dims?.widthPx,
+			heightPx: dims?.heightPx,
+		}).token;
+	};
+
+	const skillExtracted = extractSkillInvocations(item.text, { cwd });
+	const slashPrefix = skillExtracted.skills.map((s) => `/skill:${s.name}`).join(" ");
+	const bodySource = skillExtracted.skills.length > 0 ? skillExtracted.userText : item.text;
+
+	let nextImage = 0;
+	let restoredBody =
+		[...bodySource.matchAll(IMAGE_MARKER_RE)].length === images.length
+			? bodySource.replace(IMAGE_MARKER_RE, (marker, _number: string, path: string | undefined) => {
+					const image = images[nextImage++];
+					return image ? register(image, path) : marker;
+				})
+			: bodySource;
+
+	/* Если в реестре есть сохранённые вставки/цитаты для этого сообщения, восстанавливаем их как живые чипы */
+	const reconstructed = registry.reconstructSubmittedPrompt(bodySource);
+	if (reconstructed.chips.some((c) => c.kind === "paste" || c.kind === "quote")) {
+		let rebuilt = "";
+		let pos = 0;
+		const spans = findPromptChipSpans(reconstructed.displayText);
+		nextImage = 0;
+		for (let i = 0; i < spans.length; i += 1) {
+			const span = spans[i]!;
+			rebuilt += reconstructed.displayText.slice(pos, span.start);
+			const chipMeta =
+				reconstructed.chips.find((c) => c.kind === span.kind && c.number === span.number) ??
+				reconstructed.chips[i];
+			if (span.kind === "image") {
+				const image = images[nextImage++];
+				rebuilt += image
+					? register(image, chipMeta?.kind === "image" ? chipMeta.filePath : "")
+					: span.token;
+			} else if (span.kind === "paste" && chipMeta?.kind === "paste" && chipMeta.previewText) {
+				rebuilt += registry.registerPaste(chipMeta.previewText).token;
+			} else if (span.kind === "quote" && chipMeta?.kind === "quote" && chipMeta.previewText) {
+				rebuilt += registry.registerQuote(chipMeta.previewText).token;
+			} else {
+				rebuilt += span.token;
+			}
+			pos = span.end;
+		}
+		rebuilt += reconstructed.displayText.slice(pos);
+		restoredBody = rebuilt;
+	}
+
+	const trailingImages = images.slice(nextImage).map((image) => register(image));
+	return [slashPrefix, restoredBody.trim(), ...trailingImages].filter(Boolean).join(" ");
+}
+
 export async function removeQueuedMidTurnItem(
 	kind: QueuedItemKind,
 	index: number,
@@ -226,27 +300,8 @@ export async function editQueuedMidTurnItem(
 
 	const registry = getActivePromptChipRegistry();
 	const before = registry.captureUndoSnapshot();
-	const images = item.removed.images ?? [];
-	const register = (image: ImageContent, path = "") => {
-		const dims = getImageDimensions(image.data, image.mimeType);
-		return registry.registerImage({
-			fileName: basename(path) || `image.${extensionForImageMime(image.mimeType)}`,
-			filePath: path,
-			mimeType: image.mimeType,
-			byteLength: Buffer.byteLength(image.data, "base64"),
-			base64Data: image.data,
-			widthPx: dims?.widthPx,
-			heightPx: dims?.heightPx,
-		}).token;
-	};
-	let nextImage = 0;
-	const restored = [...item.removed.text.matchAll(IMAGE_MARKER_RE)].length === images.length
-		? item.removed.text.replace(IMAGE_MARKER_RE, (marker, _number: string, path: string | undefined) => {
-			const image = images[nextImage++];
-			return image ? register(image, path) : marker;
-		})
-		: item.removed.text;
-	const draft = [restored, ...images.slice(nextImage).map((image) => register(image))].filter(Boolean).join(" ");
+	const cwd = runtime.ctx.cwd ?? process.cwd();
+	const draft = restoreQueuedPayloadToDraft(item.removed, cwd);
 	const combined = [draft, current].filter((part) => part.trim().length > 0).join("\n\n");
 	if (composer) composer.setTextWithUndoSnapshot(combined, before);
 	else ui.setEditorText(combined);
@@ -293,9 +348,13 @@ export async function sendNowDraftMidTurn(
 	return true;
 }
 
+interface QueueHitBox extends HitBox {
+	onClickAt?: (screenX: number, screenY: number) => void;
+}
+
 class PendingQueueStripComponent implements Component {
 	private hoveredId: string | null = null;
-	private hits: HitBox[] = [];
+	private hits: QueueHitBox[] = [];
 	private readonly hoverOwner = {};
 
 	constructor(
@@ -357,11 +416,98 @@ class PendingQueueStripComponent implements Component {
 				entry.kind === "steer" ? badgeSteerRgb : badgeQueueRgb,
 				`${badgeText}:`,
 			);
-			const singleLineMsg = entry.text.replace(/\s+/g, " ").trim();
+			const cwd = getActiveHostRuntime()?.ctx.cwd ?? process.cwd();
+			const skillExtracted = extractSkillInvocations(entry.text, { cwd });
+			const queueSkills = [...skillExtracted.skills];
+			let rawUserBody = skillExtracted.userText;
+			if (queueSkills.length === 0) {
+				const slashMatch = /^((?:\s*\/skill:[^\s]+)+)(?:\s+|$)([\s\S]*)$/u.exec(rawUserBody);
+				if (slashMatch) {
+					const names = [...slashMatch[1]!.matchAll(/\/skill:([^\s]+)/gu)].map((m) => m[1]!);
+					names.forEach((name, idx) => {
+						queueSkills.push({
+							id: `slash-skill:${idx}:${name}`,
+							name,
+							body: "",
+							lineCount: 0,
+						});
+					});
+					rawUserBody = slashMatch[2] ?? "";
+				}
+			}
+			const reconstructed = getActivePromptChipRegistry().reconstructSubmittedPrompt(
+				rawUserBody,
+			);
 			const prefixW = visibleWidth(badgeStyled) + 1;
 			const msgAvail = Math.max(4, contentWidth - prefixW - actionsW - 2);
-			const clippedMsg = truncateToWidth(singleLineMsg, msgAvail, "…");
-			const leftPart = `${badgeStyled} ${theme.fg("text", clippedMsg)}`;
+
+			let styledMsg = "";
+			let localCol = 0;
+			const skillHitsPending: Array<{
+				id: string;
+				xOffset: number;
+				width: number;
+				onClickAt?: (sx: number, sy: number) => void;
+			}> = [];
+
+			for (const skill of queueSkills) {
+				const skillId = `skill:${entry.kind}:${entry.index}:${skill.id}`;
+				const renderedSkill = renderStyledSkillChip(skill.name, theme, {
+					active: this.hoveredId === skillId,
+				});
+				if (styledMsg) {
+					styledMsg += " ";
+					localCol += 1;
+				}
+				const sw = visibleWidth(renderedSkill.styled);
+				if (skill.body || skill.location) {
+					skillHitsPending.push({
+						id: skillId,
+						xOffset: localCol,
+						width: sw,
+						onClickAt: (sx, sy) => toggleSkillPreviewPopup(skill, sx, sy),
+					});
+				}
+				styledMsg += renderedSkill.styled;
+				localCol += sw;
+			}
+
+			const singleLineBody = reconstructed.displayText.replace(/\s+/gu, " ").trim();
+			if (singleLineBody) {
+				if (styledMsg) {
+					styledMsg += " ";
+					localCol += 1;
+				}
+				const spans = findPromptChipSpans(singleLineBody);
+				let bodyPos = 0;
+				for (const span of spans) {
+					if (span.start > bodyPos) {
+						styledMsg += theme.fg("text", singleLineBody.slice(bodyPos, span.start));
+					}
+					styledMsg += styleInlinePromptChip(span.token, { kind: span.kind, theme });
+					bodyPos = span.end;
+				}
+				if (bodyPos < singleLineBody.length) {
+					styledMsg += theme.fg("text", singleLineBody.slice(bodyPos));
+				}
+			}
+
+			const clippedMsg = truncateToWidth(styledMsg, msgAvail, "…");
+			const clippedW = visibleWidth(clippedMsg);
+			const msgStartCol = innerLeft + prefixW;
+			for (const sh of skillHitsPending) {
+				if (sh.xOffset + sh.width <= clippedW) {
+					this.hits.push({
+						id: sh.id,
+						xStart: msgStartCol + sh.xOffset,
+						xEnd: msgStartCol + sh.xOffset + sh.width,
+						y: screenRowY,
+						onClick: () => {},
+						onClickAt: sh.onClickAt,
+					});
+				}
+			}
+			const leftPart = `${badgeStyled} ${clippedMsg}`;
 			const leftW = visibleWidth(leftPart);
 			const gap = " ".repeat(Math.max(1, contentWidth - leftW - actionsW));
 
@@ -431,7 +577,11 @@ class PendingQueueStripComponent implements Component {
 			return { handled: true, render: false };
 		}
 		if (event.type === "click" && event.button === "left" && hit) {
-			hit.onClick();
+			if (hit.onClickAt) {
+				hit.onClickAt(event.screenX, event.screenY);
+			} else {
+				hit.onClick();
+			}
 			return { handled: true, render: true };
 		}
 		return undefined;
@@ -628,6 +778,35 @@ export function installMidTurnQueueUi(getTheme: () => Theme): void {
 		(self, args, original) => {
 			captureMode(self);
 			return original.apply(self, args);
+		},
+	);
+
+	hookMethod(
+		modeProto,
+		"restoreQueuedMessagesToEditor",
+		"midTurnQueue.cleanRestoreQueued",
+		(self, args, original) => {
+			const mode = self as HostInteractiveModeInternals & {
+				editor?: { getText(): string; getExpandedText?: () => string; setText(t: string): void };
+			};
+			const snap = snapshotQueues(mode);
+			if (!snap || (snap.steering.length === 0 && snap.followUp.length === 0)) {
+				return original.apply(self, args);
+			}
+			const options = (args[0] ?? {}) as { abort?: boolean; currentText?: string };
+			mode.clearAllQueues();
+			const cwd = getActiveHostRuntime()?.ctx.cwd ?? process.cwd();
+			const allPayloads = [...snap.steering, ...snap.followUp];
+			const restoredItems = allPayloads.map((p) => restoreQueuedPayloadToDraft(p, cwd));
+			const currentText =
+				options.currentText ?? mode.editor?.getExpandedText?.() ?? mode.editor?.getText() ?? "";
+			const combined = [...restoredItems, currentText].filter((part) => part.trim().length > 0).join("\n\n");
+			mode.editor?.setText(combined);
+			mode.updatePendingMessagesDisplay();
+			if (options.abort) {
+				void mode.session.abort();
+			}
+			return allPayloads.length;
 		},
 	);
 

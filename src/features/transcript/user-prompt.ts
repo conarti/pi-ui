@@ -1,7 +1,10 @@
 import {
 	InteractiveMode,
+	SessionSelectorComponent,
 	SkillInvocationMessageComponent,
+	TreeSelectorComponent,
 	UserMessageComponent,
+	UserMessageSelectorComponent,
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -36,6 +39,7 @@ import {
 } from "../../shared/skill-tags.ts";
 import { formatTurnTime, sanitizeTurnText } from "../../shared/turn-index.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
+import { reconstructTurnPromptText } from "../prompt-chips/registry.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -869,6 +873,107 @@ export function installUserPromptCards(): void {
 					}
 				}
 				return undefined;
+			},
+		);
+	}
+
+	const modeProto = (InteractiveMode as unknown as { prototype?: object } | undefined)?.prototype;
+	if (modeProto) {
+		hookMethod(
+			modeProto,
+			"showSelector",
+			"transcript.cleanSelectorSkillAndChipPreviews",
+			(self, args, original) => {
+				const [create] = args as [(done: () => void) => { component: any; focus: any; dispose?: () => void }];
+				const wrappedCreate = (done: () => void) => {
+					const created = create(done);
+					const comp = created?.component;
+					const cwd = self?.sessionManager?.getCwd?.() ?? getActiveHostRuntime()?.ctx.cwd ?? process.cwd();
+					const entries = self?.sessionManager?.getEntries?.() ?? [];
+
+					if (comp instanceof UserMessageSelectorComponent) {
+						const msgList = (comp.getMessageList?.() ?? (comp as any).messageList) as unknown as
+							| { messages?: Array<{ id?: unknown; text?: unknown }> }
+							| undefined;
+						if (Array.isArray(msgList?.messages)) {
+							for (const item of msgList.messages) {
+								if (item && typeof item.text === "string") {
+									item.text = reconstructTurnPromptText(item.text, {
+										messageId: item.id !== undefined ? String(item.id) : undefined,
+										entries,
+										cwd,
+									});
+								}
+							}
+						}
+					} else if (comp instanceof TreeSelectorComponent) {
+						const treeList = (comp as any).treeList;
+						if (treeList && typeof treeList.getEntryDisplayText === "function") {
+							const origDisplay = treeList.getEntryDisplayText.bind(treeList);
+							treeList.getEntryDisplayText = (node: any, isSelected: boolean) => {
+								const entry = node?.entry;
+								const theme = getActiveGlobalTheme();
+								if (entry?.type === "message" && entry.message?.role === "user") {
+									const raw = typeof treeList.extractFullContent === "function"
+										? String(treeList.extractFullContent(entry.message.content) ?? "")
+										: "";
+									if (raw) {
+										const clean = reconstructTurnPromptText(raw, {
+											timestamp: entry.message?.timestamp ?? entry.timestamp,
+											messageId: entry.id !== undefined ? String(entry.id) : undefined,
+											entries,
+											cwd,
+										}).replace(/[\n\t]+/g, " ").trim();
+										const row = theme.fg("accent", "user: ") + clean;
+										return isSelected ? theme.bold(row) : row;
+									}
+								} else if (entry?.type === "custom_message" && entry.customType === "skill") {
+									const raw = typeof treeList.extractFullContent === "function"
+										? String(treeList.extractFullContent(entry.content) ?? "")
+										: "";
+									const extracted = extractSkillInvocations(raw, { cwd });
+									if (extracted.skills.length > 0) {
+										const row = theme.fg("accent", "user: ") + extracted.previewText.replace(/[\n\t]+/g, " ").trim();
+										return isSelected ? theme.bold(row) : row;
+									}
+								}
+								return origDisplay(node, isSelected);
+							};
+						}
+						if (treeList && typeof treeList.getEntryCopyText === "function") {
+							const origCopy = treeList.getEntryCopyText.bind(treeList);
+							treeList.getEntryCopyText = (node: any) => {
+								const text = origCopy(node);
+								if (typeof text === "string" && text.includes("<skill")) {
+									const extracted = extractSkillInvocations(text, { cwd });
+									if (extracted.skills.length > 0) return extracted.cleanCopyText;
+								}
+								return text;
+							};
+						}
+					} else if (comp instanceof SessionSelectorComponent) {
+						const sessionList = (comp as any).sessionList;
+						if (sessionList && typeof sessionList.setSessions === "function") {
+							const sanitizeList = (sessions: any[]) => {
+								if (!Array.isArray(sessions)) return;
+								for (const s of sessions) {
+									if (s && !s.name && typeof s.firstMessage === "string" && (s.firstMessage.includes("<skill") || s.firstMessage.includes("[Image #"))) {
+										s.firstMessage = reconstructTurnPromptText(s.firstMessage, { cwd });
+									}
+								}
+							};
+							sanitizeList(sessionList.sessions);
+							const origSetSessions = sessionList.setSessions.bind(sessionList);
+							sessionList.setSessions = (sessions: any[], showCwd: boolean) => {
+								sanitizeList(sessions);
+								return origSetSessions(sessions, showCwd);
+							};
+						}
+					}
+
+					return created;
+				};
+				return original.call(self, wrappedCreate);
 			},
 		);
 	}

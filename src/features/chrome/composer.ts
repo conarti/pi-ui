@@ -29,6 +29,8 @@ import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import { loadPiUiUserConfig } from "../../shared/pi-ui-config.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import { getSessionWorkflow, MODE_META } from "../../shared/session-workflow.ts";
+import { extractSkillInvocations } from "../../shared/skill-tags.ts";
+import { IMAGE_MARKER_RE } from "../prompt-chips/registry.ts";
 import {
 	isSlotOwnedByPiUi,
 	PI_UI_OWNER_ID,
@@ -445,9 +447,28 @@ export class PiUiComposerEditor extends CustomEditor {
 		return true;
 	}
 
+	private sanitizeComposerDraftText(text: string): string {
+		let cleaned = text;
+		if (cleaned.includes("<skill")) {
+			const extracted = extractSkillInvocations(cleaned, { cwd: this.deps.ctx.cwd });
+			if (extracted.skills.length > 0) {
+				cleaned = extracted.cleanCopyText;
+			}
+		}
+		return cleaned;
+	}
+
 	override setText(text: string): void {
 		this.manualScrollActive = false;
-		super.setText(text);
+		super.setText(this.sanitizeComposerDraftText(text));
+	}
+
+	override addToHistory(text: string): void {
+		let cleaned = this.sanitizeComposerDraftText(text);
+		if (cleaned.includes("[Image #")) {
+			cleaned = cleaned.replace(IMAGE_MARKER_RE, (_m, num: string) => `[🖼 Image #${num}]`);
+		}
+		super.addToHistory?.(cleaned);
 	}
 
 	getVisualSlice(visualLineIndex: number, totalWidth?: number): ComposerVisualSlice | undefined {

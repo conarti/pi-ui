@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
@@ -1129,5 +1129,125 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 		const cmdCol = screen.findText("/agy-artifacts")!.col;
 		await harness.mouseClick(cmdCol + 2, aboveHit.row);
 		expect(clickedLocalX).toBe(cmdCol + 2 - 4);
+	});
+
+	it("renders Skill Chips and Prompt Chips cleanly in mid-turn Steer/Queue strip, restores /skill:<name> + live chips on [Edit · Alt+↑], and hides raw <skill> XML in /tree, /fork, and reloaded history", async () => {
+		const tmpCwd = mkdtempSync(join(tmpdir(), "pi-ui-queue-skill-"));
+		let s1: ReturnType<typeof createAssistantMessageEventStream> | undefined;
+		let s1Ended = false;
+		try {
+			const skillDir = join(tmpCwd, ".agents", "skills", "retro");
+			mkdirSync(skillDir, { recursive: true });
+			writeFileSync(
+				join(skillDir, "SKILL.md"),
+				[
+					"---",
+					"name: retro",
+					"description: Run sprint retrospective",
+					"---",
+					"# Retro Skill Body",
+					"RETRO_SECRET_RULE_LINE_1",
+				].join("\n"),
+				"utf8",
+			);
+			let callCount = 0;
+			harness = await createInteractiveHarness({
+				theme: "dark",
+				cwd: tmpCwd,
+				additionalSkillPaths: [skillDir],
+				width: 110,
+				height: 30,
+				persistSession: true,
+				settings: { midTurnEnter: "steer" },
+				streamSimple: () => {
+					callCount += 1;
+					if (callCount === 1) {
+						s1 = createAssistantMessageEventStream();
+						return s1;
+					}
+					const doneStream = createAssistantMessageEventStream();
+					const msg = fauxAssistantMessage("Handled skill steer.");
+					queueMicrotask(() => {
+						doneStream.push({ type: "start", partial: msg });
+						doneStream.push({ type: "done", reason: "stop", message: msg });
+						doneStream.end(msg);
+					});
+					return doneStream;
+				},
+			});
+
+			const firstTurn = harness.submitInput("Initial slow task");
+			await waitForCondition(() => s1 !== undefined);
+			s1!.push({ type: "start", partial: fauxAssistantMessage("") });
+			await harness.flush();
+
+			/* Отправляем во время хода /skill:retro + многострочную вставку в очередь Steer */
+			await harness.typeText("/skill:retro ");
+			await harness.paste("alpha1\nalpha2\nalpha3\nalpha4", true);
+			await harness.typeText(" review sprint");
+			await harness.pressKey("\x1b\r");
+			await harness.flush();
+
+			const qScreen = harness.screen();
+			expect(qScreen.text()).toContain("Steer:");
+			expect(qScreen.text()).toContain("/retro");
+			expect(qScreen.text()).toContain("[📋 Pasted #1 · 4 lines]");
+			expect(qScreen.text()).toContain("review sprint");
+			expect(qScreen.text()).not.toContain("<skill");
+			expect(qScreen.text()).not.toContain("RETRO_SECRET_RULE_LINE_1");
+			expect(qScreen.text()).not.toContain("alpha2");
+
+			/* Клик по пилюле /retro прямо в строке очереди открывает превью SKILL.md */
+			const queueSkillHit = qScreen.findText("/retro")!;
+			expect(queueSkillHit).toBeDefined();
+			await harness.mouseClick(queueSkillHit.col + 1, queueSkillHit.row);
+			expect(harness.screen().text()).toContain("RETRO_SECRET_RULE_LINE_1");
+			const closeSkillBtn = harness.screen().findText("[×]")!;
+			await harness.mouseClick(closeSkillBtn.col + 1, closeSkillBtn.row);
+			expect(harness.screen().text()).not.toContain("RETRO_SECRET_RULE_LINE_1");
+
+			/* Клик по [Edit · Alt+↑] возвращает чистый /skill:retro + живой чип без 300 строк <skill> XML */
+			const editBtn = harness.screen().findText("[Edit · Alt+↑]")!;
+			await harness.mouseClick(editBtn.col + 2, editBtn.row);
+			const restoredDraft = getActiveComposerEditor()!.getText();
+			expect(restoredDraft).toContain("/skill:retro");
+			expect(restoredDraft).toContain("[📋 Pasted #1 · 4 lines]");
+			expect(restoredDraft).toContain("review sprint");
+			expect(restoredDraft).not.toContain("<skill");
+
+			/* Снова ставим в очередь и завершаем ход */
+			await harness.pressKey("\x1b\r");
+			await harness.flush();
+			const msg1 = fauxAssistantMessage("First finished.");
+			s1Ended = true;
+			s1!.push({ type: "done", reason: "stop", message: msg1 });
+			s1!.end(msg1);
+			await firstTurn;
+			await harness.waitForIdle();
+
+			/* Проверяем /tree: показывает /retro · [📋 Pasted #1 · 4 lines] review sprint без <skill> */
+			await harness.pressKey("\x1b");
+			await harness.pressKey("\x1b");
+			const treeText = harness.screen().text();
+			expect(treeText).toContain("/retro · [📋 Pasted #1 · 4 lines] review sprint");
+			expect(treeText).not.toContain("<skill");
+			await harness.pressKey("\x1b");
+
+			/* Проверяем /fork: также показывает очищенный текст промпта со скиллом и чипом */
+			await harness.typeText("/fork");
+			await harness.pressKey("\r");
+			await harness.flush();
+			const forkText = harness.screen().text();
+			expect(forkText).toContain("/retro · [📋 Pasted #1 · 4 lines] review sprint");
+			expect(forkText).not.toContain("<skill");
+			await harness.pressKey("\x1b");
+		} finally {
+			if (s1 && !s1Ended) {
+				const fallback = fauxAssistantMessage("Aborted cleanup.");
+				s1.push({ type: "done", reason: "stop", message: fallback });
+				s1.end(fallback);
+			}
+			rmSync(tmpCwd, { recursive: true, force: true });
+		}
 	});
 });

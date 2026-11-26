@@ -380,6 +380,7 @@ export interface InteractiveHarnessOptions {
 	loadDefaultExtension?: boolean;
 	additionalExtensionPaths?: string[];
 	extensionFactories?: InlineExtension[];
+	additionalSkillPaths?: string[];
 	additionalThemePaths?: string[];
 	models?: FauxModelDefinition[];
 	responses?: FauxResponseStep[];
@@ -906,6 +907,7 @@ export async function createInteractiveHarness(
 				noThemes: true,
 				additionalThemePaths: themePaths,
 				noSkills: true,
+				additionalSkillPaths: options?.additionalSkillPaths,
 				noPromptTemplates: true,
 				noContextFiles: true,
 			},

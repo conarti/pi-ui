@@ -1,6 +1,11 @@
 import { basename } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
+import { extractSkillInvocations } from "../../shared/skill-tags.ts";
+
+function stripLeadingSkillSlashPrefix(text: string): string {
+	return text.replace(/^(?:\s*\/skill:[^\s]+)+\s*/u, "");
+}
 
 export function isImageContent(part: unknown): part is ImageContent {
 	if (!part || typeof part !== "object") return false;
@@ -849,6 +854,17 @@ export class PromptChipRegistry {
 		this.pendingPersistQueue.push(record);
 		this.submittedByExpanded.set(finalExpanded, record);
 		this.submittedByExpanded.set(canonicalizePromptLookupText(finalExpanded), record);
+		const strippedDisplay = stripLeadingSkillSlashPrefix(trimmedInput).trim();
+		const strippedExpanded = stripLeadingSkillSlashPrefix(finalExpanded).trim();
+		if (strippedExpanded && strippedExpanded !== finalExpanded) {
+			const strippedRecord: PersistedPromptChipsPayload = {
+				displayText: strippedDisplay,
+				expandedText: strippedExpanded,
+				chips: serializedChips,
+			};
+			this.submittedByExpanded.set(strippedExpanded, strippedRecord);
+			this.submittedByExpanded.set(canonicalizePromptLookupText(strippedExpanded), strippedRecord);
+		}
 
 		return {
 			transformed: true,
@@ -863,10 +879,19 @@ export class PromptChipRegistry {
 		timestamp: number | string | undefined,
 		images?: readonly ImageContent[],
 	): PersistedPromptChipsPayload | undefined {
-		const clean = stripTrailingImagePlaceholders(messageText);
-		const canonical = canonicalizePromptLookupText(messageText);
-		const matchesPayload = (r: PersistedPromptChipsPayload): boolean =>
-			r.expandedText === clean || canonicalizePromptLookupText(r.expandedText) === canonical;
+		const skillExtracted = extractSkillInvocations(messageText);
+		const bodyText = skillExtracted.skills.length > 0 ? skillExtracted.userText : messageText;
+		const clean = stripTrailingImagePlaceholders(bodyText);
+		const canonical = canonicalizePromptLookupText(bodyText);
+		const matchesPayload = (r: PersistedPromptChipsPayload): boolean => {
+			const recStripped = stripLeadingSkillSlashPrefix(r.expandedText).trim();
+			return (
+				r.expandedText === clean ||
+				canonicalizePromptLookupText(r.expandedText) === canonical ||
+				(skillExtracted.skills.length > 0 &&
+					(recStripped === clean || canonicalizePromptLookupText(recStripped) === canonical))
+			);
+		};
 		const queued = this.pendingPersistQueue.find(
 			(r) => r.timestamp === undefined && matchesPayload(r),
 		);
@@ -875,8 +900,16 @@ export class PromptChipRegistry {
 		if (!target) return undefined;
 		if (images) this.associateSubmittedImages(target, images);
 
+		const normalizedTarget: PersistedPromptChipsPayload =
+			skillExtracted.skills.length > 0
+				? {
+						...target,
+						displayText: stripLeadingSkillSlashPrefix(target.displayText).trim(),
+						expandedText: clean,
+					}
+				: target;
 		const updated: PersistedPromptChipsPayload =
-			timestamp !== undefined ? { ...target, timestamp } : target;
+			timestamp !== undefined ? { ...normalizedTarget, timestamp } : normalizedTarget;
 		if (queued) {
 			const idx = this.pendingPersistQueue.indexOf(queued);
 			if (idx !== -1) this.pendingPersistQueue[idx] = updated;
@@ -893,18 +926,32 @@ export class PromptChipRegistry {
 		messageText: string,
 		timestamp: number | string | undefined,
 	): PersistedPromptChipsPayload | undefined {
-		const clean = stripTrailingImagePlaceholders(messageText);
-		const canonical = canonicalizePromptLookupText(messageText);
-		const idx = this.pendingPersistQueue.findIndex(
-			(r) =>
+		const skillExtracted = extractSkillInvocations(messageText);
+		const bodyText = skillExtracted.skills.length > 0 ? skillExtracted.userText : messageText;
+		const clean = stripTrailingImagePlaceholders(bodyText);
+		const canonical = canonicalizePromptLookupText(bodyText);
+		const idx = this.pendingPersistQueue.findIndex((r) => {
+			const recStripped = stripLeadingSkillSlashPrefix(r.expandedText).trim();
+			return (
 				(timestamp !== undefined && r.timestamp !== undefined && String(r.timestamp) === String(timestamp)) ||
 				r.expandedText === clean ||
-				canonicalizePromptLookupText(r.expandedText) === canonical,
-		);
+				canonicalizePromptLookupText(r.expandedText) === canonical ||
+				(skillExtracted.skills.length > 0 &&
+					(recStripped === clean || canonicalizePromptLookupText(recStripped) === canonical))
+			);
+		});
 		if (idx === -1) return undefined;
 		const base = this.pendingPersistQueue.splice(idx, 1)[0]!;
+		const normalizedBase: PersistedPromptChipsPayload =
+			skillExtracted.skills.length > 0
+				? {
+						...base,
+						displayText: stripLeadingSkillSlashPrefix(base.displayText).trim(),
+						expandedText: clean,
+					}
+				: base;
 		const finalized: PersistedPromptChipsPayload =
-			timestamp !== undefined ? { ...base, timestamp } : base;
+			timestamp !== undefined ? { ...normalizedBase, timestamp } : normalizedBase;
 		this.submittedByExpanded.set(finalized.expandedText, finalized);
 		this.submittedByExpanded.set(canonicalizePromptLookupText(finalized.expandedText), finalized);
 		if (finalized.timestamp !== undefined) {
@@ -1217,11 +1264,26 @@ export function reconstructTurnPromptText(
 		readonly timestamp?: number | string;
 		readonly messageId?: string;
 		readonly entries?: readonly unknown[];
+		readonly cwd?: string;
 	},
 ): string {
 	if (!rawPrompt) return "";
 	const registry = getActivePromptChipRegistry();
 	registry.ensurePersistedEntriesHydrated(options?.entries);
+	const skillExtracted = extractSkillInvocations(rawPrompt, { cwd: options?.cwd });
+	if (skillExtracted.skills.length > 0) {
+		const shortTokens = skillExtracted.skills.map((s) => `/${s.name}`).join(" ");
+		const reconstructedBody = skillExtracted.userText
+			? registry
+					.reconstructSubmittedPrompt(
+						skillExtracted.userText,
+						options?.timestamp,
+						options?.messageId,
+					)
+					.displayText.trim()
+			: "";
+		return reconstructedBody ? `${shortTokens} · ${reconstructedBody}` : shortTokens;
+	}
 	const reconstructed = registry.reconstructSubmittedPrompt(
 		rawPrompt,
 		options?.timestamp,
