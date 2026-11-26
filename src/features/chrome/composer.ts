@@ -1087,8 +1087,12 @@ export class PiUiComposerEditor extends CustomEditor {
 		const isCtrlEnter =
 			matchesKey(data, "ctrl+enter") ||
 			matchesKey(data, "ctrl+return") ||
+			matchesKey(data, "super+enter") ||
+			matchesKey(data, "super+return") ||
 			data === "\x1b[13;5u" ||
-			data === "\x1b[27;5;13~";
+			data === "\x1b[27;5;13~" ||
+			data === "\x1b[13;9u" ||
+			data === "\x1b[27;9;13~";
 		const isAltEnter =
 			matchesKey(data, "alt+enter") ||
 			matchesKey(data, "alt+return") ||

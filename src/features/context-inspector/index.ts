@@ -760,6 +760,8 @@ export function registerContextInspectorFeature(pi: ExtensionAPI): void {
 		}
 	};
 
+	const metricsRowCache = new WeakMap<object, ResponseMetricsRowComponent>();
+
 	withConartiInternalRegistration(() => {
 		const metricsRenderer: EntryRenderer<ResponseMetricsData> = markOwnedEntryRenderer(
 			(entry, _options, theme) => {
@@ -775,8 +777,19 @@ export function registerContextInspectorFeature(pi: ExtensionAPI): void {
 				} else if (!cfg.responseMetrics && !formatCompletionTimestamp(data.completedAt, cfg.timestamps)) {
 					return undefined;
 				}
-				return new ResponseMetricsRowComponent(data, theme, openSessionUsageTab,
-					() => resolveTurnTtft(activeCtx?.sessionManager.getBranch() ?? [], entry.id));
+				const existing = metricsRowCache.get(entry);
+				if (existing) {
+					existing.setTheme(theme);
+					return existing;
+				}
+				const created = new ResponseMetricsRowComponent(
+					data,
+					theme,
+					openSessionUsageTab,
+					() => resolveTurnTtft(activeCtx?.sessionManager.getBranch() ?? [], entry.id),
+				);
+				metricsRowCache.set(entry, created);
+				return created;
 			},
 		);
 
@@ -797,8 +810,19 @@ export function registerContextInspectorFeature(pi: ExtensionAPI): void {
 				) {
 					return undefined;
 				}
-				return new ResponseMetricsRowComponent(normalized, theme, openSessionUsageTab,
-					() => resolveTurnTtft(activeCtx?.sessionManager.getBranch() ?? [], entry.id));
+				const existing = metricsRowCache.get(entry);
+				if (existing) {
+					existing.setTheme(theme);
+					return existing;
+				}
+				const created = new ResponseMetricsRowComponent(
+					normalized,
+					theme,
+					openSessionUsageTab,
+					() => resolveTurnTtft(activeCtx?.sessionManager.getBranch() ?? [], entry.id),
+				);
+				metricsRowCache.set(entry, created);
+				return created;
 			},
 		);
 

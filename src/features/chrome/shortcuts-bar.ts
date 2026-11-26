@@ -130,6 +130,16 @@ function resolveContextHints(pi: ExtensionAPI, ctx: ExtensionContext): ShortcutH
 				tone: "warning",
 				onClick: () => ctx.abort(),
 			},
+			{
+				id: "commands",
+				label: t("shortcutsBar.commands"),
+				onClick: () => void showCommandPalette(pi, ctx),
+			},
+			{
+				id: "mode",
+				label: t("shortcutsBar.mode"),
+				onClick: () => cycleSessionMode(pi, ctx),
+			},
 		];
 	}
 

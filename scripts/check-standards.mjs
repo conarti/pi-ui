@@ -35,6 +35,25 @@ const PURE_UNIT_TEST_FILES = new Set([
 	"tests/viewport-chrome-geometry.test.ts",
 ]);
 
+/* Только перечисленные граничные модули могут обращаться к node:fs; рендер-компоненты читают конфиг через pi-ui-config.ts (ADR-0008) */
+const ALLOWED_FS_SRC_FILES = new Set([
+	"src/features/prompt-chips/clipboard.ts",
+	"src/features/prompt-chips/index.ts",
+	"src/features/prompt-suggestion/supersede-external.ts",
+	"src/features/tool-calls/command.ts",
+	"src/features/tool-calls/config.ts",
+	"src/features/tool-calls/index.ts",
+	"src/features/tool-calls/runtime.ts",
+	"src/features/tool-calls/thinking.ts",
+	"src/shared/atomic-config-file.ts",
+	"src/shared/link-targets.ts",
+	"src/shared/pi-ui-config.ts",
+	"src/shared/session-workflow.ts",
+	"src/shared/skill-tags.ts",
+]);
+
+const NODE_FS_SPECIFIER_RE = /^(?:node:)?fs(?:\/promises)?$/;
+
 const BANNED_FAKE_MODULE_RE = /(?:^|\/)(?:fake-tui|fake-theme|extension-harness)(?:\.[cm]?[jt]s)?$/;
 const BANNED_TEST_SYMBOL_RE =
 	/\b(FakeTui|ExtensionHarness|createExtensionHarness|createFakeTheme|createDarkTheme|createLightTheme|setHostRuntimeAdapter|HostRuntimeAdapter)\b/g;
@@ -901,6 +920,11 @@ export function checkRepositoryStandards(rootDir = ROOT_DIR) {
 		for (const spec of moduleSpecifiers) {
 			if (BANNED_FAKE_MODULE_RE.test(spec.value)) {
 				errors.push(`${rel}:${spec.line}: do not import fake-host module "${spec.value}" in src/`);
+			}
+			if (NODE_FS_SPECIFIER_RE.test(spec.value) && !ALLOWED_FS_SRC_FILES.has(rel)) {
+				errors.push(
+					`${rel}:${spec.line}: do not import "${spec.value}" in UI render/component modules; route config/disk I/O through edge modules or loadPiUiUserConfig() (ADR-0008)`,
+				);
 			}
 		}
 		for (const match of codeText.matchAll(BANNED_SRC_SYMBOL_RE)) {

@@ -351,7 +351,7 @@ export class PromptChipPreviewPopup implements Component {
 			return { handled: true, render: false };
 		}
 
-		if (event.type === "press" && event.button === "left") {
+		if (event.type === "press" && event.button === "left" && hit) {
 			return { handled: true, render: false };
 		}
 

@@ -432,9 +432,14 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 
 		const queueScreen = harness.screen();
 		expect(queueScreen.text()).toContain("Queued item alpha");
-		expect(queueScreen.text()).toContain("[Send now]");
+		expect(queueScreen.text()).toContain("[Send now · Ctrl+Enter]");
 		expect(queueScreen.text()).toContain("[Edit · Alt+↑]");
 		expect(queueScreen.text()).toContain("[×]");
+		expect(queueScreen.text()).toContain("Enter queue");
+		expect(queueScreen.text()).toContain("Ctrl+Enter send now");
+		expect(queueScreen.text()).toContain("Alt+Enter steer");
+		expect(queueScreen.text()).toContain("Ctrl+C stop");
+		expect(queueScreen.text()).toContain("Ctrl+K commands");
 
 		/* 1s защита от двойного нажатия Enter на пустом Composer сразу после постановки в очередь */
 		await harness.pressKey("\r");
@@ -486,7 +491,7 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 		await harness.pressKey("\r");
 		await harness.flush();
 		expect(harness.session.getFollowUpMessages()).toEqual(["Queued item alpha"]);
-		const sendHit = harness.screen().findText("[Send now]")!;
+		const sendHit = harness.screen().findText("[Send now · Ctrl+Enter]")!;
 		await harness.mouseClick(sendHit.col + 2, sendHit.row);
 		await waitForCondition(() => streams.length === 2);
 		expect(streams[0]!.signal?.aborted).toBe(true);
@@ -498,6 +503,13 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 		await waitForCondition(() => streams.length === 3);
 		expect(streams[1]!.signal?.aborted).toBe(true);
 		expect(streams[2]!.promptTexts.at(-1)).toBe("Urgent override gamma");
+
+		/* Cmd+Enter (super+enter) также вызывает Send now на macOS */
+		await harness.typeText("Mac super override omega");
+		await harness.pressKey("\x1b[13;9u");
+		await waitForCondition(() => streams.length === 4);
+		expect(streams[2]!.signal?.aborted).toBe(true);
+		expect(streams[3]!.promptTexts.at(-1)).toBe("Mac super override omega");
 
 		/* Переключение midTurnEnter = "steer": Enter -> steer, Alt+Enter -> queue */
 		updatePiUiUserConfig({ midTurnEnter: "steer" });
@@ -520,7 +532,7 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 		harness.session.clearQueue();
 		await turn1;
 		await harness.waitForIdle();
-		expect(callCount).toBe(3);
+		expect(callCount).toBe(4);
 	});
 
 	it("restores a queued draft and its image into a third-party editor", async () => {

@@ -293,7 +293,7 @@ class SkillPreviewPopup implements Component {
 			this.closeHovered = hitClose;
 			return { handled: true, render: changed };
 		}
-		if (event.type === "press" && event.button === "left") {
+		if (event.type === "press" && event.button === "left" && hitClose) {
 			return { handled: true, render: false };
 		}
 		if (event.type === "click" && event.button === "left") {

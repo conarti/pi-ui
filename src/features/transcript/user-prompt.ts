@@ -25,6 +25,7 @@ import {
 import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
 import { t } from "../../shared/i18n.ts";
+import { getPiUiConfigVersion } from "../../shared/pi-ui-config.ts";
 import {
 	claimHover,
 	copyToClipboard,
@@ -39,7 +40,7 @@ import {
 } from "../../shared/skill-tags.ts";
 import { formatTurnTime, sanitizeTurnText } from "../../shared/turn-index.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
-import { reconstructTurnPromptText } from "../prompt-chips/registry.ts";
+import { getActivePromptChipRegistry, reconstructTurnPromptText } from "../prompt-chips/registry.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -175,8 +176,22 @@ function readSkillBlock(component: unknown): HostSkillBlock | undefined {
 }
 
 function resolveFallbackTimestampFromBranch(self: any): number | string | undefined {
+	const cached = self.__conartiFallbackTsCache as
+		| { resolved: boolean; leafId: string | null | undefined; value: number | string | undefined }
+		| undefined;
 	const runtime = getActiveHostRuntime();
-	const branch = runtime?.ctx?.sessionManager?.getBranch?.();
+	const sm = runtime?.ctx?.sessionManager as
+		| {
+				getBranch?: () => unknown[];
+				getLeafId?: () => string | null;
+		  }
+		| undefined;
+	const leafId = typeof sm?.getLeafId === "function" ? sm.getLeafId() : undefined;
+	if (cached?.resolved && (cached.value !== undefined || (leafId !== undefined && cached.leafId === leafId))) {
+		return cached.value;
+	}
+
+	const branch = sm?.getBranch?.();
 	if (!Array.isArray(branch) || branch.length === 0) return undefined;
 
 	const userEntries: any[] = branch.filter(
@@ -187,7 +202,10 @@ function resolveFallbackTimestampFromBranch(self: any): number | string | undefi
 	if (self.messageId !== undefined) {
 		const byId = userEntries.find((entry: any) => String(entry.id) === String(self.messageId));
 		const ts = byId?.message?.timestamp ?? byId?.timestamp;
-		if (ts !== undefined) return ts;
+		if (ts !== undefined) {
+			self.__conartiFallbackTsCache = { resolved: true, leafId, value: ts };
+			return ts;
+		}
 	}
 
 	const chatRoot = runtime?.scroll?.children[0] ?? runtime?.chatContainer;
@@ -219,28 +237,43 @@ function resolveFallbackTimestampFromBranch(self: any): number | string | undefi
 	const tailOffset = Math.max(0, userEntries.length - mountedCards.length);
 	const entryIdx = cardIdx + tailOffset;
 	const matched = entryIdx >= 0 && entryIdx < userEntries.length ? userEntries[entryIdx] : undefined;
-	return matched?.message?.timestamp ?? matched?.timestamp;
+	const resolvedValue = matched?.message?.timestamp ?? matched?.timestamp;
+	self.__conartiFallbackTsCache = { resolved: true, leafId, value: resolvedValue };
+	return resolvedValue;
 }
 
 function resolvePrecedingSkillTagForUserComponent(self: any): string | undefined {
 	const runtime = getActiveHostRuntime();
 	const chatRoot = runtime?.chatContainer ?? runtime?.scroll?.children[0];
 	const children = (chatRoot as { children?: unknown[] } | undefined)?.children;
-	if (!Array.isArray(children)) return undefined;
+	if (!Array.isArray(children) || children.length === 0) return undefined;
+	const firstChild = children[0];
+	const cached = self.__conartiPrecedingSkillCache as
+		| { firstChild: unknown; value: string | undefined }
+		| undefined;
+	if (cached && cached.firstChild === firstChild) {
+		return cached.value;
+	}
 	const idx = children.indexOf(self);
-	if (idx <= 0) return undefined;
+	if (idx < 0) return undefined;
+	if (idx === 0) {
+		self.__conartiPrecedingSkillCache = { firstChild, value: undefined };
+		return undefined;
+	}
+	let resolved: string | undefined;
 	for (let i = idx - 1; i >= 0; i -= 1) {
 		const prev = children[i];
 		if (prev instanceof Spacer) continue;
 		if (prev instanceof SkillInvocationMessageComponent) {
 			const sb = readSkillBlock(prev);
 			if (sb?.name) {
-				return serializeSkillBlockTag(sb);
+				resolved = serializeSkillBlockTag(sb);
 			}
 		}
 		break;
 	}
-	return undefined;
+	self.__conartiPrecedingSkillCache = { firstChild, value: resolved };
+	return resolved;
 }
 
 /* Заменяет стилизованные пилюли на неразрывные заглушки той же видимой ширины до wrapTextWithAnsi, чтобы чипы никогда не разрывались по пробелу или «·» */
@@ -662,6 +695,8 @@ export function installUserPromptCards(): void {
 		"rebuild",
 		"transcript.userPromptRebuild",
 		(self, args, original) => {
+			self.__conartiRenderCache = undefined;
+			self.__conartiPrecedingSkillCache = undefined;
 			if (self.timestamp === undefined) {
 				const pendingTs = consumePendingUserMessageTimestamp();
 				if (pendingTs !== undefined) {
@@ -671,6 +706,18 @@ export function installUserPromptCards(): void {
 			return original.apply(self, args);
 		},
 	);
+
+	if (typeof proto.invalidate === "function") {
+		hookMethod(
+			proto,
+			"invalidate",
+			"transcript.userPromptInvalidate",
+			(self, args, original) => {
+				self.__conartiRenderCache = undefined;
+				return original.apply(self, args);
+			},
+		);
+	}
 
 	hookMethod(
 		proto,
@@ -688,13 +735,47 @@ export function installUserPromptCards(): void {
 			if (!combinedRaw || width < 12) return [];
 
 			const theme = getActiveGlobalTheme(self?.theme);
+			const hovered = Boolean(self.__conartiHovered);
+			const copied = Boolean(self.__conartiCopied);
+			const configVersion = getPiUiConfigVersion();
+			const registryVersion = getActivePromptChipRegistry().version;
+
+			const prevCache = self.__conartiRenderCache as
+				| {
+						width: number;
+						combinedRaw: string;
+						theme: Theme;
+						hovered: boolean;
+						copied: boolean;
+						configVersion: number;
+						registryVersion: number;
+						lines: string[];
+						copyHit: PromptCardHitBox | undefined;
+						pillHits: readonly PromptPillHitTarget[];
+				  }
+				| undefined;
+			if (
+				prevCache &&
+				prevCache.width === width &&
+				prevCache.combinedRaw === combinedRaw &&
+				prevCache.theme === theme &&
+				prevCache.hovered === hovered &&
+				prevCache.copied === copied &&
+				prevCache.configVersion === configVersion &&
+				prevCache.registryVersion === registryVersion
+			) {
+				self.__conartiCopyHit = prevCache.copyHit;
+				self.__conartiPillHits = prevCache.pillHits;
+				return prevCache.lines;
+			}
+
 			const effectiveTs = self.timestamp ?? resolveFallbackTimestampFromBranch(self);
 			const formattedTime = formatTurnTime(effectiveTs);
 
 			const rendered = renderUserPromptCardLines(combinedRaw, width, theme, {
 				formattedTime,
-				hovered: Boolean(self.__conartiHovered),
-				copied: Boolean(self.__conartiCopied),
+				hovered,
+				copied,
 				showCopyBadge: true,
 				surface: "transcript",
 				messageId: self.messageId !== undefined ? String(self.messageId) : undefined,
@@ -709,6 +790,18 @@ export function installUserPromptCards(): void {
 				out[0] = OSC133_ZONE_START + out[0];
 				out[out.length - 1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + out[out.length - 1];
 			}
+			self.__conartiRenderCache = {
+				width,
+				combinedRaw,
+				theme,
+				hovered,
+				copied,
+				configVersion,
+				registryVersion,
+				lines: out,
+				copyHit: rendered.copyHit,
+				pillHits: rendered.pillHits,
+			};
 			return out;
 		},
 		["pi.grok-ui.hook.chat.userPromptRender"],
@@ -779,9 +872,21 @@ export function installUserPromptCards(): void {
 
 	/* Поглощаем хостовые баннеры SkillInvocationMessageComponent в кликабельные пилюли Skill Chip */
 	const skillProto = (
-		SkillInvocationMessageComponent as unknown as { prototype?: object } | undefined
+		SkillInvocationMessageComponent as unknown as { prototype?: Record<string, unknown> } | undefined
 	)?.prototype;
 	if (skillProto) {
+		const emptyLines: string[] = [];
+		if (typeof skillProto.invalidate === "function") {
+			hookMethod(
+				skillProto,
+				"invalidate",
+				"transcript.skillInvocationInvalidate",
+				(self, args, original) => {
+					self.__conartiRenderCache = undefined;
+					return original.apply(self, args);
+				},
+			);
+		}
 		hookMethod(
 			skillProto,
 			"render",
@@ -793,18 +898,49 @@ export function installUserPromptCards(): void {
 				}
 				/* Когда следом идёт UserMessageComponent, карточка пользователя сама рисует пилюлю навыка */
 				if (sb.userMessage) {
-					return [];
+					return emptyLines;
 				}
 				const width = args[0] as number;
-				if (width < 12) return [];
+				if (width < 12) return emptyLines;
 				const theme = getActiveGlobalTheme(self?.theme);
+				const hovered = Boolean(self.__conartiHovered);
+				const copied = Boolean(self.__conartiCopied);
+				const configVersion = getPiUiConfigVersion();
+				const syntheticRaw = serializeSkillBlockTag(sb);
+
+				const prevCache = self.__conartiRenderCache as
+					| {
+							width: number;
+							syntheticRaw: string;
+							theme: Theme;
+							hovered: boolean;
+							copied: boolean;
+							configVersion: number;
+							lines: string[];
+							copyHit: PromptCardHitBox | undefined;
+							pillHits: readonly PromptPillHitTarget[];
+					  }
+					| undefined;
+				if (
+					prevCache &&
+					prevCache.width === width &&
+					prevCache.syntheticRaw === syntheticRaw &&
+					prevCache.theme === theme &&
+					prevCache.hovered === hovered &&
+					prevCache.copied === copied &&
+					prevCache.configVersion === configVersion
+				) {
+					self.__conartiCopyHit = prevCache.copyHit;
+					self.__conartiPillHits = prevCache.pillHits;
+					return prevCache.lines;
+				}
+
 				const effectiveTs = self.timestamp ?? resolveFallbackTimestampFromBranch(self);
 				const formattedTime = formatTurnTime(effectiveTs);
-				const syntheticRaw = serializeSkillBlockTag(sb);
 				const rendered = renderUserPromptCardLines(syntheticRaw, width, theme, {
 					formattedTime,
-					hovered: Boolean(self.__conartiHovered),
-					copied: Boolean(self.__conartiCopied),
+					hovered,
+					copied,
 					showCopyBadge: true,
 					surface: "transcript",
 					messageId: self.messageId !== undefined ? String(self.messageId) : undefined,
@@ -817,6 +953,17 @@ export function installUserPromptCards(): void {
 					out[0] = OSC133_ZONE_START + out[0];
 					out[out.length - 1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + out[out.length - 1];
 				}
+				self.__conartiRenderCache = {
+					width,
+					syntheticRaw,
+					theme,
+					hovered,
+					copied,
+					configVersion,
+					lines: out,
+					copyHit: rendered.copyHit,
+					pillHits: rendered.pillHits,
+				};
 				return out;
 			},
 		);

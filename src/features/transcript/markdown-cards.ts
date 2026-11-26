@@ -755,117 +755,189 @@ export function installMarkdownCardsAndHeadings(): void {
 			) {
 				self.__conartiActionZones = [];
 				self.__conartiLinkHits = [];
+				self.__conartiMarkdownCache = undefined;
 				return baseLines;
+			}
+
+			const activeTheme = getActiveGlobalTheme(self?.theme);
+			const hoveredAction: string | null = self.__conartiHoveredAction ?? null;
+			const copiedAction: string | null = self.__conartiCopiedAction ?? null;
+			const isFullscreen = Boolean(getActiveHostRuntime()?.isFullscreen);
+
+			type CachedBlockSnapshot = {
+				readonly tokenIndex: number;
+				readonly rowCursor: number;
+				readonly linkHits?: readonly BlockLinkHitMeta[];
+				readonly meta?: BlockActionMeta;
+			};
+			type MarkdownRenderCache = {
+				readonly baseLines: string[];
+				readonly width: number;
+				readonly theme: typeof activeTheme;
+				readonly hoveredAction: string | null;
+				readonly copiedAction: string | null;
+				readonly isFullscreen: boolean;
+				readonly blockSnapshots: readonly CachedBlockSnapshot[];
+				readonly zones: ResolvedActionZone[];
+				readonly linkHits: ResolvedLinkHit[];
+				readonly outLines: string[];
+			};
+
+			const prevCache = self.__conartiMarkdownCache as MarkdownRenderCache | undefined;
+			if (
+				prevCache &&
+				prevCache.baseLines === baseLines &&
+				prevCache.width === width &&
+				prevCache.theme === activeTheme &&
+				prevCache.hoveredAction === hoveredAction &&
+				prevCache.copiedAction === copiedAction &&
+				prevCache.isFullscreen === isFullscreen
+			) {
+				self.__conartiActionZones = prevCache.zones;
+				self.__conartiLinkHits = prevCache.linkHits;
+				return prevCache.outLines;
 			}
 
 			const tokenBundle = self.cachedTokens?.deref?.();
 			const blockMap: Map<string, any> | undefined = self.blocks?.deref?.();
 			const padX: number = self.paddingX ?? 0;
-			const activeTheme = getActiveGlobalTheme(self?.theme);
 			const palette = getThemeSurfacePalette(activeTheme);
-			const hoveredAction: string | null = self.__conartiHoveredAction ?? null;
-			const copiedAction: string | null = self.__conartiCopiedAction ?? null;
 
-			const zones: ResolvedActionZone[] = [];
-			const linkHits: ResolvedLinkHit[] = [];
+			let blockSnapshots: CachedBlockSnapshot[];
 			if (tokenBundle?.tokens && blockMap) {
+				blockSnapshots = [];
 				let rowCursor: number = self.paddingY ?? 0;
 				for (let i = 0; i < tokenBundle.tokens.length; i += 1) {
 					const tok = tokenBundle.tokens[i];
 					const blk = blockMap.get(tok.raw);
 					if (!blk?.lines) continue;
 					const blkLinks: readonly BlockLinkHitMeta[] | undefined = blk.__conartiLinkHits;
-					if (blkLinks) {
-						for (const lh of blkLinks) {
-							linkHits.push({
-								y: rowCursor + lh.rowOffset,
-								xStart: lh.xStart,
-								xEnd: lh.xEnd,
-								fromOsc8: lh.fromOsc8,
-								target: lh.target,
-							});
-						}
-					}
 					const meta: BlockActionMeta | undefined = blk.__conartiBlockAction;
-					if (meta) {
-						const zoneId = `${meta.kind}-${i}`;
-						const actionRow = rowCursor + meta.actionOffset;
-						const startRow = rowCursor + meta.startOffset;
-						const endRow = rowCursor + meta.endOffset;
-						let buttons: ActionButtonHit[] = [];
-
-						if (meta.kind === "code-footer") {
-							const actionId = `${zoneId}:copy`;
-							const state =
-								copiedAction === actionId
-									? "copied"
-									: hoveredAction === actionId
-										? "hover"
-										: "rest";
-							const footer = buildCodeFooterRow(
-								activeTheme,
-								palette,
-								meta.cardWidth,
-								meta.lang ?? "",
-								state,
-							);
-							buttons = [
-								{
-									id: actionId,
-									key: "copy",
-									label: t("transcript.action.copy"),
-									payload: meta.raw ?? "",
-									xStart: Math.max(padX, padX + footer.btnStartInCard - 1),
-									xEnd: Math.min(width - 1, padX + footer.btnEndInCard + 1),
-								},
-							];
-						} else if (meta.kind === "code-inline-hover") {
-							const actionId = `${zoneId}:copy`;
-							const pillText = t(copiedAction === actionId ? "transcript.action.copied" : "transcript.action.copy");
-							const pillW = visibleWidth(pillText);
-							const btnCol = Math.max(padX + 2, padX + meta.cardWidth - pillW - 2);
-							buttons = [
-								{
-									id: actionId,
-									key: "copy",
-									label: t("transcript.action.copy"),
-									payload: meta.raw ?? "",
-									xStart: Math.max(padX, btnCol - 1),
-									xEnd: Math.min(width - 1, btnCol + pillW + 1),
-								},
-							];
-						} else {
-							const built = buildInlineActionBarRow(
-								activeTheme,
-								palette,
-								zoneId,
-								meta.buttons,
-								padX,
-								hoveredAction,
-								copiedAction,
-							);
-							buttons = built.hits;
-						}
-
-						zones.push({
-							id: zoneId,
-							kind: meta.kind,
-							lang: meta.lang,
-							cardWidth: meta.cardWidth,
-							startRow,
-							endRow,
-							actionRow,
-							buttons,
+					if (blkLinks || meta) {
+						blockSnapshots.push({
+							tokenIndex: i,
+							rowCursor,
+							linkHits: blkLinks,
+							meta,
 						});
 					}
 					rowCursor += blk.lines.length;
+				}
+			} else if (prevCache && prevCache.baseLines === baseLines && prevCache.width === width) {
+				/* Сохраняем зоны кнопок и ссылок, даже если WeakRef cachedTokens уже собран GC */
+				blockSnapshots = [...prevCache.blockSnapshots];
+			} else {
+				blockSnapshots = [];
+			}
+
+			const zones: ResolvedActionZone[] = [];
+			const linkHits: ResolvedLinkHit[] = [];
+			for (const snap of blockSnapshots) {
+				if (snap.linkHits) {
+					for (const lh of snap.linkHits) {
+						linkHits.push({
+							y: snap.rowCursor + lh.rowOffset,
+							xStart: lh.xStart,
+							xEnd: lh.xEnd,
+							fromOsc8: lh.fromOsc8,
+							target: lh.target,
+						});
+					}
+				}
+				const meta = snap.meta;
+				if (meta) {
+					const zoneId = `${meta.kind}-${snap.tokenIndex}`;
+					const actionRow = snap.rowCursor + meta.actionOffset;
+					const startRow = snap.rowCursor + meta.startOffset;
+					const endRow = snap.rowCursor + meta.endOffset;
+					let buttons: ActionButtonHit[] = [];
+
+					if (meta.kind === "code-footer") {
+						const actionId = `${zoneId}:copy`;
+						const state =
+							copiedAction === actionId
+								? "copied"
+								: hoveredAction === actionId
+									? "hover"
+									: "rest";
+						const footer = buildCodeFooterRow(
+							activeTheme,
+							palette,
+							meta.cardWidth,
+							meta.lang ?? "",
+							state,
+						);
+						buttons = [
+							{
+								id: actionId,
+								key: "copy",
+								label: t("transcript.action.copy"),
+								payload: meta.raw ?? "",
+								xStart: Math.max(padX, padX + footer.btnStartInCard - 1),
+								xEnd: Math.min(width - 1, padX + footer.btnEndInCard + 1),
+							},
+						];
+					} else if (meta.kind === "code-inline-hover") {
+						const actionId = `${zoneId}:copy`;
+						const pillText = t(copiedAction === actionId ? "transcript.action.copied" : "transcript.action.copy");
+						const pillW = visibleWidth(pillText);
+						const btnCol = Math.max(padX + 2, padX + meta.cardWidth - pillW - 2);
+						buttons = [
+							{
+								id: actionId,
+								key: "copy",
+								label: t("transcript.action.copy"),
+								payload: meta.raw ?? "",
+								xStart: Math.max(padX, btnCol - 1),
+								xEnd: Math.min(width - 1, btnCol + pillW + 1),
+							},
+						];
+					} else {
+						const built = buildInlineActionBarRow(
+							activeTheme,
+							palette,
+							zoneId,
+							meta.buttons,
+							padX,
+							hoveredAction,
+							copiedAction,
+						);
+						buttons = built.hits;
+					}
+
+					zones.push({
+						id: zoneId,
+						kind: meta.kind,
+						lang: meta.lang,
+						cardWidth: meta.cardWidth,
+						startRow,
+						endRow,
+						actionRow,
+						buttons,
+					});
 				}
 			}
 			self.__conartiActionZones = zones;
 			self.__conartiLinkHits = linkHits;
 
+			const commitMarkdownCache = (outLines: string[]): string[] => {
+				self.__conartiMarkdownCache = {
+					baseLines,
+					width,
+					theme: activeTheme,
+					hoveredAction,
+					copiedAction,
+					isFullscreen,
+					blockSnapshots,
+					zones,
+					linkHits,
+					outLines,
+				} satisfies MarkdownRenderCache;
+				return outLines;
+			};
+
 			const markActionRows = (lines: string[]): string[] => {
-				if (getActiveHostRuntime()?.isFullscreen) {
+				if (isFullscreen) {
 					for (const zone of zones) {
 						const line = lines[zone.actionRow];
 						if (line !== undefined && zone.kind !== "code-inline-hover") {
@@ -876,7 +948,10 @@ export function installMarkdownCardsAndHeadings(): void {
 				return lines;
 			};
 			if (!hoveredAction && !copiedAction) {
-				return markActionRows([...baseLines]);
+				if (!isFullscreen || zones.every((z) => z.kind === "code-inline-hover")) {
+					return commitMarkdownCache(baseLines);
+				}
+				return commitMarkdownCache(markActionRows([...baseLines]));
 			}
 
 			const out = [...baseLines];
@@ -947,7 +1022,7 @@ export function installMarkdownCardsAndHeadings(): void {
 				}
 			}
 
-			return markActionRows(out);
+			return commitMarkdownCache(markActionRows(out));
 		},
 		["pi.grok-ui.hook.chat.markdownRender"],
 	);

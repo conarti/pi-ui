@@ -137,6 +137,138 @@ export function parsePiUiUserConfig(raw: unknown): PiUiUserConfig {
 	};
 }
 
+interface FileStatSnapshot {
+	readonly exists: boolean;
+	readonly ino: bigint;
+	readonly size: bigint;
+	readonly mtimeNs: bigint;
+}
+
+const MISSING_STAT: FileStatSnapshot = {
+	exists: false,
+	ino: 0n,
+	size: 0n,
+	mtimeNs: 0n,
+};
+
+/* Окно 50 мс защищает от грубого шага mtime (4 мс на tmpfs/ext4 в CI) при синхронной перезаписи в тестах */
+const COARSE_MTIME_GUARD_NS = 50_000_000n;
+
+let cachedConfigPath = "";
+let cachedLegacyPath = "";
+let cachedPrimaryStat: FileStatSnapshot = MISSING_STAT;
+let cachedLegacyStat: FileStatSnapshot = MISSING_STAT;
+let cachedHasExplicitToolDensity = false;
+let cachedConfig: PiUiUserConfig | undefined;
+let configVersion = 1;
+let renderPassDepth = 0;
+let renderPassId = 0;
+let renderPassValidated = false;
+
+function readStatSnapshot(filePath: string): FileStatSnapshot {
+	try {
+		const st = statSync(filePath, { bigint: true });
+		return {
+			exists: true,
+			ino: st.ino,
+			size: st.size,
+			mtimeNs: st.mtimeNs,
+		};
+	} catch {
+		return MISSING_STAT;
+	}
+}
+
+function isStatFreshAndUnchanged(prev: FileStatSnapshot, next: FileStatSnapshot, nowNs: bigint): boolean {
+	if (!prev.exists && !next.exists) return true;
+	if (prev.exists !== next.exists) return false;
+	if (prev.ino !== next.ino || prev.size !== next.size || prev.mtimeNs !== next.mtimeNs) {
+		return false;
+	}
+	return nowNs - next.mtimeNs > COARSE_MTIME_GUARD_NS;
+}
+
+function areSlotOwnersEqual(
+	a: Readonly<Record<string, string>>,
+	b: Readonly<Record<string, string>>,
+): boolean {
+	const aKeys = Object.keys(a);
+	const bKeys = Object.keys(b);
+	if (aKeys.length !== bKeys.length) return false;
+	for (const key of aKeys) {
+		if (a[key] !== b[key]) return false;
+	}
+	return true;
+}
+
+function arePiUiConfigsEqual(a: PiUiUserConfig | undefined, b: PiUiUserConfig): boolean {
+	if (!a) return false;
+	return (
+		a.toolDensity === b.toolDensity &&
+		a.responseMetrics === b.responseMetrics &&
+		a.timestamps === b.timestamps &&
+		a.outlineTimestamps === b.outlineTimestamps &&
+		a.copyOnSelect === b.copyOnSelect &&
+		a.showShortcutsBar === b.showShortcutsBar &&
+		a.midTurnEnter === b.midTurnEnter &&
+		a.promptSuggestions === b.promptSuggestions &&
+		a.aiWorkingStatus === b.aiWorkingStatus &&
+		areSlotOwnersEqual(a.slotOwners, b.slotOwners)
+	);
+}
+
+function commitCachedConfig(
+	path: string,
+	legacyPath: string,
+	primaryStat: FileStatSnapshot,
+	legacyStat: FileStatSnapshot,
+	hasExplicitToolDensity: boolean,
+	nextConfig: PiUiUserConfig,
+): PiUiUserConfig {
+	if (!arePiUiConfigsEqual(cachedConfig, nextConfig)) {
+		configVersion += 1;
+	}
+	cachedConfigPath = path;
+	cachedLegacyPath = legacyPath;
+	cachedPrimaryStat = primaryStat;
+	cachedLegacyStat = legacyStat;
+	cachedHasExplicitToolDensity = hasExplicitToolDensity;
+	cachedConfig = nextConfig;
+	if (renderPassDepth > 0) {
+		renderPassValidated = true;
+	}
+	return nextConfig;
+}
+
+/**
+ * Оборачивает синхронный проход рендера кадра TUI, чтобы сотни вызовов `loadPiUiUserConfig()`
+ * и `getPiUiConfigVersion()` внутри одного кадра проверяли `statSync` не более одного раза.
+ */
+export function withPiUiConfigRenderPass<T>(fn: () => T): T {
+	if (renderPassDepth === 0) {
+		renderPassId += 1;
+		renderPassValidated = false;
+	}
+	renderPassDepth += 1;
+	try {
+		return fn();
+	} finally {
+		renderPassDepth -= 1;
+		if (renderPassDepth === 0) {
+			renderPassValidated = false;
+		}
+	}
+}
+
+export function getPiUiRenderPassId(): number {
+	return renderPassId;
+}
+
+export function getPiUiConfigVersion(): number {
+	loadPiUiUserConfig();
+	return configVersion;
+}
+
 function readLegacyToolDensity(legacyPath: string): ToolDensityPreset | undefined {
 	if (!existsSync(legacyPath)) return undefined;
 	try {
@@ -154,10 +286,35 @@ function readLegacyToolDensity(legacyPath: string): ToolDensityPreset | undefine
 
 export function loadPiUiUserConfig(): PiUiUserConfig {
 	const path = getPiUiConfigPath();
+	if (renderPassDepth > 0 && renderPassValidated && cachedConfig && cachedConfigPath === path) {
+		return cachedConfig;
+	}
+
+	const legacyPath = getLegacyToolDisplayConfigPath();
+	const primaryStat = readStatSnapshot(path);
+	const nowNs = BigInt(Date.now()) * 1_000_000n;
+
+	if (
+		cachedConfig &&
+		cachedConfigPath === path &&
+		cachedLegacyPath === legacyPath &&
+		isStatFreshAndUnchanged(cachedPrimaryStat, primaryStat, nowNs)
+	) {
+		const legacyUnchanged =
+			cachedHasExplicitToolDensity ||
+			isStatFreshAndUnchanged(cachedLegacyStat, readStatSnapshot(legacyPath), nowNs);
+		if (legacyUnchanged) {
+			if (renderPassDepth > 0) {
+				renderPassValidated = true;
+			}
+			return cachedConfig;
+		}
+	}
+
 	let rawObject: Record<string, unknown> | undefined;
 	let parsedValidJson = false;
 
-	if (existsSync(path)) {
+	if (primaryStat.exists) {
 		try {
 			const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
 			if (isJsonObject(parsed)) {
@@ -165,25 +322,36 @@ export function loadPiUiUserConfig(): PiUiUserConfig {
 				parsedValidJson = true;
 			}
 		} catch {
-			return { ...DEFAULT_PI_UI_USER_CONFIG, slotOwners: {} };
+			const fallback = { ...DEFAULT_PI_UI_USER_CONFIG, slotOwners: {} };
+			return commitCachedConfig(path, legacyPath, primaryStat, MISSING_STAT, false, fallback);
 		}
 	}
 
 	/* Однократная прозрачная миграция tool-display.json, пока в pi-ui.json ещё нет toolDensity */
 	const hasExplicitToolDensity =
 		parsedValidJson && rawObject !== undefined && "toolDensity" in rawObject;
-	if (!hasExplicitToolDensity) {
-		const migratedDensity = readLegacyToolDensity(getLegacyToolDisplayConfigPath());
+	const legacyStat = hasExplicitToolDensity ? MISSING_STAT : readStatSnapshot(legacyPath);
+	if (!hasExplicitToolDensity && legacyStat.exists) {
+		const migratedDensity = readLegacyToolDensity(legacyPath);
 		if (migratedDensity) {
 			try {
 				return updatePiUiUserConfig({ toolDensity: migratedDensity });
 			} catch {
-				return parsePiUiUserConfig({ ...(rawObject ?? {}), toolDensity: migratedDensity });
+				const migrated = parsePiUiUserConfig({ ...(rawObject ?? {}), toolDensity: migratedDensity });
+				return commitCachedConfig(path, legacyPath, primaryStat, legacyStat, false, migrated);
 			}
 		}
 	}
 
-	return parsePiUiUserConfig(rawObject);
+	const resolved = parsePiUiUserConfig(rawObject);
+	return commitCachedConfig(
+		path,
+		legacyPath,
+		primaryStat,
+		legacyStat,
+		hasExplicitToolDensity,
+		resolved,
+	);
 }
 
 export function loadExplicitToolDensity(): ToolDensityPreset | undefined {
@@ -264,5 +432,16 @@ export function updatePiUiUserConfig(patch: Partial<PiUiUserConfig>): PiUiUserCo
 
 	writeConfigJsonAtomically(targetPath, payload, mode);
 
-	return parsePiUiUserConfig(payload);
+	const configPath = getPiUiConfigPath();
+	const legacyPath = getLegacyToolDisplayConfigPath();
+	const nextConfig = parsePiUiUserConfig(payload);
+	renderPassValidated = false;
+	return commitCachedConfig(
+		configPath,
+		legacyPath,
+		readStatSnapshot(configPath),
+		MISSING_STAT,
+		"toolDensity" in payload,
+		nextConfig,
+	);
 }

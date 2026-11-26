@@ -12,7 +12,7 @@ import { loadPiUiUserConfig, updatePiUiUserConfig } from "../../shared/pi-ui-con
 import { extractSkillInvocations } from "../../shared/skill-tags.ts";
 import { formatTranscriptTimestamp } from "../../shared/transcript-timestamp.ts";
 import type { IndexedTurn, TranscriptTurnIndex } from "../../shared/turn-index.ts";
-import { reconstructTurnPromptText } from "../prompt-chips/registry.ts";
+import { getActivePromptChipRegistry, reconstructTurnPromptText } from "../prompt-chips/registry.ts";
 import {
 	OutlinePreviewPopup,
 	OutlineRailComponent,
@@ -89,7 +89,10 @@ export function createOutlineRailSlot(
 			Math.min(40, maxCardW - 4, Math.floor((termCols - RAIL_WIDTH - 2) * 0.55)),
 		);
 
-		const entries = ctx.sessionManager?.getEntries?.() ?? ctx.sessionManager?.getBranch?.();
+		const registry = getActivePromptChipRegistry();
+		const entries = registry.hasHydratedEntries()
+			? undefined
+			: (ctx.sessionManager?.getEntries?.() ?? ctx.sessionManager?.getBranch?.());
 		const reconstructed = reconstructTurnPromptText(turn.prompt, {
 			timestamp: turn.timestamp,
 			messageId: turn.id,

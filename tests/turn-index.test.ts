@@ -437,4 +437,85 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 			rmSync(tempCwd, { recursive: true, force: true });
 		}
 	});
+
+	it("preserves referential string[] and Component identity across consecutive animation frames without re-hydrating session entries (ADR-0008)", async () => {
+		const tempCwd = mkdtempSync(join(tmpdir(), "pi-ui-adr0008-cache-"));
+		try {
+			writeFileSync(join(tempCwd, "one.txt"), "one\n", "utf8");
+			writeFileSync(join(tempCwd, "two.txt"), "two\n", "utf8");
+
+			let tick = 0;
+			harness = await createInteractiveHarness({
+				theme: "dark",
+				width: 110,
+				height: 36,
+				cwd: tempCwd,
+				extensionFactories: [
+					(pi) => {
+						pi.on("session_start", (_ev, ctx) => {
+							ctx.ui.setWidget("live-progress", () => ({
+								render: () => [`◆ 1/3 steps · frame ${tick}`],
+								invalidate() {},
+							}));
+						});
+					},
+				],
+				responses: [
+					fauxAssistantMessage(
+						[fauxThinking("Reading file one"), fauxToolCall("read", { path: "one.txt", toolSummary: "Read one" })],
+						{ stopReason: "toolUse" },
+					),
+					fauxAssistantMessage(
+						[fauxThinking("Reading file two"), fauxToolCall("read", { path: "two.txt", toolSummary: "Read two" })],
+						{ stopReason: "toolUse" },
+					),
+					fauxAssistantMessage([fauxThinking("Synthesizing answer"), fauxText("```ts\nexport const ok = true;\n```\n\nAll files inspected.")]),
+					fauxAssistantMessage([fauxText("Follow-up answer with metrics row.")]),
+				],
+			});
+
+			await harness.submitInput("First prompt with grouped exploration");
+			await harness.submitInput("Second plain prompt");
+			harness.flushFrame(true);
+
+			const modeAny = harness.mode as unknown as {
+				chatContainer: Container;
+				ui: { requestRender: () => void };
+				renderer?: { doRender: () => void };
+			};
+			const chat = modeAny.chatContainer;
+			const renderer = modeAny.renderer!;
+
+			/* Прогревочный кадр заполняет референциальные кэши карточек и групп */
+			tick += 1;
+			modeAny.ui.requestRender();
+			renderer.doRender();
+
+			const baselineLayout = (chat as unknown as { childLines?: { lines: string[]; children: Component[] } }).childLines;
+			expect(baselineLayout).toBeDefined();
+			const baselineLines = baselineLayout!.lines;
+
+			const getEntriesSpy = vi.spyOn(harness.session.sessionManager, "getEntries");
+			const getBranchSpy = vi.spyOn(harness.session.sessionManager, "getBranch");
+
+			for (let frame = 0; frame < 10; frame += 1) {
+				tick += 1;
+				modeAny.ui.requestRender();
+				renderer.doRender();
+				const nextLayout = (chat as unknown as { childLines?: { lines: string[]; children: Component[] } }).childLines;
+				expect(nextLayout).toBe(baselineLayout);
+				expect(nextLayout?.lines).toBe(baselineLines);
+			}
+
+			/* Ни один завершённый промпт или чип не клонирует getEntries() повторно на кадрах анимации */
+			expect(getEntriesSpy).toHaveBeenCalledTimes(0);
+			/* getBranch() читается не более одного раза за проход рендера (TurnIndex), а не в каждой карточке метрик */
+			expect(getBranchSpy.mock.calls.length).toBeLessThanOrEqual(10);
+
+			getEntriesSpy.mockRestore();
+			getBranchSpy.mockRestore();
+		} finally {
+			rmSync(tempCwd, { recursive: true, force: true });
+		}
+	});
 });

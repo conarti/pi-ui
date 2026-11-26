@@ -238,8 +238,12 @@ export function registerQuotesFeature(pi: ExtensionAPI): void {
 		if (ctx.mode === "tui" && ctx.hasUI) {
 			unsubscribeInput = ctx.ui.onTerminalInput((data) => {
 				const tui = getActiveHostRuntime()?.tui;
-				if (!isKeyRelease(data) && tui && !hasBlockingModalOverlay(tui)) {
-					if ((data === "\x1b" || matchesKey(data, "escape")) && selectionController.isShowing) {
+				if (!isKeyRelease(data) && tui) {
+					if (
+						(data === "\x1b" || matchesKey(data, "escape")) &&
+						selectionController.isShowing &&
+						!hasBlockingModalOverlay(tui)
+					) {
 						selectionController.hide();
 						requestRender();
 						return { consume: true };
@@ -247,7 +251,10 @@ export function registerQuotesFeature(pi: ExtensionAPI): void {
 					const isCopyChord =
 						data === "\x03" ||
 						data === "\x18" ||
+						matchesLayoutChord(data, "cmd+c") ||
+						matchesLayoutChord(data, "shift+cmd+c") ||
 						matchesLayoutChord(data, "ctrl+c") ||
+						matchesLayoutChord(data, "shift+ctrl+c") ||
 						matchesLayoutChord(data, "ctrl+x");
 					if (isCopyChord) {
 						const renderer = unwrapHostTui(tui) as unknown as {
@@ -264,7 +271,12 @@ export function registerQuotesFeature(pi: ExtensionAPI): void {
 				}
 				queueMicrotask(() => {
 					const curTui = getActiveHostRuntime()?.tui;
-					if (curTui && hasBlockingModalOverlay(curTui) && selectionController.isShowing) {
+					if (
+						curTui &&
+						hasBlockingModalOverlay(curTui) &&
+						selectionController.isShowing &&
+						!selectionController.isCopyOnly
+					) {
 						selectionController.hide();
 					}
 				});

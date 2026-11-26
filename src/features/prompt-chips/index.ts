@@ -741,12 +741,31 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 		requestRender();
 	};
 
+	let lastHydratedSessionSignature = "";
+
+	const readSessionSignature = (sm: unknown): string | undefined => {
+		if (!sm || typeof sm !== "object") return undefined;
+		const typed = sm as { getSessionId?: () => string; getLeafId?: () => string | null };
+		if (typeof typed.getLeafId !== "function") return undefined;
+		const leafId = typed.getLeafId();
+		const sessionId = typeof typed.getSessionId === "function" ? typed.getSessionId() : "";
+		return `${sessionId}:${leafId ?? ""}`;
+	};
+
 	const hydratePersistedFromSession = (ctxOverride?: ExtensionContext): void => {
 		const sm = (ctxOverride ?? activeCtx ?? getActiveHostRuntime()?.ctx)?.sessionManager;
 		if (!sm) return;
+		const registry = getActivePromptChipRegistry();
+		const sig = readSessionSignature(sm);
+		if (sig !== undefined && registry.hasHydratedEntries() && sig === lastHydratedSessionSignature) {
+			return;
+		}
 		const entries = sm.getEntries?.() ?? sm.getBranch?.() ?? [];
 		if (entries.length > 0) {
-			getActivePromptChipRegistry().restorePersistedEntries(entries);
+			registry.ensurePersistedEntriesHydrated(entries);
+			if (sig !== undefined) {
+				lastHydratedSessionSignature = sig;
+			}
 		}
 	};
 
@@ -825,11 +844,13 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 		const registry = getActivePromptChipRegistry();
 		if (event.reason !== "reload") {
 			registry.clearSession();
+			lastHydratedSessionSignature = "";
 			lastDraftText = "";
 			lastPointer = undefined;
 		}
 		const entries = ctx.sessionManager.getEntries?.() ?? ctx.sessionManager.getBranch?.() ?? [];
 		registry.restorePersistedEntries(entries);
+		lastHydratedSessionSignature = readSessionSignature(ctx.sessionManager) ?? "";
 		if (ctx.mode === "tui" && ctx.hasUI) {
 			unsubscribeInputGuard = ctx.ui.onTerminalInput((data) => {
 				const isEsc = !isKeyRelease(data) && (data === "\x1b" || matchesKey(data, "escape"));

@@ -27,6 +27,7 @@ import {
 import { LEGACY_STAMP_ENTRY_TYPE, METRICS_ENTRY_TYPE } from "../context-inspector/telemetry.ts";
 import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { getActiveHostRuntime, type HostRuntimeHandle } from "../../shared/host-runtime.ts";
+import { withPiUiConfigRenderPass } from "../../shared/pi-ui-config.ts";
 import { hookMethod } from "../../shared/runtime-hooks.ts";
 import { markSelectionChrome } from "../../shared/selection-copy.ts";
 import { formatDurationMs, type RowStatus } from "./core.ts";
@@ -175,6 +176,8 @@ export function groupFailures(rows: readonly ToolRowLike[]): string[] {
 type HeaderCache = {
 	paint: string;
 	width: number;
+	outerWidth: number;
+	pad: number | undefined;
 	expanded: boolean;
 	hostExpanded: boolean;
 	rows: readonly ToolRowLike[];
@@ -182,9 +185,32 @@ type HeaderCache = {
 	fingerprints: string[];
 	results: unknown[];
 	lines: string[];
+	paddedLines: string[];
 };
 
-type GroupState = { expanded: boolean; lastHostExpanded: boolean; header?: HeaderCache };
+type CachedGroupInstance = {
+	readonly component: ToolGroupComponent;
+	readonly style: GroupStyle;
+	readonly expanded: boolean;
+	readonly tui: { requestRender(): void };
+	readonly rows: readonly ToolRowLike[];
+	readonly members: readonly unknown[];
+};
+
+type GroupState = {
+	expanded: boolean;
+	lastHostExpanded: boolean;
+	header?: HeaderCache;
+	cachedGroup?: CachedGroupInstance;
+};
+
+function sameRefList(a: readonly unknown[], b: readonly unknown[]): boolean {
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i += 1) {
+		if (a[i] !== b[i]) return false;
+	}
+	return true;
+}
 
 /** The colors a group line is drawn in, resolved once per frame rather than once per group. */
 type Paint = { theme: Theme; chrome: (text: string) => string; key: string };
@@ -271,23 +297,41 @@ export class ToolGroupComponent extends Container {
 					let strippedTopBlank = false;
 					let guideWidth = 0;
 					let removedMargins: number[] = [];
+					let lastTreeWidth = -1;
+					let lastSourceLines: readonly string[] | undefined;
+					let lastHostTheme: Theme | undefined;
+					let lastTreeLines: string[] = [];
 					this.addChild({
 						render: (w: number) => {
 							const outer = computeOuterCanvasMargin(w);
 							guideWidth = outer + 2;
 							const rendered = comp.render(w);
+							const hostTheme = getActiveHostRuntime()?.ctx.ui.theme as Theme | undefined;
+							if (
+								w === lastTreeWidth &&
+								rendered === lastSourceLines &&
+								hostTheme === lastHostTheme
+							) {
+								return lastTreeLines;
+							}
 							strippedTopBlank =
 								rendered.length > 1 && stripTerminalSequences(rendered[0] ?? "").trim() === "";
 							const body = strippedTopBlank ? rendered.slice(1) : rendered;
-							const hostTheme = getActiveHostRuntime()?.ctx.ui.theme as Theme | undefined;
 							const guideText = `${" ".repeat(outer)}│ `;
 							const guide = hostTheme ? densityPalette(hostTheme).rail(guideText) : guideText;
 							removedMargins = body.map((line) => Math.min(guideWidth, /^ */u.exec(line)![0].length));
-							return body.map((line, row) => truncateToWidth(
+							lastTreeWidth = w;
+							lastSourceLines = rendered;
+							lastHostTheme = hostTheme;
+							lastTreeLines = body.map((line, row) => truncateToWidth(
 								`${guide}${line.slice(removedMargins[row])}`, w, "…",
 							));
+							return lastTreeLines;
 						},
-						invalidate: () => comp.invalidate(),
+						invalidate: () => {
+							lastSourceLines = undefined;
+							comp.invalidate();
+						},
 						handleMouse: (ev: unknown) => {
 							if (typeof (comp as { handleMouse?: (e: unknown) => unknown }).handleMouse !== "function") {
 								return undefined;
@@ -317,6 +361,17 @@ export class ToolGroupComponent extends Container {
 export type GroupStyle = "density" | "classic-rows" | "exploration-tail";
 export type GroupBucket = "all" | "explore" | "edit" | "command" | "custom";
 
+const imageResultCache = new WeakMap<object, boolean>();
+
+function hasCachedImageContent(result: ToolRowLike["result"]): boolean {
+	if (!result || typeof result !== "object") return false;
+	const cached = imageResultCache.get(result);
+	if (cached !== undefined) return cached;
+	const computed = hasImageContent(result);
+	imageResultCache.set(result, computed);
+	return computed;
+}
+
 function resolveRowGroupBucket(
 	child: unknown,
 	style: GroupStyle,
@@ -325,7 +380,7 @@ function resolveRowGroupBucket(
 	if (!isKind(child, ToolExecutionComponent)) return undefined;
 	const row = child as ToolRowLike;
 	/* Строки с инлайн-изображениями никогда не складываем в свёрнутую текстовую группу. */
-	if (hasImageContent(row.result)) return undefined;
+	if (hasCachedImageContent(row.result)) return undefined;
 
 	if (style === "exploration-tail") {
 		return exploreOf(row) !== undefined ? "explore" : undefined;
@@ -473,25 +528,27 @@ export class ToolGroupController {
 		if (chat && resolvedHost) {
 			const isGroupStyle = (style: string): style is GroupStyle =>
 				style === "density" || style === "classic-rows" || style === "exploration-tail";
-			hookMethod(chat, "render", "classic.groups", (self, args, original) => {
-				const style = this.runtime.config.style;
-				if (!this.context || isSilent() || !isGroupStyle(style)) return original.apply(self, args);
-				const children = self.children as unknown[];
-				this.paint = this.resolvePaint();
-				openExplorations.clear();
-				self.children = groupChildren(
-					children,
-					(rows, members) => this.makeGroup(rows, members, resolvedHost.tui),
-					style,
-					this.runtime.config.density,
-				);
-				try {
-					return original.apply(self, args);
-				} finally {
-					self.children = children;
-					this.paint = undefined;
-				}
-			});
+			hookMethod(chat, "render", "classic.groups", (self, args, original) =>
+				withPiUiConfigRenderPass(() => {
+					const style = this.runtime.config.style;
+					if (!this.context || isSilent() || !isGroupStyle(style)) return original.apply(self, args);
+					const children = self.children as unknown[];
+					this.paint = this.resolvePaint();
+					openExplorations.clear();
+					self.children = groupChildren(
+						children,
+						(rows, members) => this.makeGroup(rows, members, resolvedHost.tui),
+						style,
+						this.runtime.config.density,
+					);
+					try {
+						return original.apply(self, args);
+					} finally {
+						self.children = children;
+						this.paint = undefined;
+					}
+				}),
+			);
 			hookMethod(chat, "handleMouse", "density.groups.mouse", (self, args, original) => {
 				const style = this.runtime.config.style;
 				const event = args[0] as { width?: number } | undefined;
@@ -520,46 +577,86 @@ export class ToolGroupController {
 			state = { expanded: key.expanded, lastHostExpanded: key.expanded };
 			this.states.set(key, state);
 		}
+		/* Синхронизируем однородное изменение раскрытия хоста (Ctrl+O) до проверки кэша инстанса группы */
+		const hostExpanded = key.expanded;
+		const uniformHostExpanded = rows.every((row) => row.expanded === hostExpanded);
+		if (uniformHostExpanded && state.lastHostExpanded !== hostExpanded) {
+			state.lastHostExpanded = hostExpanded;
+			state.expanded = hostExpanded;
+		}
+		const style = this.runtime.config.style as GroupStyle;
+		if (style === "exploration-tail" && state.expanded) {
+			for (const row of rows) {
+				openExplorations.add(row.toolCallId);
+				if (!row.expanded) row.setExpanded?.(true);
+			}
+		}
+
+		const cached = state.cachedGroup;
+		if (
+			cached &&
+			cached.style === style &&
+			cached.expanded === state.expanded &&
+			cached.tui === tui &&
+			sameRefList(cached.rows, rows) &&
+			sameRefList(cached.members, members)
+		) {
+			return cached.component;
+		}
+
 		const groupState = state;
-		const draw = (group: readonly ToolRowLike[], width: number, expanded: boolean) => {
-			const pad = group[0]?.outputPad;
-			return outputPadLines(
-				this.drawCached(group, width + (pad === 0 ? 1 : 0), expanded, groupState, members),
-				width,
-				pad,
-			);
-		};
-		if (this.runtime.config.style !== "exploration-tail") {
-			return new ToolGroupComponent(
+		const draw = (group: readonly ToolRowLike[], width: number, expanded: boolean) =>
+			this.drawPaddedCached(group, width, expanded, groupState, members);
+		let component: ToolGroupComponent;
+		if (style !== "exploration-tail") {
+			component = new ToolGroupComponent(
 				rows,
 				members,
 				state,
 				draw,
 				() => tui.requestRender(),
 				undefined,
-				this.runtime.config.style === "density",
+				style === "density",
 			);
+		} else {
+			/* Общая кнопка сворачивания заменяет кнопки отдельных вызовов в раскрытой группе. */
+			const toggle = (expanded: boolean) => {
+				for (const row of rows) row.setExpanded?.(expanded);
+				tui.requestRender();
+			};
+			let lastFooterWidth = -1;
+			let lastFooterTheme: Theme | undefined;
+			let lastFooterPad: number | undefined;
+			let lastFooterLines: string[] = [];
+			const footer = (width: number) => {
+				const theme = this.paint?.theme ?? this.context?.ui.theme;
+				const pad = rows[0]?.outputPad;
+				if (!theme) return [];
+				if (width === lastFooterWidth && theme === lastFooterTheme && pad === lastFooterPad) {
+					return lastFooterLines;
+				}
+				const available = width + (pad === 0 ? 1 : 0);
+				lastFooterWidth = width;
+				lastFooterTheme = theme;
+				lastFooterPad = pad;
+				lastFooterLines = outputPadLines(
+					[truncateToWidth(theme.fg("dim", tailDisclosure(available, true)), Math.max(1, available), "…")],
+					width,
+					pad,
+				);
+				return lastFooterLines;
+			};
+			component = new ToolGroupComponent(rows, members, state, draw, toggle, footer);
 		}
-		/* Общая кнопка сворачивания заменяет кнопки отдельных вызовов в раскрытой группе. */
-		const toggle = (expanded: boolean) => {
-			for (const row of rows) row.setExpanded?.(expanded);
-			tui.requestRender();
+		state.cachedGroup = {
+			component,
+			style,
+			expanded: state.expanded,
+			tui,
+			rows: [...rows],
+			members: [...members],
 		};
-		const footer = (width: number) => {
-			const theme = this.paint?.theme ?? this.context?.ui.theme;
-			const pad = rows[0]?.outputPad;
-			const available = width + (pad === 0 ? 1 : 0);
-			return theme ? outputPadLines([truncateToWidth(theme.fg("dim", tailDisclosure(available, true)), Math.max(1, available), "…")], width, pad) : [];
-		};
-		const group = new ToolGroupComponent(rows, members, state, draw, toggle, footer);
-		/* Вызов, добавленный в уже раскрытую группу, наследует её состояние. */
-		if (state.expanded) {
-			for (const row of rows) {
-				openExplorations.add(row.toolCallId);
-				if (!row.expanded) row.setExpanded?.(true);
-			}
-		}
-		return group;
+		return component;
 	}
 
 	private resolvePaint(): Paint | undefined {
@@ -585,21 +682,35 @@ export class ToolGroupController {
 	 * expansion, or the theme changes, so those lines are kept. A running group's
 	 * line pulses and counts time, so it is drawn every frame.
 	 */
-	private drawCached(
+	private drawPaddedCached(
 		rows: readonly ToolRowLike[],
-		width: number,
+		outerWidth: number,
 		expanded: boolean,
 		state: GroupState,
 		members: readonly unknown[] = rows,
 	): string[] {
 		const paint = this.paint ?? this.resolvePaint();
 		if (!paint) return [];
-		if (lastRunning(rows, this.canRun)) return this.draw(rows, width, expanded, paint, members);
-		if (state.header && headerStill(state.header, rows, paint.key, width, expanded)) return state.header.lines;
-		const lines = this.draw(rows, width, expanded, paint, members);
+		const pad = rows[0]?.outputPad;
+		const innerWidth = outerWidth + (pad === 0 ? 1 : 0);
+		if (lastRunning(rows, this.canRun)) {
+			return outputPadLines(this.draw(rows, innerWidth, expanded, paint, members), outerWidth, pad);
+		}
+		if (
+			state.header &&
+			state.header.outerWidth === outerWidth &&
+			state.header.pad === pad &&
+			headerStill(state.header, rows, paint.key, innerWidth, expanded)
+		) {
+			return state.header.paddedLines;
+		}
+		const lines = this.draw(rows, innerWidth, expanded, paint, members);
+		const paddedLines = outputPadLines(lines, outerWidth, pad);
 		state.header = {
 			paint: paint.key,
-			width,
+			width: innerWidth,
+			outerWidth,
+			pad,
 			expanded,
 			hostExpanded: rows[0]!.expanded,
 			rows: [...rows],
@@ -607,8 +718,9 @@ export class ToolGroupController {
 			fingerprints: rows.map(rowArgsFingerprint),
 			results: rows.map((row) => row.result),
 			lines,
+			paddedLines,
 		};
-		return lines;
+		return paddedLines;
 	}
 
 	/** Claude's quiet completed exploration; active and interrupted calls keep a status cue. */

@@ -196,10 +196,22 @@ export function renderHeaderContextHoverBar(
 	return delta > 0 ? `${" ".repeat(delta)}${result}` : truncateToWidth(result, targetWidth, "");
 }
 
+const EMPTY_HEADER_LINES: string[] = [];
+
 class SessionHeaderView implements Component {
 	private hoveredId: string | null = null;
 	private hits: HitBox[] = [];
 	private readonly hoverOwner = {};
+	private usageCache?: {
+		key: string;
+		value: { readonly usedTokens: number; readonly contextWindow: number; readonly percent: number };
+	};
+	private renderCache?: {
+		key: string;
+		theme: Theme;
+		lines: string[];
+		hits: HitBox[];
+	};
 
 	constructor(
 		private readonly pi: ExtensionAPI,
@@ -216,26 +228,68 @@ class SessionHeaderView implements Component {
 		return viewport.height >= 8;
 	};
 
-	invalidate(): void {}
+	invalidate(): void {
+		this.usageCache = undefined;
+		this.renderCache = undefined;
+	}
 
 	dispose(): void {
 		this.hoveredId = null;
 		this.hits = [];
+		this.usageCache = undefined;
+		this.renderCache = undefined;
+	}
+
+	private resolveContextUsage(): {
+		readonly usageKey: string;
+		readonly usedTokens: number;
+		readonly contextWindow: number;
+		readonly percent: number;
+	} {
+		const sm = this.ctx.sessionManager as
+			| { getSessionId?: () => string; getLeafId?: () => string | null }
+			| undefined;
+		if (typeof sm?.getLeafId === "function") {
+			const usageKey = `${sm.getSessionId?.() ?? ""}:${sm.getLeafId() ?? ""}:${this.ctx.model?.id ?? ""}:${this.ctx.model?.contextWindow ?? ""}`;
+			if (this.usageCache && this.usageCache.key === usageKey) {
+				return { usageKey, ...this.usageCache.value };
+			}
+			const computed = computeHeaderContextUsage(this.ctx);
+			this.usageCache = { key: usageKey, value: computed };
+			return { usageKey, ...computed };
+		}
+		const computed = computeHeaderContextUsage(this.ctx);
+		return {
+			usageKey: `${computed.usedTokens}:${computed.contextWindow}`,
+			...computed,
+		};
 	}
 
 	render(width: number): string[] {
-		this.hits = [];
-		if (width <= 0 || !isSlotOwnedByPiUi("header")) return [];
+		if (width <= 0 || !isSlotOwnedByPiUi("header")) {
+			this.hits = [];
+			return EMPTY_HEADER_LINES;
+		}
 
-		if (!this.pinnedMode && getActiveHostRuntime()?.isFullscreen) {
-			return [];
+		const isFullscreen = Boolean(getActiveHostRuntime()?.isFullscreen);
+		if (!this.pinnedMode && isFullscreen) {
+			this.hits = [];
+			return EMPTY_HEADER_LINES;
 		}
 
 		const theme = this.getTheme();
+		const gitBranch = readCachedGitBranch(this.ctx.cwd);
+		const { usageKey, usedTokens, contextWindow, percent } = this.resolveContextUsage();
+		const renderKey = `${width}:${this.pinnedMode ? 1 : 0}:${isFullscreen ? 1 : 0}:${this.hoveredId ?? ""}:${this.ctx.cwd}:${gitBranch}:${usageKey}`;
+		if (this.renderCache && this.renderCache.key === renderKey && this.renderCache.theme === theme) {
+			this.hits = this.renderCache.hits;
+			return this.renderCache.lines;
+		}
+
+		this.hits = [];
 		const palette = getThemeSurfacePalette(theme);
 		const outerPad = computeOuterCanvasMargin(width);
 		const contentRowY = this.pinnedMode ? 1 : 0;
-		const gitBranch = readCachedGitBranch(this.ctx.cwd);
 		const tildePath = formatTildeWorkspacePath(this.ctx.cwd);
 
 		const isWorkspaceHov = this.hoveredId === "workspace";
@@ -246,8 +300,6 @@ class SessionHeaderView implements Component {
 			? themeFgRgb(theme, palette.accentBright, tildePath)
 			: theme.fg("text", tildePath);
 		const leftContent = `${branchStyled}${pathStyled}`;
-
-		const { usedTokens, contextWindow, percent } = computeHeaderContextUsage(this.ctx);
 		const usedStr = formatCompactTokens(usedTokens);
 		const winStr = formatCompactTokens(contextWindow);
 		const restPlain = `${usedStr} / ${winStr}`;
@@ -309,11 +361,16 @@ class SessionHeaderView implements Component {
 		const contentRow = `${" ".repeat(outerPad)}${clippedLeft}${" ".repeat(middleSpaces)}${ctxRendered}${" ".repeat(outerPad)}`;
 		const paddedContent = contentRow + " ".repeat(Math.max(0, width - visibleWidth(contentRow)));
 
-		if (this.pinnedMode) {
-			const blank = " ".repeat(width);
-			return [blank, paddedContent, blank];
-		}
-		return [paddedContent];
+		const lines = this.pinnedMode
+			? [" ".repeat(width), paddedContent, " ".repeat(width)]
+			: [paddedContent];
+		this.renderCache = {
+			key: renderKey,
+			theme,
+			lines,
+			hits: [...this.hits],
+		};
+		return lines;
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {

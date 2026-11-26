@@ -1,5 +1,11 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { getPiUiRenderPassId } from "./pi-ui-config.ts";
+
+const GLOBAL_THEME_SYMBOL = Symbol.for("@earendil-works/pi-coding-agent:theme");
+let lastLightPassId = -1;
+let lastLightThemeRef: unknown;
+let lastLightResult = false;
 
 export interface HitBox {
 	id: string;
@@ -186,9 +192,7 @@ export function clampHueOutsideForbiddenBands(rgb: RgbTuple): RgbTuple {
 }
 
 export function getActiveGlobalTheme(fallback?: unknown): Theme {
-	const g = (globalThis as Record<PropertyKey, unknown>)[
-		Symbol.for("@earendil-works/pi-coding-agent:theme")
-	];
+	const g = (globalThis as Record<PropertyKey, unknown>)[GLOBAL_THEME_SYMBOL];
 	if (g) return g as Theme;
 	return fallback as Theme;
 }
@@ -288,24 +292,41 @@ export function bgRgb(
 }
 
 export function isLightTheme(theme: unknown): boolean {
+	const passId = getPiUiRenderPassId();
+	if (passId > 0 && passId === lastLightPassId && theme === lastLightThemeRef) {
+		return lastLightResult;
+	}
+	let result = false;
 	try {
 		const t = theme as
 			| { name?: string; appearance?: string; getFgAnsi?: (token: string) => string }
 			| undefined;
-		if (t?.appearance === "light") return true;
-		if (t?.appearance === "dark") return false;
-		const name = String(t?.name ?? "").toLowerCase();
-		if (name.includes("light") || name.includes("day")) return true;
-		const probe = String(t?.getFgAnsi?.("text") ?? "");
-		const rgb = parseAnsiColorRgb(probe);
-		if (rgb) {
-			const lum = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
-			return lum < 128;
+		if (t?.appearance === "light") {
+			result = true;
+		} else if (t?.appearance === "dark") {
+			result = false;
+		} else {
+			const name = String(t?.name ?? "").toLowerCase();
+			if (name.includes("light") || name.includes("day")) {
+				result = true;
+			} else {
+				const probe = String(t?.getFgAnsi?.("text") ?? "");
+				const rgb = parseAnsiColorRgb(probe);
+				if (rgb) {
+					const lum = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
+					result = lum < 128;
+				}
+			}
 		}
 	} catch {
 		/* По умолчанию используется тёмная палитра */
 	}
-	return false;
+	if (passId > 0) {
+		lastLightPassId = passId;
+		lastLightThemeRef = theme;
+		lastLightResult = result;
+	}
+	return result;
 }
 
 export function paintThemeSurfaceRow(

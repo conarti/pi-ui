@@ -488,10 +488,28 @@ export function formatThinkingProseLines(
 	return wrapped;
 }
 
+const EMPTY_THINKING_LINES: string[] = [];
+
 export class ThinkingBlock implements Component {
 	readonly [THINKING_BLOCK_MARKER] = true;
 	private readonly hoverSlot: ThinkingInteractionSlot;
 	private lastTotalStreamLines = 0;
+	private completedRenderCache?: {
+		width: number;
+		theme: Theme;
+		light: boolean;
+		expanded: boolean;
+		hovered: boolean;
+		isFullscreen: boolean;
+		lines: string[];
+	};
+	private streamProseCache?: {
+		text: string;
+		width: number;
+		light: boolean;
+		proseLines: string[];
+		nonEmptyProse: string[];
+	};
 
 	constructor(
 		private readonly thinkingText: string,
@@ -508,20 +526,38 @@ export class ThinkingBlock implements Component {
 	}
 
 	invalidate(): void {
-		/* Проза пересчитывается динамически под текущую ширину и кадр волны */
+		this.completedRenderCache = undefined;
+		this.streamProseCache = undefined;
 	}
 
 	render(width: number): string[] {
-		if (width <= 0) return [];
+		if (width <= 0) return EMPTY_THINKING_LINES;
 		const activeTheme = getActiveGlobalTheme(this.themeRef);
 		const light = isLightTheme(activeTheme);
+		const isHovered = this.hoverSlot.hovered;
+		const isFullscreen = Boolean(getActiveHostRuntime()?.isFullscreen);
+
+		if (!this.isStreamingNow) {
+			const cached = this.completedRenderCache;
+			if (
+				cached &&
+				cached.width === width &&
+				cached.theme === activeTheme &&
+				cached.light === light &&
+				cached.expanded === this.isExpanded &&
+				cached.hovered === isHovered &&
+				cached.isFullscreen === isFullscreen
+			) {
+				return cached.lines;
+			}
+		}
+
 		const rightPad = computeOuterCanvasMargin(width);
 		const leftPad = rightPad + 2;
 		const margin = " ".repeat(leftPad);
 		const maxRowWidth = Math.max(8, width - rightPad);
 		const cappedWidth = Math.max(8, Math.min(width - leftPad - rightPad, MAX_THOUGHTS_WIDTH));
 		const textAvail = Math.max(4, cappedWidth - 2);
-		const isHovered = this.hoverSlot.hovered;
 
 		const headerMuted = (s: string) =>
 			isHovered
@@ -536,16 +572,92 @@ export class ThinkingBlock implements Component {
 		const padFullWidth = (line: string) =>
 			line + " ".repeat(Math.max(0, width - visibleWidth(line)));
 
+		if (!this.isStreamingNow) {
+			const commitCompleted = (lines: string[]): string[] => {
+				this.completedRenderCache = {
+					width,
+					theme: activeTheme,
+					light,
+					expanded: this.isExpanded,
+					hovered: isHovered,
+					isFullscreen,
+					lines,
+				};
+				return lines;
+			};
+
+			const label = formatThoughtLabel(this.durationMs);
+			const starColor = isHovered
+				? light
+					? fgRgb(37, 99, 235, POLARIS_STAR)
+					: fgRgb(97, 175, 239, POLARIS_STAR)
+				: light
+					? fgRgb(148, 163, 184, POLARIS_STAR)
+					: fgRgb(78, 92, 114, POLARIS_STAR);
+
+			/* Свёрнутый завершённый блок не тратит CPU на обёртку прозы мыслей */
+			if (!this.isExpanded) {
+				const line = truncateToWidth(
+					`${margin}${starColor} ${headerMuted(`› ${label}`)}`,
+					maxRowWidth,
+					"…",
+				);
+				const row = padFullWidth(line);
+				return commitCompleted([isFullscreen ? markSelectionChrome(row) : row]);
+			}
+
+			const displayText = resolveThinkingDisplayText(
+				this.thinkingText,
+				this.blockKey,
+				false,
+			);
+			const proseLines = formatThinkingProseLines(displayText, textAvail, light);
+			const out: string[] = [];
+			const openSpine = light ? fgRgb(148, 163, 184, "│") : fgRgb(76, 92, 118, "│");
+			const hdr = truncateToWidth(
+				`${margin}${starColor} ${headerMuted(`⌄ ${label}`)}`,
+				maxRowWidth,
+				"…",
+			);
+			out.push(padFullWidth(hdr));
+
+			for (const rowText of proseLines) {
+				const bodyLine = rowText ? `${margin}${openSpine} ${rowText}` : `${margin}${openSpine}`;
+				const row = truncateToWidth(bodyLine, maxRowWidth, "…");
+				out.push(padFullWidth(row));
+			}
+			return commitCompleted(out);
+		}
+
 		const displayText = resolveThinkingDisplayText(
 			this.thinkingText,
 			this.blockKey,
-			this.isStreamingNow,
+			true,
 		);
-		const proseLines = formatThinkingProseLines(displayText, textAvail, light);
-		const nonEmptyProse = proseLines.filter((l) => stripTerminalSequences(l).trim().length > 0);
+		let proseLines: string[];
+		let nonEmptyProse: string[];
+		if (
+			this.streamProseCache &&
+			this.streamProseCache.text === displayText &&
+			this.streamProseCache.width === textAvail &&
+			this.streamProseCache.light === light
+		) {
+			proseLines = this.streamProseCache.proseLines;
+			nonEmptyProse = this.streamProseCache.nonEmptyProse;
+		} else {
+			proseLines = formatThinkingProseLines(displayText, textAvail, light);
+			nonEmptyProse = proseLines.filter((l) => stripTerminalSequences(l).trim().length > 0);
+			this.streamProseCache = {
+				text: displayText,
+				width: textAvail,
+				light,
+				proseLines,
+				nonEmptyProse,
+			};
+		}
 		const out: string[] = [];
 
-		if (this.isStreamingNow) {
+		{
 			const leadGlyph = paintPolarisStar({ light, theme: activeTheme, row: 0 });
 			const liveElapsedMs =
 				this.startedAt !== undefined ? Math.max(0, Date.now() - this.startedAt) : 0;
@@ -636,40 +748,6 @@ export class ThinkingBlock implements Component {
 			}
 			return out;
 		}
-
-		const label = formatThoughtLabel(this.durationMs);
-		const starColor = isHovered
-			? light
-				? fgRgb(37, 99, 235, POLARIS_STAR)
-				: fgRgb(97, 175, 239, POLARIS_STAR)
-			: light
-				? fgRgb(148, 163, 184, POLARIS_STAR)
-				: fgRgb(78, 92, 114, POLARIS_STAR);
-
-		if (!this.isExpanded) {
-			const line = truncateToWidth(
-				`${margin}${starColor} ${headerMuted(`› ${label}`)}`,
-				maxRowWidth,
-				"…",
-			);
-			const row = padFullWidth(line);
-			return [getActiveHostRuntime()?.isFullscreen ? markSelectionChrome(row) : row];
-		}
-
-		const openSpine = light ? fgRgb(148, 163, 184, "│") : fgRgb(76, 92, 118, "│");
-		const hdr = truncateToWidth(
-			`${margin}${starColor} ${headerMuted(`⌄ ${label}`)}`,
-			maxRowWidth,
-			"…",
-		);
-		out.push(padFullWidth(hdr));
-
-		for (const rowText of proseLines) {
-			const bodyLine = rowText ? `${margin}${openSpine} ${rowText}` : `${margin}${openSpine}`;
-			const row = truncateToWidth(bodyLine, maxRowWidth, "…");
-			out.push(padFullWidth(row));
-		}
-		return out;
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {

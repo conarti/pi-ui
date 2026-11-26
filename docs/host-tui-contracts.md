@@ -72,6 +72,13 @@ Verified runtime behaviors in `@earendil-works/pi-tui` and `@earendil-works/pi-c
 - Pi stores the renderer callback on each custom message or entry component. Return a dispatching callback for a contended renderer so an existing component resolves its new owner on rebuild. Do not reinstall singleton factories whose owner and factory are unchanged; Pi's editor setter reconstructs the editor and resets the caret.
 - `SessionManager.getEntries()` filters and copies all entries, even if only one was appended. Seed the step-summary index once, then update it after a successful `appendCustomEntry` without fetching the history again.
 
+## Referential Transcript & Config Render Caching (`ADR-0008`)
+
+- **Preserve `Component` and `string[]` reference identity (`===`)**:
+  - `@earendil-works/pi-tui`'s `Container.renderChildLines` short-circuits $O(N)$ transcript line-array concatenation only when every child `Component` reference and its returned `string[]` reference stay identical across frames (`docs/adr/0008-referential-transcript-render-caching.md`).
+  - Completed transcript components (`ToolGroupController`, `ResponseMetricsRowComponent`, `UserMessageComponent`, `SkillInvocationMessageComponent`, `Markdown.prototype.render`, `ThinkingBlock`) must return cached `Component` and `string[]` references keyed by `(width, theme, hover/copy/expanded, getPiUiConfigVersion(), registry.version)` and treat returned `string[]` arrays as immutable.
+  - Wrap synchronous TUI render passes in `withPiUiConfigRenderPass` (`src/shared/pi-ui-config.ts`) and never import `node:fs` inside UI render/component modules (enforced by `scripts/check-standards.mjs`).
+
 ## Real `InteractiveMode` Test Harness & Banned Host Fakes (`ADR-0006`)
 
 - **Real-host acquisition & test seam**:

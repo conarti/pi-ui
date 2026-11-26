@@ -15,6 +15,7 @@ import {
 	fauxAssistantMessage,
 	fauxText,
 	fauxThinking,
+	fauxToolCall,
 	findComposerTopRow,
 	type InteractiveHarness,
 } from "./harness/index.ts";
@@ -726,5 +727,103 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		const composerBodyRow = findComposerTopRow(harness) + 1;
 		await harness.mouseDrag(4, composerBodyRow, 20, 10, { steps: 2 });
 		expect(harness.screen().text()).not.toContain("[Quote · Alt+Q]");
+	});
+
+	it("supports dragging across multiple collapsed tool rows, selecting above-editor widgets, Cmd+C (Latin & Cyrillic), and copyOnly [Copy] popup inside blocking Modal Cards", async () => {
+		const tempCwd = mkdtempSync(join(tmpdir(), "pi-ui-multi-tool-copy-"));
+		tempDirs.push(tempCwd);
+		writeFileSync(join(tempCwd, "alpha.ts"), "export const alpha = 1;\n", "utf8");
+		writeFileSync(join(tempCwd, "beta.ts"), "export const beta = 2;\n", "utf8");
+
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 110,
+			height: 36,
+			cwd: tempCwd,
+			settings: { toolDensity: "detailed" },
+			extensionFactories: [
+				(pi: ExtensionAPI) => {
+					pi.on("session_start", (_ev, ctx) => {
+						ctx.ui.setWidget("steps-demo", [
+							"◆ 0/4 steps",
+							"  ▸ Verify multi-tool drag selection",
+						]);
+					});
+				},
+			],
+			responses: [
+				fauxAssistantMessage(
+					[fauxToolCall("bash", { command: "printf alpha-one" })],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage(
+					[fauxToolCall("bash", { command: "printf beta-two" })],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage([fauxText("Completed running alpha and beta.")]),
+			],
+		});
+		updatePiUiUserConfig({ copyOnSelect: false });
+
+		await harness.submitInput("Inspect both files");
+		harness.flushFrame();
+
+		/* 1. Выделение перетаскиванием по нескольким строкам вызовов инструментов показывает попап и копирует их текст */
+		const alphaHit = harness.screen().findText("printf alpha-one");
+		const betaHit = harness.screen().findText("printf beta-two");
+		expect(alphaHit).toBeDefined();
+		expect(betaHit).toBeDefined();
+
+		await harness.mouseDrag(4, alphaHit!.row, 48, betaHit!.row, { steps: 4 });
+		await flushAsyncQuote(harness);
+		expect(getSelectionText(harness)).toBeTruthy();
+		expect(harness.screen().text()).toContain("[Copy]");
+		expect(harness.screen().text()).toContain("[Quote · Alt+Q]");
+
+		/* Cmd+C (CSI-u super+c) копирует выделенные вызовы инструментов без сброса терминала */
+		harness.setClipboard({ text: "" });
+		await harness.pressKey("\x1b[99;9u");
+		await flushAsyncQuote(harness);
+		const copiedTools = (await getActiveHostRuntime()!.clipboard.readText?.()) ?? "";
+		expect(copiedTools).toContain("printf alpha-one");
+		expect(copiedTools).toContain("printf beta-two");
+
+		/* 2. Выделение в виджете расширений над редактором показывает попап и копируется по кириллическому Cmd+с */
+		const widgetHit = harness.screen().findText("0/4 steps");
+		expect(widgetHit).toBeDefined();
+		await harness.mouseDrag(widgetHit!.col, widgetHit!.row, widgetHit!.col + 9, widgetHit!.row, { steps: 3 });
+		await flushAsyncQuote(harness);
+		expect(harness.screen().text()).toContain("[Copy]");
+
+		harness.setClipboard({ text: "" });
+		await harness.pressKey("\x1b[1089;9u");
+		await flushAsyncQuote(harness);
+		expect(await getActiveHostRuntime()!.clipboard.readText?.()).toContain("0/4 steps");
+
+		/* 3. Внутри блокирующей модальной карточки (/context) при выделении показывается только [Copy], и работает как клик [Copy], так и Cmd+C */
+		const contextOpen = harness.submitInput("/context");
+		await flushAsyncQuote(harness);
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
+
+		const modalHit =
+			harness.screen().findText("Context Inspector") ??
+			harness.screen().findText("Context");
+		expect(modalHit).toBeDefined();
+		await harness.mouseDrag(modalHit!.col, modalHit!.row, modalHit!.col + 14, modalHit!.row, { steps: 3 });
+		await flushAsyncQuote(harness);
+
+		const modalScreen = harness.screen();
+		expect(modalScreen.text()).toContain("[Copy]");
+		expect(modalScreen.text()).not.toContain("[Quote · Alt+Q]");
+
+		harness.setClipboard({ text: "" });
+		const copyBtn = modalScreen.findText("[Copy]");
+		expect(copyBtn).toBeDefined();
+		await harness.mouseClick(copyBtn!.col + 2, copyBtn!.row);
+		await flushAsyncQuote(harness);
+		expect(await getActiveHostRuntime()!.clipboard.readText?.()).toContain("Context");
+
+		await harness.pressKey("\x1b");
+		await contextOpen;
 	});
 });

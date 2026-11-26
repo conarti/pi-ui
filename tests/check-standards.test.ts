@@ -108,6 +108,7 @@ describe("check-standards mechanical guardrails", () => {
 		const tmpRoot = mkdtempSync(join(tmpdir(), "pi-ui-standards-"));
 		try {
 			mkdirSync(join(tmpRoot, "src", "shared"), { recursive: true });
+			mkdirSync(join(tmpRoot, "src", "features", "transcript"), { recursive: true });
 			mkdirSync(join(tmpRoot, "tests", "harness"), { recursive: true });
 			writeFileSync(
 				join(tmpRoot, "package.json"),
@@ -130,6 +131,11 @@ describe("check-standards mechanical guardrails", () => {
 				"utf8",
 			);
 			writeFileSync(
+				join(tmpRoot, "src", "features", "transcript", "bad-render-fs.ts"),
+				'import { readFileSync } from "node:fs";\nexport const v = readFileSync;\n',
+				"utf8",
+			);
+			writeFileSync(
 				join(tmpRoot, "tests", "sample-integration.test.ts"),
 				"const bad = raw as unknown as TUI;\ncomp.handleMouse(ev);\n",
 				"utf8",
@@ -140,6 +146,7 @@ describe("check-standards mechanical guardrails", () => {
 			expect(errors.some((e) => e.includes("setHostRuntimeAdapter"))).toBe(true);
 			expect(errors.some((e) => e.includes("hasOverlayEntries"))).toBe(true);
 			expect(errors.some((e) => e.includes('standardized close glyph "×"'))).toBe(true);
+			expect(errors.some((e) => e.includes("bad-render-fs.ts") && e.includes("ADR-0008"))).toBe(true);
 			expect(findDisallowedCloseGlyphLines('/* ✕ allowed in comment */\nconst ok = "[×]";\nconst bad = "[✕]";')).toEqual([3]);
 			expect(errors.some((e) => e.includes("tests/sample-integration.test.ts:1:"))).toBe(true);
 			expect(errors.some((e) => e.includes("tests/sample-integration.test.ts:2:"))).toBe(true);

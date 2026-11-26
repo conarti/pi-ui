@@ -369,6 +369,7 @@ function restoreLegacyPreview(chip: SerializedPromptChip, expandedText: string):
 export class PromptChipRegistry {
 	private nextChipSeq = 1;
 	private nextDraftNumber = 1;
+	private mutationVersion = 1;
 	private readonly sessionVault = new Map<string, PromptChipEntry>();
 	private readonly activeBindings = new Map<string, string>();
 	private readonly historyByBindingKey = new Map<string, string>();
@@ -390,6 +391,14 @@ export class PromptChipRegistry {
 			const image = images[index];
 			if (image) this.submittedImages.set(chip, image);
 		}
+	}
+
+	get version(): number {
+		return this.mutationVersion;
+	}
+
+	hasHydratedEntries(): boolean {
+		return this.lastHydratedLength >= 0;
 	}
 
 	getSubmittedImage(chip: SerializedImageChip): ImageContent | undefined {
@@ -416,6 +425,7 @@ export class PromptChipRegistry {
 		this.activeBindings.set(key, entry.id);
 		this.historyByBindingKey.set(key, entry.id);
 		this.historyByToken.set(token, entry.id);
+		this.mutationVersion += 1;
 		return { entry, number, token };
 	}
 
@@ -491,6 +501,7 @@ export class PromptChipRegistry {
 		this.activeBindings.set(key, entry.id);
 		this.historyByBindingKey.set(key, entry.id);
 		this.historyByToken.set(token, entry.id);
+		this.mutationVersion += 1;
 		return { entry, number, token };
 	}
 
@@ -563,6 +574,7 @@ export class PromptChipRegistry {
 			widthPx: patch.widthPx ?? existing.widthPx,
 			heightPx: patch.heightPx ?? existing.heightPx,
 		});
+		this.mutationVersion += 1;
 	}
 
 	captureUndoSnapshot(): PromptChipUndoSnapshot {
@@ -585,6 +597,7 @@ export class PromptChipRegistry {
 			}
 		}
 		this.nextDraftNumber = Math.max(1, snapshot.nextDraftNumber);
+		this.mutationVersion += 1;
 	}
 
 	syncDraftLines(
@@ -854,6 +867,7 @@ export class PromptChipRegistry {
 		this.pendingPersistQueue.push(record);
 		this.submittedByExpanded.set(finalExpanded, record);
 		this.submittedByExpanded.set(canonicalizePromptLookupText(finalExpanded), record);
+		this.mutationVersion += 1;
 		const strippedDisplay = stripLeadingSkillSlashPrefix(trimmedInput).trim();
 		const strippedExpanded = stripLeadingSkillSlashPrefix(finalExpanded).trim();
 		if (strippedExpanded && strippedExpanded !== finalExpanded) {
@@ -919,6 +933,7 @@ export class PromptChipRegistry {
 		if (timestamp !== undefined) {
 			this.submittedByTimestamp.set(String(timestamp), updated);
 		}
+		this.mutationVersion += 1;
 		return updated;
 	}
 
@@ -957,15 +972,19 @@ export class PromptChipRegistry {
 		if (finalized.timestamp !== undefined) {
 			this.submittedByTimestamp.set(String(finalized.timestamp), finalized);
 		}
+		this.mutationVersion += 1;
 		return finalized;
 	}
 
-	private lastHydratedEntries?: readonly unknown[];
+	private lastHydratedFirst?: unknown;
+	private lastHydratedLast?: unknown;
 	private lastHydratedLength = -1;
 
 	restorePersistedEntries(entries: readonly unknown[]): void {
-		this.lastHydratedEntries = entries;
+		this.lastHydratedFirst = entries[0];
+		this.lastHydratedLast = entries[entries.length - 1];
 		this.lastHydratedLength = entries.length;
+		this.mutationVersion += 1;
 		const customByEntryId = new Map<string, PersistedPromptChipsPayload>();
 		let immediatelyPrecedingPayload: PersistedPromptChipsPayload | undefined;
 
@@ -1043,7 +1062,11 @@ export class PromptChipRegistry {
 
 	ensurePersistedEntriesHydrated(entries: readonly unknown[] | undefined): void {
 		if (!entries || entries.length === 0) return;
-		if (this.lastHydratedEntries === entries && this.lastHydratedLength === entries.length) {
+		if (
+			this.lastHydratedLength === entries.length &&
+			this.lastHydratedFirst === entries[0] &&
+			this.lastHydratedLast === entries[entries.length - 1]
+		) {
 			return;
 		}
 		this.restorePersistedEntries(entries);
@@ -1243,8 +1266,10 @@ export class PromptChipRegistry {
 		this.submittedByMessageId.clear();
 		this.submittedByTimestamp.clear();
 		this.submittedByExpanded.clear();
-		this.lastHydratedEntries = undefined;
+		this.lastHydratedFirst = undefined;
+		this.lastHydratedLast = undefined;
 		this.lastHydratedLength = -1;
+		this.mutationVersion += 1;
 	}
 }
 

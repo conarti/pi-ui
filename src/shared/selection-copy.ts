@@ -32,6 +32,7 @@ interface ParsedItem {
 	readonly screenWidth: number;
 	readonly wrapWidth: number;
 	readonly singleWord?: boolean;
+	readonly noUnwrap?: boolean;
 	readonly codeJoinWith?: string;
 }
 
@@ -260,6 +261,7 @@ function stripFrameAndRailPrefix(text: string): { text: string; isBlockquote: bo
 }
 
 function shouldUnwrapProsePair(prev: ParsedItem, curr: ParsedItem): boolean {
+	if (prev.noUnwrap || curr.noUnwrap) return false;
 	if (prev.kind !== curr.kind) return false;
 	if (prev.kind !== "prose" && prev.kind !== "blockquote") return false;
 	if (!prev.text || !curr.text) return false;
@@ -304,6 +306,12 @@ export function extractCleanSelectionText(
 		(entry) => stripTerminalSequences(entry.selectedAnsi).trim().length > 0,
 	).length;
 	const isMultiLineSelection = nonEmptyInputCount > 1 || lines.length > 1;
+	/* Пропускаем свёрнутые строки тулов/мыслей/метрик только когда выделение захватывает основную прозу или код */
+	const hasPrimaryNonChromeContent = lines.some(
+		(entry) =>
+			!entry.fullLine.includes(COPY_CHROME_MARK) &&
+			stripTerminalSequences(entry.selectedAnsi).trim().length > 0,
+	);
 
 	const parsed: ParsedItem[] = [];
 	let promptWrapWidth: number | undefined;
@@ -311,7 +319,7 @@ export function extractCleanSelectionText(
 	for (const entry of lines) {
 		const codeRow = COPY_CODE_ROW_RE.exec(entry.fullLine);
 		const markedChrome = entry.fullLine.includes(COPY_CHROME_MARK);
-		if (isMultiLineSelection && markedChrome) continue;
+		if (isMultiLineSelection && hasPrimaryNonChromeContent && markedChrome) continue;
 		const surface = codeRow ? "code-body" : detectRowSurfaceKind(entry.fullLine, theme);
 		const plainSelected = stripTerminalSequences(entry.selectedAnsi);
 		const plainTrimmed = plainSelected.trim();
@@ -403,6 +411,7 @@ export function extractCleanSelectionText(
 			screenWidth: visibleWidth(fullCleaned.text),
 			wrapWidth: wrapW,
 			singleWord: !/\s/u.test(fullCleaned.text),
+			noUnwrap: markedChrome,
 		});
 	}
 

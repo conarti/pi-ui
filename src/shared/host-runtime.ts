@@ -22,7 +22,7 @@ import {
 } from "./fullscreen-layout.ts";
 import { buildEditorOpenCommand } from "./link-targets.ts";
 import { hasBlockingModalOverlay } from "./modal-card.ts";
-import { loadPiUiUserConfig } from "./pi-ui-config.ts";
+import { loadPiUiUserConfig, withPiUiConfigRenderPass } from "./pi-ui-config.ts";
 import {
 	beginHoverMovePass,
 	finishHoverMovePass,
@@ -302,8 +302,27 @@ function installViewportChromeHooks(): void {
 		);
 	}
 
-	const altProto = (TuiAltScreen as unknown as { prototype?: object } | undefined)?.prototype;
+	const altProto = (TuiAltScreen as unknown as { prototype?: Record<string, unknown> } | undefined)?.prototype;
 	if (!altProto) return;
+
+	const tuiProto = Object.getPrototypeOf(altProto) as Record<string, unknown> | null;
+	if (tuiProto && typeof tuiProto.doRender === "function") {
+		hookMethod(
+			tuiProto,
+			"doRender",
+			"viewport.configRenderPass",
+			(self, args, original) => withPiUiConfigRenderPass(() => original.apply(self, args)),
+		);
+	}
+
+	if (Object.hasOwn(altProto, "doRender") && typeof altProto.doRender === "function") {
+		hookMethod(
+			altProto,
+			"doRender",
+			"viewport.altConfigRenderPass",
+			(self, args, original) => withPiUiConfigRenderPass(() => original.apply(self, args)),
+		);
+	}
 
 	hookMethod(
 		altProto,

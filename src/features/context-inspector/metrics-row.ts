@@ -6,11 +6,11 @@ import {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
-import { fgRgb, getThemeSurfacePalette, isLightTheme, themeFgRgb } from "../../shared/ansi.ts";
+import { fgRgb, getActiveGlobalTheme, getThemeSurfacePalette, isLightTheme, themeFgRgb } from "../../shared/ansi.ts";
 import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
 import { t } from "../../shared/i18n.ts";
-import { loadPiUiUserConfig } from "../../shared/pi-ui-config.ts";
+import { getPiUiConfigVersion, loadPiUiUserConfig } from "../../shared/pi-ui-config.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import { markSelectionChrome } from "../../shared/selection-copy.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
@@ -24,33 +24,103 @@ import {
 	type ResponseMetricsData,
 } from "./telemetry.ts";
 
+const EMPTY_LINES: string[] = [];
+
 export class ResponseMetricsRowComponent implements Component {
 	private hovered = false;
 	private leftHitStart = -1;
 	private leftHitEnd = -1;
+	private themeRef: Theme;
+	private turnTtftResolved = false;
+	private cachedTurnTtft: number | undefined;
+	private renderCache?: {
+		width: number;
+		theme: Theme;
+		light: boolean;
+		hovered: boolean;
+		isFullscreen: boolean;
+		configVersion: number;
+		lines: string[];
+		leftHitStart: number;
+		leftHitEnd: number;
+	};
 
 	constructor(
 		private readonly data: ResponseMetricsData,
-		private readonly themeRef: Theme,
+		themeRef: Theme,
 		private readonly onOpenSessionUsage: () => void,
 		private readonly getTurnTtft: () => number | undefined,
-	) {}
+	) {
+		this.themeRef = themeRef;
+	}
 
-	invalidate(): void {}
+	setTheme(theme: Theme): void {
+		if (this.themeRef !== theme) {
+			this.themeRef = theme;
+			this.renderCache = undefined;
+		}
+	}
+
+	invalidate(): void {
+		this.renderCache = undefined;
+	}
+
+	private resolveCachedTurnTtft(): number | undefined {
+		if (!this.turnTtftResolved) {
+			this.cachedTurnTtft = this.getTurnTtft();
+			this.turnTtftResolved = true;
+		}
+		return this.cachedTurnTtft;
+	}
 
 	render(width: number): string[] {
+		const activeTheme = getActiveGlobalTheme(this.themeRef);
+		const light = isLightTheme(activeTheme);
+		const isFullscreen = Boolean(getActiveHostRuntime()?.isFullscreen);
+		const configVersion = getPiUiConfigVersion();
+
+		const prev = this.renderCache;
+		if (
+			prev &&
+			prev.width === width &&
+			prev.theme === activeTheme &&
+			prev.light === light &&
+			prev.hovered === this.hovered &&
+			prev.isFullscreen === isFullscreen &&
+			prev.configVersion === configVersion
+		) {
+			this.leftHitStart = prev.leftHitStart;
+			this.leftHitEnd = prev.leftHitEnd;
+			return prev.lines;
+		}
+
 		this.leftHitStart = -1;
 		this.leftHitEnd = -1;
 
+		const commitLines = (lines: string[]): string[] => {
+			this.renderCache = {
+				width,
+				theme: activeTheme,
+				light,
+				hovered: this.hovered,
+				isFullscreen,
+				configVersion,
+				lines,
+				leftHitStart: this.leftHitStart,
+				leftHitEnd: this.leftHitEnd,
+			};
+			return lines;
+		};
+
 		if (width < 12) {
-			return [];
+			return commitLines(EMPTY_LINES);
 		}
 
 		const config = loadPiUiUserConfig();
 		const isToolStep = this.data.stopReason === "toolUse";
 		if (isToolStep) {
 			if (!config.responseMetrics || !isPositiveCount(this.data.outputTokens)) {
-				return [];
+				return commitLines(EMPTY_LINES);
 			}
 		}
 
@@ -60,24 +130,23 @@ export class ResponseMetricsRowComponent implements Component {
 			: formatCompletionTimestamp(this.data.completedAt, config.timestamps);
 
 		if (!showMetrics && !formattedTime) {
-			return [];
+			return commitLines(EMPTY_LINES);
 		}
 
 		const computed = computeStepMetrics(this.data);
 		if (showMetrics && !computed && !formattedTime) {
-			return [];
+			return commitLines(EMPTY_LINES);
 		}
 
 		const outerPad = computeOuterCanvasMargin(width);
 		const innerInset = outerPad > 0 ? 2 : 0;
 		const leftStart = outerPad + innerInset;
 		const rightPad = outerPad + innerInset;
-		const light = isLightTheme(this.themeRef);
-		const palette = getThemeSurfacePalette(this.themeRef);
+		const palette = getThemeSurfacePalette(activeTheme);
 
 		const timeText = formattedTime;
 		const timeWidth = visibleWidth(timeText);
-		const timeStyled = timeText ? themeFgRgb(this.themeRef, palette.codeMetaFg, timeText) : "";
+		const timeStyled = timeText ? themeFgRgb(activeTheme, palette.codeMetaFg, timeText) : "";
 
 		const availableLeftWidth = Math.max(
 			0,
@@ -99,7 +168,7 @@ export class ResponseMetricsRowComponent implements Component {
 				parts.push(primaryText);
 			}
 
-			const stepTtft = computed.ttftMs ?? (!isToolStep ? this.getTurnTtft() : undefined);
+			const stepTtft = computed.ttftMs ?? (!isToolStep ? this.resolveCachedTurnTtft() : undefined);
 			if (stepTtft !== undefined) {
 				parts.push(t("metrics.ttftPart", { duration: formatMetricsDuration(stepTtft) }));
 			}
@@ -110,7 +179,7 @@ export class ResponseMetricsRowComponent implements Component {
 			}
 
 			if (parts.length === 0 && !formattedTime) {
-				return [];
+				return commitLines(EMPTY_LINES);
 			}
 
 			const fullLeftPlain = parts.join(" · ");
@@ -149,7 +218,7 @@ export class ResponseMetricsRowComponent implements Component {
 		const row = `${" ".repeat(leftStart)}${leftStyled}${" ".repeat(gapWidth)}${timeStyled}${" ".repeat(rightPad)}`;
 		const finalPad = Math.max(0, width - visibleWidth(row));
 		const padded = `${row}${" ".repeat(finalPad)}`;
-		return [getActiveHostRuntime()?.isFullscreen ? markSelectionChrome(padded) : padded];
+		return commitLines([isFullscreen ? markSelectionChrome(padded) : padded]);
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
