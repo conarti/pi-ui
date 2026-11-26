@@ -114,6 +114,13 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 		const promptSpan2 = findCardHorizontalSpan(harness, promptHit2!.row);
 		expect(promptSpan2).toEqual(promptSpan1);
 		expect(screen2.text()).not.toContain("Jump to latest message");
+
+		await harness.resize(36, 28);
+		const narrow = harness.screen();
+		const prompt = narrow.findText("› First turn")!;
+		expect(prompt.col).toBe(4);
+		expect(findCardHorizontalSpan(harness, prompt.row)).toEqual({ firstBgCol: 2, lastBgCol: 33 });
+		expect(narrow.rowText(1).search(/\S/u)).toBe(2);
 	});
 
 	it("renders Outline Rail inside width - 2 .. width - 1 with clean rounded Hover Popup (no Turn #N header) alongside centered ▲ and clickable ▼ scroll indicators", async () => {
@@ -302,7 +309,6 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 		const baselineScrollTop = scroll.scrollTop;
 		expect(baselineScrollTop).toBeGreaterThan(0);
 
-		/* 1. Modal Card (Context Inspector / Command Palette) contains wheel both inside and outside */
 		await harness.pressKey("\x0b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
 		await harness.mouseWheel("down", 48, 12, 6);
@@ -311,7 +317,6 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 		await harness.pressKey("\x1b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 
-		/* 2. Scrollable Hover Popup (long pasted Prompt Chip preview) scrolls in place inside, dismisses outside */
 		const editor = getActiveComposerEditor()!;
 		const longPaste = Array.from({ length: 18 }, (_, i) => `paste-row-${String(i + 1).padStart(2, "0")}`).join(
 			"\n",
@@ -334,16 +339,14 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 		expect(popupAfterDown.text()).toContain("paste-row-15");
 		expect(scroll.scrollTop).toBe(scrollBeforePopupWheel);
 
-		/* Overscroll past bottom of popup still stays contained */
+		/* На границе вложенного окна колесо не передаётся ленте. */
 		await harness.mouseWheel("down", pasteRow01!.col + 2, pasteRow01!.row, 10);
 		expect(scroll.scrollTop).toBe(scrollBeforePopupWheel);
 
-		/* Wheeling outside the 14-row popup dismisses it and scrolls ScrollView */
 		await harness.mouseWheel("up", 60, 5, 3);
 		expect(harness.screen().text()).not.toContain("paste-row-15");
 		expect(scroll.scrollTop).toBeLessThan(scrollBeforePopupWheel);
 
-		/* 3. Overflowed Composer draft scrolls locally with overscroll = contain */
 		editor.setText(Array.from({ length: 16 }, (_, i) => `draft-line-${i + 1}`).join("\n"));
 		harness.flushFrame(true);
 		const composerBodyHit = harness.screen().findText("draft-line-");

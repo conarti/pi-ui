@@ -7,9 +7,15 @@ import { LEGACY_STAMP_ENTRY_TYPE, METRICS_ENTRY_TYPE } from "./telemetry.ts";
 const CONARTI_METRICS_OWNED_MARKER = Symbol.for("conarti.pi-ui.metrics-renderer-owned.v1");
 
 const LEGACY_RESPONSE_METRICS_PATH_RE =
-	/(?:^|[/\\]|npm:)(?:pi-)?(?:response-metrics|pi-stamp)(?:$|[/\\]|\.[cm]?[jt]s$)/i;
+	/(?:^|[/\\])(?:pi-)?(?:response-metrics|pi-stamp)\.[cm]?[jt]s$/i;
 const LEGACY_WORKING_STATUS_PATH_RE =
-	/(?:^|[/\\]|npm:)(?:pi-)?embed-working-status(?:$|[/\\]|\.[cm]?[jt]s$)/i;
+	/(?:^|[/\\])(?:pi-)?embed-working-status\.[cm]?[jt]s$/i;
+const LEGACY_METRICS_RENDERERS = new Set([METRICS_ENTRY_TYPE, LEGACY_STAMP_ENTRY_TYPE, "pi-stamp:turn-metrics"]);
+const LEGACY_METRICS_COMMANDS = new Set(["metrics", "stats"]);
+const LEGACY_METRICS_EVENTS = new Set([
+	"session_start", "session_shutdown", "turn_start", "turn_end",
+	"message_start", "message_update", "message_end", "agent_end",
+]);
 
 export function markOwnedEntryRenderer<T extends (...args: never[]) => unknown>(fn: T): T {
 	(fn as unknown as Record<symbol, boolean>)[CONARTI_METRICS_OWNED_MARKER] = true;
@@ -25,28 +31,30 @@ function isOwnedRenderer(fn: unknown): boolean {
 
 export function isSupersededLegacyTelemetryExtension(ext: unknown): boolean {
 	if (!ext || typeof ext !== "object") return false;
-	if (
-		matchesExtensionSourcePath(ext, LEGACY_RESPONSE_METRICS_PATH_RE) ||
-		matchesExtensionSourcePath(ext, LEGACY_WORKING_STATUS_PATH_RE)
-	) {
-		return true;
-	}
-
 	const rec = ext as {
-		entryRenderers?: Map<unknown, unknown>;
+		entryRenderers?: Map<string, unknown>;
+		commands?: Map<string, unknown>;
+		handlers?: Map<string, unknown[]>;
+		shortcuts?: Map<string, unknown>;
+		tools?: Map<string, unknown>;
+		messageRenderers?: Map<string, unknown>;
+		toolRenderers?: unknown[];
 	};
-	if (rec.entryRenderers instanceof Map) {
-		const metricsRenderer = rec.entryRenderers.get(METRICS_ENTRY_TYPE);
-		const stampRenderer = rec.entryRenderers.get(LEGACY_STAMP_ENTRY_TYPE);
-		if (
-			(metricsRenderer !== undefined && !isOwnedRenderer(metricsRenderer)) ||
-			(stampRenderer !== undefined && !isOwnedRenderer(stampRenderer))
-		) {
-			return true;
-		}
+	/* Совпадение ключа рендера не доказывает происхождение скрипта; плагины с другими возможностями не отключаем целиком. */
+	if (rec.shortcuts?.size || rec.tools?.size || rec.messageRenderers?.size || rec.toolRenderers?.length) return false;
+	if (matchesExtensionSourcePath(ext, LEGACY_RESPONSE_METRICS_PATH_RE)) {
+		const entries = [...(rec.entryRenderers ?? [])];
+		const commands = [...(rec.commands?.keys() ?? [])];
+		return entries.length > 0 && commands.length > 0 &&
+			entries.every(([key, render]) => LEGACY_METRICS_RENDERERS.has(key) && !isOwnedRenderer(render)) &&
+			commands.every((key) => LEGACY_METRICS_COMMANDS.has(key)) &&
+			[...(rec.handlers?.keys() ?? [])].every((key) => LEGACY_METRICS_EVENTS.has(key));
 	}
-
-	return false;
+	return matchesExtensionSourcePath(ext, LEGACY_WORKING_STATUS_PATH_RE) &&
+		!rec.commands?.size && !rec.entryRenderers?.size &&
+		Boolean(rec.handlers?.has("session_start") && [...rec.handlers.keys()].every((key) =>
+			key === "session_start" || key === "agent_start",
+		));
 }
 
 /**

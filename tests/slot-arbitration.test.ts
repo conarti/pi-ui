@@ -212,6 +212,29 @@ describe("Dynamic capability-based Slot Arbitration (ADR-0007)", () => {
 		expect(relaunchScreen).toContain("THIRD_PARTY_FOOTER_ACTIVE");
 	});
 
+	it("keeps a saved owner when same-named local extension paths change order", async () => {
+		const agentDir = allocateTempDir("pi-ui-slot-path-owner-");
+		const plugins = ["FIRST_PATH_FOOTER", "SECOND_PATH_FOOTER"].map((label) => {
+			const path = join(allocateTempDir("pi-ui-local-plugin-"), "status.ts");
+			writeFileSync(path, `export default function(pi) {
+	pi.on("session_start", (_event, ctx) => ctx.ui.setFooter(() => ({ invalidate() {}, render: () => [${JSON.stringify(label)}] })));
+}`);
+			return path;
+		});
+		harness = await createInteractiveHarness({ agentDir, additionalExtensionPaths: plugins });
+		await waitForCondition(() => harness!.screen().text().includes("Slot Arbitration"));
+		await harness.pressKey("\x1b[C");
+		await harness.pressKey("\r");
+		await flushDeferredUi(harness);
+		const selected = harness.screen().text().match(/(?:FIRST|SECOND)_PATH_FOOTER/)?.[0];
+		expect(selected).toBeDefined();
+		await harness.dispose();
+		harness = await createInteractiveHarness({ agentDir, additionalExtensionPaths: [...plugins].reverse() });
+		await flushDeferredUi(harness);
+		expect(harness.screen().text()).not.toContain("Slot Arbitration");
+		expect(harness.screen().text()).toContain(selected!);
+	});
+
 	it("batches header, footer, editor, and workingIndicator collisions into one mouse-operable modal and hot-swaps all four live without restart", async () => {
 		const agentDir = allocateTempDir("pi-ui-slot-all-singletons-");
 		let activeStream: AssistantMessageEventStream | undefined;
@@ -469,41 +492,25 @@ describe("Dynamic capability-based Slot Arbitration (ADR-0007)", () => {
 		expect(thirdPartyAltMCount).toBe(1);
 		expect(harness.screen().text()).toContain("TP_ALTM_SHORTCUT_RAN");
 
-		/* Проверяем, что resolveToolRenderers для ask_user_question переключился live, а bash остался у @conarti/pi-ui */
-		const askRenderers = harness.session.extensionRunner.resolveToolRenderers(
-			"ask_user_question",
-			() => undefined,
-		);
-		expect(
-			askRenderers?.renderCall?.(
-				{} as never,
-				harness.session.extensionRunner.getUIContext().theme,
-				{} as never,
-			)
-				.render(40)
-				.join("\n"),
-		).toContain("TP_ASK_USER_RENDERER");
-		const bashRenderers = harness.session.extensionRunner.resolveToolRenderers(
-			"bash",
-			() => undefined,
-		);
-		expect(
-			bashRenderers?.renderCall?.(
-				{ command: "echo ok" } as never,
-				harness.session.extensionRunner.getUIContext().theme,
-				{
-					toolCallId: "b1",
-					argsComplete: true,
-					executionStarted: false,
-					isError: false,
-					expanded: false,
-					invalidate: () => {},
-					state: {},
-				} as never,
-			)
-				.render(40)
-				.join("\n"),
-		).not.toContain("PROVIDER_BASH_WRAPPER");
+		harness.session.setActiveToolsByName(["bash", "ask_user_question"]);
+		harness.setResponses([
+			fauxAssistantMessage([
+				fauxToolCall("bash", { command: "echo slot-probe" }, { id: "slot-shell" }),
+				fauxToolCall("ask_user_question", {
+					questions: [{ header: "UI", question: "Which view?", options: [{ label: "Summary" }, { label: "Details" }] }],
+				}, { id: "slot-ask" }),
+			], { stopReason: "toolUse" }),
+			fauxAssistantMessage("Slot probe finished."),
+		]);
+		const turn = harness.submitInput("Check tool renderer ownership");
+		await waitForCondition(() => harness!.screen().text().includes("Which view?"));
+		const option = harness.screen().findText("Summary")!;
+		await harness.mouseClick(option.col, option.row);
+		await turn;
+		const transcript = harness.screen();
+		expect(transcript.findText("TP_ASK_USER_RENDERER")).toBeDefined();
+		expect(transcript.findText("echo slot-probe")).toBeDefined();
+		expect(transcript.findText("PROVIDER_BASH_WRAPPER")).toBeUndefined();
 
 		/* Обратное живое переключение на @conarti/pi-ui */
 		await harness.submitInput("/slots command:context @conarti/pi-ui");
@@ -515,6 +522,65 @@ describe("Dynamic capability-based Slot Arbitration (ADR-0007)", () => {
 		expect(thirdPartyContextCmdCount).toBe(1);
 		await harness.pressKey("\x1b");
 		await openCtx2;
+	});
+
+	it("arbitrates an editor replacement even if its extension read or called the current factory", async () => {
+		const plugin: ExtensionFactory = (pi) => {
+			pi.on("session_start", (_event, ctx) => {
+				const previous = ctx.ui.getEditorComponent();
+				ctx.ui.setEditorComponent((tui, theme, keys) => {
+					previous?.(tui, theme, keys);
+					return new class extends CustomEditor {
+						override render(width: number): string[] {
+							return ["REPLACEMENT_EDITOR", ...super.render(width)];
+						}
+					}(tui, theme, keys);
+				});
+			});
+		};
+		harness = await createInteractiveHarness({ width: 108, height: 30, extensionFactories: [plugin] });
+		await waitForCondition(() => harness!.screen().text().includes("Slot Arbitration"));
+		expect(harness.screen().text()).toContain("Editor");
+		expect(harness.screen().text()).not.toContain("REPLACEMENT_EDITOR");
+		await harness.pressKey("\x1b[C");
+		await harness.pressKey("\r");
+		await flushDeferredUi(harness);
+		expect(harness.screen().text()).toContain("REPLACEMENT_EDITOR");
+	});
+
+	it("arbitrates Ctrl+K live even though Pi reserves that chord for the editor", async () => {
+		const plugin: ExtensionFactory = (pi) => pi.registerShortcut("ctrl+k", {
+			description: "Third-party picker",
+			handler: async (ctx) => ctx.ui.notify("THIRD_PARTY_CTRL_K", "info"),
+		});
+		harness = await createInteractiveHarness({ width: 112, height: 32, extensionFactories: [plugin] });
+		await waitForCondition(() => harness!.screen().text().includes("Slot Arbitration"));
+		expect(harness.screen().text()).toContain("Shortcut ctrl+k");
+		await harness.pressKey("\r");
+		await harness.pressKey("\x0b");
+		expect(harness.screen().text()).toContain("Command Palette");
+		await harness.pressKey("\x1b");
+		await harness.submitInput("/slots shortcut:ctrl+k inline-1");
+		await harness.pressKey("\x0b");
+		expect(harness.screen().text()).toContain("THIRD_PARTY_CTRL_K");
+		expect(harness.screen().findText("Command Palette")).toBeUndefined();
+	});
+
+	it("arbitrates third-party metrics entry renderers without removing unrelated commands", async () => {
+		const thirdParty: ExtensionFactory = (pi) => {
+			pi.registerEntryRenderer("response-metrics", () => new Text("THIRD_PARTY_METRICS", 0, 0));
+			pi.registerEntryRenderer("pi-stamp", () => new Text("THIRD_PARTY_STAMP", 0, 0));
+			pi.registerCommand("report-health", {
+				description: "Independent health check",
+				handler: async (_args, ctx) => ctx.ui.notify("HEALTH_CHECK_PASSED", "info"),
+			});
+		};
+		harness = await createInteractiveHarness({ width: 112, height: 32, extensionFactories: [thirdParty] });
+		await waitForCondition(() => harness!.screen().text().includes("Slot Arbitration"));
+		expect(harness.screen().text()).toContain("Entry Renderer response-metrics");
+		await harness.pressKey("\r");
+		await harness.submitInput("/report-health");
+		expect(harness.screen().text()).toContain("HEALTH_CHECK_PASSED");
 	});
 
 	it("silently supersedes absorbed legacy first-party scripts without triggering Slot Arbitration", async () => {
@@ -553,7 +619,7 @@ describe("Dynamic capability-based Slot Arbitration (ADR-0007)", () => {
 			legacyWorkingStatusPath,
 			`export default function(pi) {
 	pi.on("session_start", (_e, ctx) => {
-		if (ctx.hasUI) ctx.ui.setWorkingIndicator({ frames: ["legacy"] });
+		if (ctx.hasUI) ctx.ui.setWidget("embed-working-status", ["legacy"]);
 	});
 }\n`,
 			"utf8",
@@ -666,6 +732,12 @@ describe("Dynamic capability-based Slot Arbitration (ADR-0007)", () => {
 		const thirdPartyMsgPlugin: ExtensionFactory = (pi: ExtensionAPI) => {
 			pi.registerMessageRenderer("pi-ui-custom-notice", () => new Text("TP_CUSTOM_NOTICE", 0, 0));
 			pi.registerMessageRenderer("tp-only-notice", () => new Text("TP_ADDITIVE_NOTICE", 0, 0));
+			pi.registerCommand("show-notices", {
+				handler: async () => {
+					pi.sendMessage({ customType: "pi-ui-custom-notice", content: "Contended", display: true });
+					pi.sendMessage({ customType: "tp-only-notice", content: "Additive", display: true });
+				},
+			});
 		};
 
 		harness = await createInteractiveHarness({
@@ -686,23 +758,15 @@ describe("Dynamic capability-based Slot Arbitration (ADR-0007)", () => {
 		await harness.pressKey("\r");
 		await flushDeferredUi(harness);
 
-		const theme = harness.session.extensionRunner.getUIContext().theme;
-		const msgOpts = { expanded: false, outputPad: 0, keyText: () => "", keyHint: () => "" };
-		const tpRenderer = harness.session.extensionRunner.getMessageRenderer("pi-ui-custom-notice");
-		expect(tpRenderer?.({} as never, msgOpts, theme)?.render(40).join("\n")).toContain(
-			"TP_CUSTOM_NOTICE",
-		);
-		const additiveRenderer = harness.session.extensionRunner.getMessageRenderer("tp-only-notice");
-		expect(additiveRenderer?.({} as never, msgOpts, theme)?.render(40).join("\n")).toContain(
-			"TP_ADDITIVE_NOTICE",
-		);
+		await harness.submitInput("/show-notices");
+		expect(harness.screen().findText("TP_CUSTOM_NOTICE")).toBeDefined();
+		expect(harness.screen().findText("TP_ADDITIVE_NOTICE")).toBeDefined();
+		expect(harness.screen().findText("PI_UI_CUSTOM_NOTICE")).toBeUndefined();
 
 		/* Живое обратное переключение на @conarti/pi-ui через /slots */
 		await harness.submitInput("/slots messageRenderer:pi-ui-custom-notice @conarti/pi-ui");
 		await flushDeferredUi(harness);
-		const piUiRenderer = harness.session.extensionRunner.getMessageRenderer("pi-ui-custom-notice");
-		expect(piUiRenderer?.({} as never, msgOpts, theme)?.render(40).join("\n")).toContain(
-			"PI_UI_CUSTOM_NOTICE",
-		);
+		await harness.submitInput("/show-notices");
+		expect(harness.screen().findText("PI_UI_CUSTOM_NOTICE")).toBeDefined();
 	});
 });

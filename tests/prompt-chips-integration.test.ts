@@ -470,6 +470,28 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		expect(harness.screen().text()).toContain("Steer with [📋 Pasted #1 · 4 lines]");
 	});
 
+	it("contains wheel scrolling inside a sent Prompt Chip preview", async () => {
+		harness = await createInteractiveHarness({
+			width: 96, height: 25,
+			responses: [fauxAssistantMessage(Array.from({ length: 26 }, (_, i) => `Reply line ${i + 1}`).join("\n"))],
+		});
+		await harness.paste(Array.from({ length: 20 }, (_, i) => `sent-paste-row-${i + 1}`).join("\n"), true);
+		await harness.submitDraft();
+		await harness.waitForIdle();
+		const scroll = getActiveHostRuntime()!.scroll!;
+		scroll.scrollToStart();
+		const chip = harness.screen().findText("Pasted #1")!;
+		await harness.mouseClick(chip.col + 1, chip.row);
+		const first = harness.screen().findText("sent-paste-row-1")!;
+		expect(first).toBeDefined();
+		const top = scroll.scrollTop;
+		await harness.mouseWheel("down", first.col + 1, first.row, 10);
+		expect(harness.screen().text()).toContain("sent-paste-row-20");
+		expect(scroll.scrollTop).toBe(top);
+		await harness.mouseWheel("down", 94, 5);
+		expect(harness.screen().text()).not.toContain("sent-paste-row-20");
+	});
+
 	it("handles edge cases: file:// URLs, nonexistent .png paths, !bash mode paths, clipboard errors, narrow widths 1..30, legacy [Image #1: path] cards, and pill toggle/outside-click dismissal", async () => {
 		tempDir = mkdtempSync(join(tmpdir(), "pi-ui-chip-edge-"));
 		const urlImgPath = join(tempDir, "diagram with spaces.png");

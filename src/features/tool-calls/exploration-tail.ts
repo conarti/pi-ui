@@ -5,33 +5,33 @@ import { analyzeShell, type ShellDialect } from "../../shared/shell-analysis.ts"
 import type { ToolArgs } from "./types.ts";
 
 /** Rows Codex shows of a call's output, its last ones, before offering the rest. */
-export const CODEX_PREVIEW_ROWS = 3;
+export const TAIL_PREVIEW_ROWS = 3;
 /**
  * Codex 0.165.0's compact chrome: `• Ran …`, then `  └ ` under the bullet with the output two
  * columns after it, and every later row four columns in. Pi draws every row one column
  * in, so each prefix keeps that geometry one column further right.
  */
-export const CODEX_RESULT_PREFIX = "   └ ";
-export const CODEX_INDENT = "     ";
+export const TAIL_RESULT_PREFIX = "   └ ";
+export const TAIL_INDENT = "     ";
 /** Where an opened command's wrapped lines continue, four columns past the `$`. */
-export const CODEX_COMMAND_INDENT = "     ";
+export const TAIL_COMMAND_INDENT = "     ";
 /** The left margin every Codex row starts after. */
-export const CODEX_MARGIN = " ";
-export const CODEX_BULLET = "•";
+export const TAIL_MARGIN = " ";
+export const TAIL_BULLET = "•";
 /** Codex draws a tab as four columns. */
-export const CODEX_TAB = "    ";
+export const TAIL_TAB = "    ";
 /**
  * Codex's key is ctrl+t; in Pi the key that opens a row is ctrl+o. Codex 0.161 spells
  * a modifier by platform (`⌃t` on macOS, `^t` on Linux, `ctrl+t` elsewhere) and so does
  * this. PI_COMPACT_TOOLS_PLATFORM stands in for the platform, so the suite draws the
  * same rows wherever it runs.
  */
-export function codexExpandKey(platform: string = process.env.PI_COMPACT_TOOLS_PLATFORM ?? process.platform): string {
+export function tailExpandKey(platform: string = process.env.PI_COMPACT_TOOLS_PLATFORM ?? process.platform): string {
 	return platform === "darwin" ? "⌃o" : platform === "linux" ? "^o" : "ctrl+o";
 }
 
 /** How Codex prints how long a call took: `250ms`, `1.50s`, `1m 15s`. */
-export function formatCodexDuration(milliseconds: number): string {
+export function formatTailDuration(milliseconds: number): string {
 	const millis = Math.max(0, Math.floor(milliseconds));
 	if (millis < 1000) return `${millis}ms`;
 	if (millis < 60_000) return `${(millis / 1000).toFixed(2)}s`;
@@ -43,12 +43,12 @@ export function formatCodexDuration(milliseconds: number): string {
  * The control under a collapsed or opened call. Codex starts it at a quarter of the
  * width, at most four columns in, and drops the key hint when the row cannot fit it.
  */
-export function codexDisclosure(width: number, expanded: boolean, hiddenLines?: number, expandKey: string = "ctrl+o"): string {
-	const indent = CODEX_MARGIN + " ".repeat(Math.min(Math.floor(width / 4), 4));
+export function tailDisclosure(width: number, expanded: boolean, hiddenLines?: number, expandKey: string = "ctrl+o"): string {
+	const indent = TAIL_MARGIN + " ".repeat(Math.min(Math.floor(width / 4), 4));
 	if (expanded) return `${indent}− Show less`;
 	if (hiddenLines === undefined) return `${indent}+ Show details`;
 	const label = `+ ${hiddenLines} ${hiddenLines === 1 ? "line" : "lines"}`;
-	const key = expandKey === "ctrl+o" ? codexExpandKey() : expandKey;
+	const key = expandKey === "ctrl+o" ? tailExpandKey() : expandKey;
 	const hint = key ? ` (${key} to expand)` : "";
 	return visibleWidth(indent + label + hint) <= width ? indent + label + hint : indent + label;
 }
@@ -118,7 +118,7 @@ function sedReadPath(args: readonly string[]): string | undefined {
 function isFormatting(words: readonly string[]): boolean {
 	const [program, ...args] = words;
 	switch (program) {
-		// Codex counts xargs and tee as formatting too; they run and write, so here they are never left out.
+		/* xargs и tee не считаются форматированием: первый запускает команды, второй может писать в файл. */
 		case "wc": case "tr": case "cut": case "sort": case "uniq": case "column": case "yes": case "printf":
 			return true;
 		case "head":
@@ -260,7 +260,7 @@ function argument(args: ToolArgs, key: string): string | undefined {
 }
 
 /** A Pi tool's path argument, whichever name it uses. */
-export function codexPath(args: ToolArgs): string {
+export function tailPath(args: ToolArgs): string {
 	return argument(args, "path") ?? argument(args, "file_path") ?? "";
 }
 
@@ -269,7 +269,7 @@ export function codexPath(args: ToolArgs): string {
  * the verb Codex would give the command they stand for; a shell command is parsed.
  */
 export function exploreActions(name: string, args: ToolArgs): ExploreAction[] | undefined {
-	const path = codexPath(args);
+	const path = tailPath(args);
 	const short = path ? shortDisplayPath(path) : undefined;
 	switch (name) {
 		case "read": return path ? [{ kind: "read", name: shortDisplayPath(path) }] : undefined;
@@ -371,7 +371,7 @@ export function exploreFailure(name: string, output: string, isError: boolean, a
 	if (name !== "bash" && name !== "powershell") return { text: " (failed)", quiet: false };
 	const { exitCode } = shellOutcome(output);
 	if (exitCode === undefined) return { text: " (failed)", quiet: false };
-	// A search's exit 1 can mean it found nothing; Codex reports the code without calling it a failure.
+	/* Код 1 у поиска может означать отсутствие совпадений, а не сбой. */
 	const quiet = exitCode === 1 && actions.some((action) => action.kind === "search");
 	return { text: actions.length > 1 ? ` (command exit ${exitCode})` : ` (exit ${exitCode})`, quiet };
 }
@@ -384,7 +384,7 @@ export function exploreFailure(name: string, output: string, isError: boolean, a
 export const openExplorations = new Set<string>();
 
 /** The last lines of output, the way Codex previews a call. */
-export function tailLines(text: string, count = CODEX_PREVIEW_ROWS): string[] {
+export function tailLines(text: string, count = TAIL_PREVIEW_ROWS): string[] {
 	const lines = normalizeLineEndings(text).replace(/\n+$/u, "").split("\n");
 	return lines.slice(Math.max(0, lines.length - count));
 }

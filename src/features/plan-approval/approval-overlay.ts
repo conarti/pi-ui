@@ -40,7 +40,7 @@ function stylePlanLine(raw: string, theme: Theme): string {
 	return raw ? theme.fg("text", raw) : "";
 }
 
-export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+export async function showPlanApproval(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
 	if (ctx.mode !== "tui") return;
 	const wf = getSessionWorkflow();
 
@@ -48,7 +48,7 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 		if (wf.mode !== "plan") {
 			setSessionMode(pi, ctx, "plan");
 		} else {
-			ctx.ui.notify(t("planStudio.emptyNotify"), "info");
+			ctx.ui.notify(t("planApproval.emptyNotify"), "info");
 		}
 		return;
 	}
@@ -96,7 +96,7 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 					}
 
 					const commentCount = Object.keys(wf.planComments).length;
-					const subHeader = `${theme.fg("muted", t("planStudio.subHeader"))}${
+					const subHeader = `${theme.fg("muted", t("planApproval.subHeader"))}${
 						commentCount > 0
 							? `  ${fgRgb(palette.warning, theme.bold(`· 💬 ${commentCount}`))}`
 							: ""
@@ -141,13 +141,13 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 
 						if (editingLine === i && body.length < maxBodyRows) {
 							const editPrefix = `      ${fgRgb(palette.warning, "↳ 💬 ")}`;
-							const editHint = theme.fg("dim", t("planStudio.editHint"));
+							const editHint = theme.fg("dim", t("planApproval.editHint"));
 							const maxDraft = Math.max(6, innerWidth - visibleWidth(editPrefix) - visibleWidth(editHint));
 							const renderedInput = commentInput.render({
 								theme,
 								focused: Boolean(comp.focused),
 								maxWidth: maxDraft,
-								placeholder: t("planStudio.commentPlaceholder"),
+								placeholder: t("planApproval.commentPlaceholder"),
 							});
 							const editRow = truncateToWidth(`${editPrefix}${renderedInput}${editHint}`, innerWidth, "…");
 							const editPad = " ".repeat(Math.max(0, innerWidth - visibleWidth(editRow)));
@@ -167,7 +167,7 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 					const footerPills: ModalActionPill[] = [
 						{
 							id: "approve",
-							label: t("planStudio.pill.approve"),
+							label: t("planApproval.pill.approve"),
 							variant: "success",
 							active: true,
 							onClick: () => {
@@ -179,8 +179,8 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 							id: "revise",
 							label:
 								commentCount > 0
-									? t("planStudio.pill.reviseWithCount", { count: commentCount })
-									: t("planStudio.pill.revise"),
+									? t("planApproval.pill.reviseWithCount", { count: commentCount })
+									: t("planApproval.pill.revise"),
 							variant: "warning",
 							active: commentCount > 0,
 							onClick: () => {
@@ -192,7 +192,7 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 					if (commentCount > 0) {
 						footerPills.push({
 							id: "clear",
-							label: t("planStudio.pill.clearComments"),
+							label: t("planApproval.pill.clearComments"),
 							variant: "neutral",
 							onClick: () => {
 								wf.clearPlanComments();
@@ -202,7 +202,7 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 					}
 					footerPills.push({
 						id: "close",
-						label: t("planStudio.pill.close"),
+						label: t("planApproval.pill.close"),
 						variant: "neutral",
 						onClick: () => {
 							if (editingLine !== null) saveCommentEdit();
@@ -211,7 +211,7 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 					});
 
 					return card.render(width, theme, {
-						title: fgRgb(palette.warning, theme.bold(t("planStudio.title"))),
+						title: fgRgb(palette.warning, theme.bold(t("planApproval.title"))),
 						headerMeta: theme.fg("muted", `${cursorIdx + 1}/${wf.planLines.length}`),
 						onClose: () => {
 							if (editingLine !== null) saveCommentEdit();

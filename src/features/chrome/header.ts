@@ -16,6 +16,7 @@ import {
 	type HitBox,
 	type RgbTuple,
 } from "../../shared/ansi.ts";
+import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
 import { t } from "../../shared/i18n.ts";
 import { claimHover, copyToClipboard } from "../../shared/runtime-hooks.ts";
@@ -232,7 +233,7 @@ class SessionHeaderView implements Component {
 
 		const theme = this.getTheme();
 		const palette = getThemeSurfacePalette(theme);
-		const outerPad = width >= 40 ? 2 : 1;
+		const outerPad = computeOuterCanvasMargin(width);
 		const contentRowY = this.pinnedMode ? 1 : 0;
 		const gitBranch = readCachedGitBranch(this.ctx.cwd);
 		const tildePath = formatTildeWorkspacePath(this.ctx.cwd);

@@ -526,6 +526,10 @@ export class PromptChipOverlayController {
 		return this.visible && Boolean(this.handle);
 	}
 
+	get sentPopup(): Component | undefined {
+		return this.isShowing && this.activeSource === "sent-pill" ? this.popup : undefined;
+	}
+
 	get isPopupHovered(): boolean {
 		return this.popupHovered;
 	}

@@ -243,9 +243,8 @@ describe("Skill Chip absorption, SKILL.md Hover Popup, Outline Rail preview, and
 		expect(scrolledPopup.text()).toContain("skill-rule-22");
 		expect(scroll.scrollTop).toBe(scrollBeforeWheel);
 
-		/* Esc закрывает попап навыка */
-		await harness.pressKey("\x1b");
-		expect(harness.screen().text()).not.toContain("skill-rule-22");
+		await harness.mouseMove(0, 0);
+		expect(harness.screen().text()).not.toContain("SKILL.md");
 
 		/* В Sticky Prompt также отображается кликабельный /tdd и открывает SKILL.md попап */
 		scroll.scrollTo(12, { disableFollow: true });
@@ -513,6 +512,30 @@ describe("Link [text](url) and file path:line [Open] [Copy] Hover Popups", () =>
 		await harness.mouseClick(pathHit!.col + 4, pathHit!.row);
 		expect(harness.screen().text()).toContain("[Open]");
 		await harness.pressKey("\x1b");
+		expect(harness.screen().text()).not.toContain("[Open]");
+	});
+
+	it("scrolls to the complete hidden link target without moving the transcript, and dismisses on pointer leave", async () => {
+		const target = `https://pi.dev/${"long-path-segment/".repeat(45)}inspectable-final-suffix`;
+		setCapabilities({ images: null, trueColor: true, hyperlinks: true });
+		harness = await createInteractiveHarness({
+			width: 86, height: 24,
+			responses: [fauxAssistantMessage([
+				fauxText(`${Array.from({ length: 28 }, (_, i) => `Paragraph ${i + 1}.`).join("\n\n")}\n\n[Inspect target](${target})`),
+			])],
+		});
+		await harness.submitInput("Inspect a hidden URL");
+		const link = harness.screen().findText("Inspect target")!;
+		await harness.mouseClick(link.col + 2, link.row);
+		const popup = harness.screen();
+		const start = popup.findText("https://pi.dev/")!;
+		expect(popup.text()).not.toContain("inspectable-final-suffix");
+		const scroll = getActiveHostRuntime()!.scroll!;
+		const transcriptTop = scroll.scrollTop;
+		await harness.mouseWheel("down", start.col + 1, start.row, 12);
+		expect(harness.screen().text()).toContain("inspectable-final-suffix");
+		expect(scroll.scrollTop).toBe(transcriptTop);
+		await harness.mouseMove(0, 0);
 		expect(harness.screen().text()).not.toContain("[Open]");
 	});
 

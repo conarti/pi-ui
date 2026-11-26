@@ -139,7 +139,8 @@ export function mergeConfig(base: CompactToolsConfig, value: unknown, path: stri
 		return base;
 	}
 	const mode = value.mode === undefined ? base.mode : (parseChoice<DisplayMode>(value.mode, DISPLAY_MODES, "mode", path) ?? base.mode);
-	const rawStyle = value.style === undefined ? undefined : parseChoice<DisplayStyle>(value.style, DISPLAY_STYLES, "style", path);
+	const storedStyle = value.style === "claude" ? "classic-rows" : value.style === "codex" ? "exploration-tail" : value.style;
+	const rawStyle = storedStyle === undefined ? undefined : parseChoice<DisplayStyle>(storedStyle, DISPLAY_STYLES, "style", path);
 	const rawDensity = value.density === undefined ? undefined : parseChoice<ToolDensity>(value.density, TOOL_DENSITIES, "density", path);
 	let style: DisplayStyle = base.style;
 	let density: ToolDensity = base.density;

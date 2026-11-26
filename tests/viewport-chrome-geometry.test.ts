@@ -211,7 +211,8 @@ describe("Viewport chrome pure geometry and push-offset math", () => {
 	it("computes symmetric outer canvas margins, tilde workspace paths, and fixed-width Header hover context bars without width shift", async () => {
 		expect(computeOuterCanvasMargin(80)).toBe(2);
 		expect(computeOuterCanvasMargin(40)).toBe(2);
-		expect(computeOuterCanvasMargin(39)).toBe(0);
+		expect(computeOuterCanvasMargin(36)).toBe(2);
+		expect(computeOuterCanvasMargin(23)).toBe(0);
 
 		const home = homedir();
 		expect(formatTildeWorkspacePath(home)).toBe("~");

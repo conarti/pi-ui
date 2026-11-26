@@ -3,6 +3,7 @@ import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	getThemeSurfacePalette,
 	parseAnsiColorRgb,
+	themeBgRgb,
 	type RgbTuple,
 } from "./ansi.ts";
 
@@ -34,15 +35,14 @@ interface ParsedItem {
 
 const COLLAPSED_THINKING_RE =
 	/^(?:[✦◆❙┃•]\s*(?:›\s*)?)?(?:Thought(?:\s+for\s+\S+(?:\s+\S+)?)?|Thinking…)(?:\s+›)?$/u;
-const COLLAPSED_TOOL_RE =
-	/^[✦◆•]\s+(?:Read|Edit|Edited|Write|Wrote|Run|Ran|Explored|Search|Searched|Find|Found|List|Listed|Bash|PowerShell|Codemode|Batch|Called|Running)\b/u;
+const COLLAPSED_TOOL_RE = /^✦\s+\S/u;
 const RESPONSE_METRICS_RE =
 	/^Worked for\s+\S+(?:\s+\S+)?(?:\s+·.*)?(?:\s+\d{1,2}\s+[A-Z][a-z]{2}(?:\s+\d{4})?,\s*\d{2}:\d{2}|\s+\d{2}:\d{2})?$/u;
 const COPY_ACTION_ROW_RE =
 	/^(?:(?:[a-z0-9_+#.-]+\s+)?(?:·\s*)?(?:\[?Copy\]?|✓\s*Copied)|\[Copy TSV\]\s+\[Copy CSV\]\s+\[Copy MD\])$/i;
 const BOX_HORIZONTAL_BORDER_RE = /^[╭╰├┌└][─┬┴┼]+[╮╯┤┐┘]$/u;
 const USER_CARD_TRAILING_TIME_RE =
-	/\s{2,}(?:\d{1,2}\s+[A-Z][a-z]{2}(?:\s+\d{4})?,\s*\d{2}:\d{2}|\d{2}:\d{2}|Copy|✓\s*Copied)$/u;
+	/\s{2,}(\d{1,2}\s+[A-Z][a-z]{2}(?:\s+\d{4})?,\s*\d{2}:\d{2}|\d{2}:\d{2}|Copy|✓\s*Copied)$/u;
 const STRUCTURAL_LINE_START_RE = /^(?:#{1,6}\s|(?:[-*+•]|\d+[.)])\s|[│|┌├└─┬┼┴]|[-─═_*]{3,}$)/u;
 
 function rgbMatches(a: RgbTuple | undefined, b: RgbTuple | undefined, tolerance = 14): boolean {
@@ -65,34 +65,20 @@ function detectRowSurfaceKind(fullLine: string, theme?: Theme): SurfaceKind {
 	if (!bgRgb) return "plain";
 
 	const palette = getThemeSurfacePalette(theme);
-	if (rgbMatches(bgRgb, palette.codeBodyBg)) {
-		return "code-body";
-	}
-	if (
-		rgbMatches(bgRgb, palette.codeHeaderBg) ||
-		rgbMatches(bgRgb, palette.codeHeaderActiveBg) ||
-		rgbMatches(bgRgb, palette.codeFooterBg)
-	) {
-		return "code-header";
-	}
-
-	const userCandidates: RgbTuple[] = [
-		palette.userCardBg,
-		palette.userCardHoverBg,
-		[27, 35, 50],
-		[33, 43, 60],
-		[237, 243, 252],
-		[228, 238, 252],
+	const candidates: [SurfaceKind, RgbTuple][] = [
+		["user-card", palette.userCardBg],
+		["user-card", palette.userCardHoverBg],
+		["code-body", palette.codeBodyBg],
+		["code-header", palette.codeHeaderBg],
+		["code-header", palette.codeHeaderActiveBg],
+		["code-header", palette.codeFooterBg],
 	];
-	const themeUserBg = parseAnsiColorRgb(
-		(theme as { getBgAnsi?: (token: string) => string } | undefined)?.getBgAnsi?.("userMessageBg"),
-	);
-	if (themeUserBg) userCandidates.push(themeUserBg);
-
-	for (const candidate of userCandidates) {
-		if (rgbMatches(bgRgb, candidate)) {
-			return "user-card";
-		}
+	/* В 256 цветах фоны могут совпасть: плашка запроса начинается на внешней оси, код — на оси диалога. */
+	const codeAxis = /^ {4}/u.test(fullLine);
+	if (codeAxis) candidates.push(...candidates.splice(0, 2));
+	for (const [kind, color] of candidates) {
+		const rendered = extractFirstBgRgb(themeBgRgb(theme, color, " "));
+		if (rgbMatches(bgRgb, rendered, 0)) return kind;
 	}
 	return "plain";
 }
@@ -338,12 +324,14 @@ export function extractCleanSelectionText(
 	const isMultiLineSelection = nonEmptyInputCount > 1 || lines.length > 1;
 
 	const parsed: ParsedItem[] = [];
+	let promptWrapWidth: number | undefined;
 
 	for (const entry of lines) {
 		const surface = detectRowSurfaceKind(entry.fullLine, theme);
 		const plainSelected = stripTerminalSequences(entry.selectedAnsi);
 		const plainTrimmed = plainSelected.trim();
 		const fullPlainTrimmed = stripTerminalSequences(entry.fullLine).trim();
+		if (surface !== "user-card" || !fullPlainTrimmed) promptWrapWidth = undefined;
 
 		if (!plainTrimmed) {
 			parsed.push({ kind: "blank", text: "", screenWidth: 0, wrapWidth: 0 });
@@ -352,7 +340,7 @@ export function extractCleanSelectionText(
 
 		if (isMultiLineSelection) {
 			if (surface === "code-header") continue;
-			if (isCollapsedChromeRow(fullPlainTrimmed) && isCollapsedChromeRow(plainTrimmed)) {
+			if (surface === "plain" && isCollapsedChromeRow(fullPlainTrimmed)) {
 				continue;
 			}
 			if (surface === "user-card" && (plainTrimmed === "Copy" || plainTrimmed === "✓ Copied")) {
@@ -376,16 +364,26 @@ export function extractCleanSelectionText(
 		}
 
 		if (surface === "user-card") {
-			let cardText = plainSelected.trimEnd().replace(/^\s+/u, "");
-			if (entry.startCol <= 6 && cardText.startsWith("› ")) {
+			const firstRow = fullPlainTrimmed.startsWith("› ");
+			const tail = firstRow ? USER_CARD_TRAILING_TIME_RE.exec(fullPlainTrimmed) : null;
+			const margin = /^ */u.exec(entry.fullLine)?.[0].length ?? 0;
+			const cardWidth = contentW - 2 * margin;
+			const pad = cardWidth >= 28 ? 2 : 1;
+			const innerWidth = cardWidth - pad - 2;
+			if (firstRow) {
+				const gutter = Math.max(8, visibleWidth(tail?.[1] ?? "")) + pad + 1;
+				promptWrapWidth = innerWidth - gutter >= 10 ? innerWidth - gutter : innerWidth;
+			}
+			let cardText = plainSelected.trim();
+			if (firstRow && entry.startCol <= 6 && cardText.startsWith("› ")) {
 				cardText = cardText.slice(2);
 			}
-			cardText = cardText.replace(USER_CARD_TRAILING_TIME_RE, "").trimEnd();
+			if (tail) cardText = cardText.replace(USER_CARD_TRAILING_TIME_RE, "").trimEnd();
 			if (!cardText) {
 				parsed.push({ kind: "blank", text: "", screenWidth: 0, wrapWidth: 0 });
 				continue;
 			}
-			const wrapW = Math.max(12, contentW - 4 - 4 - 9);
+			const wrapW = Math.max(4, promptWrapWidth ?? innerWidth);
 			parsed.push({
 				kind: "prose",
 				text: cardText,

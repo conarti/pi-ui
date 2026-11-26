@@ -206,15 +206,25 @@ describe("animation-scheduler (30 fps monotonic clock)", () => {
 			}
 		}
 
-		/* Проверка поддержки 256color без внутренних сбросов */
 		const prevTrueColor = process.env.PI_TRUE_COLOR;
 		process.env.PI_TRUE_COLOR = "0";
 		try {
-			const painted256 = paintGlimmerSweepText(sample, { light: false, elapsedMs: 420 });
-			expect(stripTerminalSequences(painted256)).toBe(sample);
-			expect(painted256).toContain("\x1b[38;5;");
-			const inner256 = painted256.endsWith("\x1b[39m") ? painted256.slice(0, -5) : painted256;
-			expect(inner256.includes("\x1b[39m")).toBe(false);
+			for (const light of [false, true]) {
+				for (let time = 0; time < periodMs; time += BREATHING_TICK_MS) {
+					const painted = paintGlimmerSweepText(sample, { light, elapsedMs: time });
+					expect(stripTerminalSequences(painted)).toBe(sample);
+					expect(painted.match(/\x1b\[39m/g)).toHaveLength(1);
+					const colors = [...painted.matchAll(/\x1b\[38;5;\d+m/g)];
+					expect(colors.length).toBeGreaterThan(0);
+					for (const [color] of colors) {
+						const { saturation, hue } = rgbHueDegrees(parseAnsiColorRgb(color)!);
+						if (saturation > 0.04) {
+							expect(hue, `${light ? "light" : "dark"} ${color}`).toBeGreaterThan(198);
+							expect(hue).toBeLessThan(255);
+						}
+					}
+				}
+			}
 		} finally {
 			if (prevTrueColor === undefined) delete process.env.PI_TRUE_COLOR;
 			else process.env.PI_TRUE_COLOR = prevTrueColor;
@@ -314,7 +324,8 @@ describe("animation-scheduler (30 fps monotonic clock)", () => {
 		ctrl.onToolEnd("call-1", 19_000);
 		ctrl.onToolEnd("call-2", 19_000);
 		expect(ctrl.snapshot(20_000).label).toBe("Inspecting module A…");
-		expect(ctrl.snapshot(20_900).label).toBe(snap0.label);
+		expect(ctrl.snapshot(20_900).label).toBe("Inspecting module A…");
+		expect(ctrl.snapshot(21_000).label).toBe(snap0.label);
 
 		/* Финальный текст немедленно переключается на Drafting… */
 		ctrl.onTextStream(21_000);

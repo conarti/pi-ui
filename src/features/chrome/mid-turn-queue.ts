@@ -1,3 +1,5 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { ImageContent } from "@earendil-works/pi-ai";
 import { InteractiveMode, type Theme } from "@earendil-works/pi-coding-agent";
 import {
 	Container,
@@ -24,18 +26,20 @@ export interface QueuedMessageEntry {
 interface HostInteractiveModeInternals {
 	session: {
 		isStreaming: boolean;
+		agent: unknown;
 		abort(): Promise<void>;
 		prompt(
 			text: string,
 			options?: {
+				images?: ImageContent[];
 				streamingBehavior?: "steer" | "followUp";
 				preflightResult?: (result: string) => void;
 			},
 		): Promise<void>;
-		steer(text: string): Promise<void>;
-		followUp(text: string): Promise<void>;
-		_queueSteer?(text: string): Promise<void>;
-		_queueFollowUp?(text: string): Promise<void>;
+		steer(text: string, images?: ImageContent[]): Promise<void>;
+		followUp(text: string, images?: ImageContent[]): Promise<void>;
+		_queueSteer?(text: string, images?: ImageContent[]): Promise<void>;
+		_queueFollowUp?(text: string, images?: ImageContent[]): Promise<void>;
 		getSteeringMessages(): readonly string[];
 		getFollowUpMessages(): readonly string[];
 	};
@@ -65,24 +69,49 @@ function getQueueState(): MidTurnQueueState {
 	return g[QUEUE_STATE_KEY]!;
 }
 
-async function reenqueueItems(
-	mode: HostInteractiveModeInternals,
-	items: { readonly steering: readonly string[]; readonly followUp: readonly string[] },
-): Promise<void> {
-	for (const msg of items.steering) {
-		if (typeof mode.session._queueSteer === "function") {
-			await mode.session._queueSteer(msg);
-		} else {
-			await mode.session.steer(msg);
+interface QueuedPayload {
+	readonly text: string;
+	readonly images?: ImageContent[];
+}
+
+type Queues = { steering: QueuedPayload[]; followUp: QueuedPayload[] };
+
+function snapshotQueues(mode: HostInteractiveModeInternals): Queues | undefined {
+	const { session } = mode;
+	/* Публичный peek показывает только следующую пачку; сверяем полный снимок агента с текстовой очередью сессии до её очистки. */
+	const agent = session.agent as {
+		steeringQueue?: { messages?: readonly AgentMessage[] };
+		followUpQueue?: { messages?: readonly AgentMessage[] };
+	};
+	const capture = (all: readonly string[], queued: readonly string[], messages?: readonly AgentMessage[]) => {
+		if (queued.length === 0) return all.map((text): QueuedPayload => ({ text }));
+		if (messages?.length !== queued.length) return undefined;
+		const result: QueuedPayload[] = [];
+		for (let i = 0; i < queued.length; i++) {
+			const message = messages[i];
+			const text = queued[i]!;
+			if (message?.role !== "user" || typeof message.content === "string") return undefined;
+			const [first, ...rest] = message.content;
+			if (first?.type !== "text" || first.text !== text) return undefined;
+			const images = rest.filter((part): part is ImageContent => part.type === "image");
+			result.push({ text, images: images.length ? images : undefined });
 		}
-	}
-	for (const msg of items.followUp) {
-		if (typeof mode.session._queueFollowUp === "function") {
-			await mode.session._queueFollowUp(msg);
-		} else {
-			await mode.session.followUp(msg);
-		}
-	}
+		return [...result, ...all.slice(queued.length).map((text) => ({ text }))];
+	};
+	const all = mode.getAllQueuedMessages();
+	const steering = capture(all.steering, session.getSteeringMessages(), agent.steeringQueue?.messages);
+	const followUp = capture(all.followUp, session.getFollowUpMessages(), agent.followUpQueue?.messages);
+	return steering && followUp ? { steering, followUp } : undefined;
+}
+
+async function reenqueueItems(mode: HostInteractiveModeInternals, items: Queues): Promise<void> {
+	const { session } = mode;
+	const steer = session._queueSteer ?? session.steer;
+	const followUp = session._queueFollowUp ?? session.followUp;
+	await Promise.all([
+		...items.steering.map(({ text, images }) => steer.call(session, text, images)),
+		...items.followUp.map(({ text, images }) => followUp.call(session, text, images)),
+	]);
 }
 
 function flattenQueues(queues: {
@@ -99,25 +128,19 @@ function flattenQueues(queues: {
 	return entries;
 }
 
-function spliceQueuedItem(
-	queues: { readonly steering: readonly string[]; readonly followUp: readonly string[] },
-	kind: QueuedItemKind,
-	index: number,
-): {
-	removed: string | undefined;
-	remaining: { steering: string[]; followUp: string[] };
-} {
-	const steering = [...queues.steering];
-	const followUp = [...queues.followUp];
-	const target = kind === "steer" ? steering : followUp;
+function takeQueuedItem(mode: HostInteractiveModeInternals, kind: QueuedItemKind, index: number) {
+	const remaining = snapshotQueues(mode);
+	const target = kind === "steer" ? remaining?.steering : remaining?.followUp;
+	if (!remaining || !target?.[index]) return undefined;
 	const [removed] = target.splice(index, 1);
-	return { removed, remaining: { steering, followUp } };
+	mode.clearAllQueues();
+	return { removed: removed!, remaining };
 }
 
 async function executeSendNow(
 	mode: HostInteractiveModeInternals,
-	text: string,
-	remaining: { readonly steering: readonly string[]; readonly followUp: readonly string[] },
+	item: QueuedPayload,
+	remaining: Queues,
 ): Promise<void> {
 	const state = getQueueState();
 	if (state.sendingNow) return;
@@ -138,7 +161,8 @@ async function executeSendNow(
 			}
 		};
 		void mode.session
-			.prompt(text, {
+			.prompt(item.text, {
+				images: item.images,
 				preflightResult: (outcome) => {
 					if (outcome === "started") {
 						requeueOnce();
@@ -169,9 +193,9 @@ export async function removeQueuedMidTurnItem(
 ): Promise<boolean> {
 	const mode = getQueueState().activeMode;
 	if (!mode) return false;
-	const { removed, remaining } = spliceQueuedItem(mode.clearAllQueues(), kind, index);
-	if (removed === undefined) return false;
-	await reenqueueItems(mode, remaining);
+	const item = takeQueuedItem(mode, kind, index);
+	if (!item) return false;
+	await reenqueueItems(mode, item.remaining);
 	mode.updatePendingMessagesDisplay();
 	mode.ui.requestRender();
 	return true;
@@ -184,13 +208,13 @@ export async function editQueuedMidTurnItem(
 ): Promise<boolean> {
 	const mode = getQueueState().activeMode;
 	if (!mode) return false;
-	const { removed, remaining } = spliceQueuedItem(mode.clearAllQueues(), kind, index);
-	if (removed === undefined) return false;
-	await reenqueueItems(mode, remaining);
+	const item = takeQueuedItem(mode, kind, index);
+	if (!item) return false;
+	await reenqueueItems(mode, item.remaining);
 	const targetEditor = editor ?? getActiveComposerEditor();
 	if (targetEditor) {
 		const current = targetEditor.getText();
-		const combined = [removed, current].filter((part) => part.trim().length > 0).join("\n\n");
+		const combined = [item.removed.text, current].filter((part) => part.trim().length > 0).join("\n\n");
 		targetEditor.setText(combined);
 	}
 	mode.updatePendingMessagesDisplay();
@@ -203,10 +227,10 @@ export async function sendNowQueuedMidTurnItem(
 	index: number,
 ): Promise<boolean> {
 	const mode = getQueueState().activeMode;
-	if (!mode) return false;
-	const { removed, remaining } = spliceQueuedItem(mode.clearAllQueues(), kind, index);
-	if (removed === undefined) return false;
-	await executeSendNow(mode, removed, remaining);
+	if (!mode || getQueueState().sendingNow) return false;
+	const item = takeQueuedItem(mode, kind, index);
+	if (!item) return false;
+	await executeSendNow(mode, item.removed, item.remaining);
 	return true;
 }
 
@@ -224,12 +248,14 @@ export async function sendNowDraftMidTurn(
 	const trimmed = text.trim();
 	if (!trimmed) return false;
 	const mode = getQueueState().activeMode;
-	if (!mode) return false;
+	if (!mode || getQueueState().sendingNow) return false;
+	const remaining = snapshotQueues(mode);
+	if (!remaining) return false;
 	const targetEditor = editor ?? getActiveComposerEditor();
 	targetEditor?.addToHistory?.(trimmed);
 	targetEditor?.setText("");
-	const remaining = mode.clearAllQueues();
-	await executeSendNow(mode, trimmed, remaining);
+	mode.clearAllQueues();
+	await executeSendNow(mode, { text: trimmed }, remaining);
 	return true;
 }
 

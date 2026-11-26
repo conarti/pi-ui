@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runQuestionnaire } from "../src/features/ask-user/questionnaire.ts";
 import { showContextInspector } from "../src/features/context-inspector/index.ts";
-import { showPlanStudio } from "../src/features/plan-studio/studio-overlay.ts";
+import { showPlanApproval } from "../src/features/plan-approval/approval-overlay.ts";
 import { hasBlockingModalOverlay } from "../src/shared/modal-card.ts";
 import { getSessionWorkflow } from "../src/shared/session-workflow.ts";
 import {
@@ -295,7 +295,7 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		await harness.submitInput("Create modal plan");
 
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
-		expect(harness.screen().text()).toContain("Plan Studio");
+		expect(harness.screen().text()).toContain("Plan Approval");
 
 		const b0 = findModalBounds(harness.screen());
 		await harness.mouseMove(b0.left + 8, b0.top + 4);
@@ -335,7 +335,7 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		expect(closePill).toBeDefined();
 		await harness.mouseClick(closePill!.col + 1, closePill!.row);
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
-		expect(harness.screen().text()).not.toContain("Plan Studio");
+		expect(harness.screen().text()).not.toContain("Plan Approval");
 	});
 
 	it("performs a quiet no-op when opening a Modal Card over another Modal Card, while ignoring non-capturing Hover Popups", async () => {
@@ -352,7 +352,7 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 								return { consume: true };
 							}
 							if (data === "\x1b[112;7u") {
-								void showPlanStudio(pi, ctx);
+								void showPlanApproval(pi, ctx);
 								return { consume: true };
 							}
 							return undefined;
@@ -394,7 +394,7 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		await harness.pressKey("\x1b[112;7u");
 		expect(harness.screen().text()).toContain("⌘ Command Palette");
 		expect(harness.screen().text()).not.toContain("◐ Context Inspector");
-		expect(harness.screen().text()).not.toContain("╭─ 📋 Plan Studio");
+		expect(harness.screen().text()).not.toContain("◈ Plan Approval");
 
 		await harness.pressKey("\x0b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);

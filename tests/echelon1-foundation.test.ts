@@ -90,12 +90,12 @@ describe("Ticket #41 foundation end-to-end (real InteractiveMode)", () => {
 		expect(cyrillicRe.test(contextText)).toBe(false);
 		await harness.pressKey("\x1b");
 
-		/* Plan mode и Plan Studio полностью на английском */
+		/* Plan Approval использует название из глоссария, а не прежний псевдоним. */
 		await harness.submitInput("/plan");
 		await harness.submitInput("Draft an English plan");
-		const studioText = harness.screen().text();
-		expect(studioText).toContain("Plan Studio");
-		expect(cyrillicRe.test(studioText)).toBe(false);
+		const approvalText = harness.screen().text();
+		expect(approvalText).toContain("Plan Approval");
+		expect(cyrillicRe.test(approvalText)).toBe(false);
 		await harness.pressKey("\x1b");
 
 		/* Selection Hover Popup полностью на английском */

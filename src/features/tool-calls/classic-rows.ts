@@ -16,13 +16,13 @@ import type { ToolArgs } from "./types.ts";
  * Rows Claude Code shows of a command's output before "… +N lines". Output is
  * wrapped to the width first, so a long line counts as the rows it takes.
  */
-export const CLAUDE_OUTPUT_ROWS = 3;
+export const CLASSIC_OUTPUT_ROWS = 3;
 /** While Bash runs, Claude follows the last four output rows rather than the head. */
-export const CLAUDE_RUNNING_OUTPUT_ROWS = 4;
+export const CLASSIC_RUNNING_OUTPUT_ROWS = 4;
 /** Rows Claude Code shows of what a write put in the file. */
-export const CLAUDE_WRITE_ROWS = 10;
+export const CLASSIC_WRITE_ROWS = 10;
 /** Lines of context Claude Code keeps around each change in an edit's diff. */
-export const CLAUDE_DIFF_CONTEXT_LINES = 3;
+export const CLASSIC_DIFF_CONTEXT_LINES = 3;
 
 /**
  * Claude Code 2.1.312's chrome: `⏺ Bash(…)`, then `  ⎿  ` with the "⎿" under the
@@ -30,11 +30,11 @@ export const CLAUDE_DIFF_CONTEXT_LINES = 3;
  * in, with its own smaller "⦁" dot, so each prefix keeps that geometry one column
  * further right.
  */
-export const CLAUDE_RESULT_PREFIX = "   ⎿  ";
+export const CLASSIC_RESULT_PREFIX = "   ⎿  ";
 /** Lines after the first under "⎿", and everything drawn beneath the result. */
-export const CLAUDE_INDENT = "      ";
+export const CLASSIC_INDENT = "      ";
 /** Where a wrapped call line continues: under the tool's name. */
-export const CLAUDE_TITLE_INDENT = "   ";
+export const CLASSIC_TITLE_INDENT = "   ";
 
 /** Claude Code's names for the tools Pi shares with it. */
 const LABELS: Readonly<Record<string, string>> = {
@@ -48,7 +48,7 @@ const LABELS: Readonly<Record<string, string>> = {
 	write: "Write",
 };
 
-export function claudeLabel(name: string): string {
+export function classicLabel(name: string): string {
 	return LABELS[name] ?? name;
 }
 
@@ -68,27 +68,27 @@ function commandOf(args: ToolArgs): string {
 }
 
 /** Claude Code shortens a collapsed command only past two lines or 160 characters. */
-export const CLAUDE_COMMAND_LINES = 2;
-export const CLAUDE_COMMAND_CHARS = 160;
+export const CLASSIC_COMMAND_LINES = 2;
+export const CLASSIC_COMMAND_CHARS = 160;
 
 /**
  * A command as Claude Code titles it: whole when opened, and collapsed cut only
  * past its line and character limits, with an ellipsis. Within them it is never
  * cut to fit the row; the title wraps instead.
  */
-export function claudeCommand(command: string, expanded: boolean): string {
+export function classicCommand(command: string, expanded: boolean): string {
 	const text = normalizeLineEndings(stripTerminalSequences(command)).trim();
 	if (expanded) return text;
 	const lines = text.split("\n");
-	let shown = lines.length > CLAUDE_COMMAND_LINES ? lines.slice(0, CLAUDE_COMMAND_LINES).join("\n") : text;
-	if (shown.length > CLAUDE_COMMAND_CHARS) shown = shown.slice(0, CLAUDE_COMMAND_CHARS);
+	let shown = lines.length > CLASSIC_COMMAND_LINES ? lines.slice(0, CLASSIC_COMMAND_LINES).join("\n") : text;
+	if (shown.length > CLASSIC_COMMAND_CHARS) shown = shown.slice(0, CLASSIC_COMMAND_CHARS);
 	return shown === text ? text : `${shown.trim()}…`;
 }
 
 /** What goes between the parentheses: `Bash(npm test)`, `Search(pattern: "x", path: "src")`. */
-export function claudeArgument(name: string, args: ToolArgs, expanded = false): string {
+export function classicArgument(name: string, args: ToolArgs, expanded = false): string {
 	const path = pathOf(args);
-	if (name === "bash" || name === "powershell") return claudeCommand(commandOf(args), expanded);
+	if (name === "bash" || name === "powershell") return classicCommand(commandOf(args), expanded);
 	if (name === "grep" || name === "find") {
 		const pattern = typeof args.pattern === "string" ? oneLine(args.pattern) : "";
 		// Arguments stream in; until the pattern arrives there is nothing to name.
@@ -127,8 +127,8 @@ export function formatArguments(args: ToolArgs): string {
 	return parts.length > 0 ? parts.join(", ") : summarizeCustomArguments(args);
 }
 
-export function claudeTitle(name: string, args: ToolArgs, expanded = false): { label: string; argument: string } {
-	return { label: claudeLabel(name), argument: claudeArgument(name, args, expanded) };
+export function classicTitle(name: string, args: ToolArgs, expanded = false): { label: string; argument: string } {
+	return { label: classicLabel(name), argument: classicArgument(name, args, expanded) };
 }
 
 const EXPLORATION_NEUTRAL_COMMANDS = new Set([
@@ -277,7 +277,7 @@ function countOf(summary: string | undefined): number {
  * marks the counts and paths Claude Code sets in bold. Tools whose output is the
  * result, commands and custom tools, return undefined and show it instead.
  */
-export function claudeOutcome(
+export function classicOutcome(
 	name: string,
 	args: ToolArgs,
 	result: AgentToolResult<unknown>,
@@ -312,7 +312,7 @@ const SHELL_STATUS = /^Command (?:exited with code (\d+)|(timed out.*|aborted|te
  * A failure as Claude Code reports it. A command leads with its exit code and
  * then shows what it printed; another tool leads with its reason alone.
  */
-export function claudeFailure(name: string, output: string, expanded = false): { headline: string; detail: string } {
+export function classicFailure(name: string, output: string, expanded = false): { headline: string; detail: string } {
 	if (name === "bash" || name === "powershell" || !TOOL_NAMES.has(name)) {
 		const lines = normalizeLineEndings(output).trimEnd().split("\n");
 		const status = lines.at(-1)?.trim().match(SHELL_STATUS);

@@ -287,6 +287,7 @@ export function buildStepHeaderParts(options: {
 	const running = status === "running";
 	const failed = status === "error";
 	const relPath = formatWorkspacePath(rawPath, cwd);
+	const summaryVerb = stepSummary && (failed ? `Failed: ${stepSummary}` : stepSummary);
 
 	switch (name) {
 		case "read": {
@@ -299,18 +300,18 @@ export function buildStepHeaderParts(options: {
 						? `:${offset}+`
 						: "";
 			return {
-				verb: failed ? "Failed read" : running ? "Reading" : "Read",
+				verb: summaryVerb || (failed ? "Failed read" : running ? "Reading" : "Read"),
 				target: `${relPath}${rangeSuffix}`,
 			};
 		}
 		case "edit":
 			return {
-				verb: failed ? "Failed to edit" : running ? "Editing" : "Edited",
+				verb: summaryVerb || (failed ? "Failed to edit" : running ? "Editing" : "Edited"),
 				target: relPath,
 			};
 		case "write":
 			return {
-				verb: failed ? "Failed to write" : running ? "Writing" : "Wrote",
+				verb: summaryVerb || (failed ? "Failed to write" : running ? "Writing" : "Wrote"),
 				target: relPath,
 			};
 		case "grep": {
@@ -343,7 +344,7 @@ export function buildStepHeaderParts(options: {
 		}
 		case "ls":
 			return {
-				verb: failed ? "Failed ls" : running ? "Listing" : "Listed",
+				verb: summaryVerb || (failed ? "Failed ls" : running ? "Listing" : "Listed"),
 				target: relPath || ".",
 			};
 		case "bash":

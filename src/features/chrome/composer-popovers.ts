@@ -23,7 +23,7 @@ import { matchesLayoutChord } from "../../shared/keyboard-layout.ts";
 import { createSingleLineInput, hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
 import { getSessionWorkflow, MODE_META, type SessionMode } from "../../shared/session-workflow.ts";
-import { setSessionMode } from "../plan-studio/index.ts";
+import { setSessionMode } from "../plan-approval/index.ts";
 import { getActiveComposerEditor } from "./composer.ts";
 
 export type ComposerPopoverKind = "model" | "thinking" | "mode";

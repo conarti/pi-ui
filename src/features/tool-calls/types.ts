@@ -28,8 +28,8 @@ export const DISPLAY_STYLES = [
 	"grouped",
 	"diff-focus",
 	"detailed",
-	"claude",
-	"codex",
+	"classic-rows",
+	"exploration-tail",
 	"off",
 ] as const;
 export type DisplayStyle = (typeof DISPLAY_STYLES)[number];
@@ -81,11 +81,11 @@ export interface RowState {
 	lastResultDurationMs?: number;
 	lastResultOutputPad?: number;
 	lastResultExpandKey?: string;
-	/** What a Codex row's head reads from its result: a command's exit code, an edit's counts. */
-	codex?: {
+	/** Данные результата, которые нужны заголовку строки. */
+	tail?: {
 		exitCode?: number;
 		changes?: { added: number; removed: number };
-		/** Whether the row draws opened at a width: Codex opens only a call whose preview leaves something out. */
+		/** Полный предпросмотр не требует раскрытия. */
 		opens?: (width: number) => boolean;
 	};
 	density?: {

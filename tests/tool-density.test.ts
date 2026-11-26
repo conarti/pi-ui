@@ -740,6 +740,11 @@ describe("Tool Density: real InteractiveMode integration", () => {
 			"mcp__docs__lookup",
 		]);
 
+		await harness.submitInput("/compact-tools help");
+		const help = harness.screen().text();
+		expect(help).toContain("balanced|compact|grouped|diff-focus|detailed|off");
+		expect(help).not.toMatch(/claude|codex/iu);
+
 		await harness.submitInput("Build density matrix");
 
 		/* 1. Balanced (по умолчанию): чтения свёрнуты в Explored, остальные вызовы по 1 строке */
@@ -1548,6 +1553,35 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		expect(allExpanded).toContain("FULL_TAIL_ARG_VALUE");
 		expect(allExpanded).toContain(".yaml");
 		expect(allExpanded).not.toContain("FULL_TAIL_ARG_VALUE…");
+	});
+
+	it("shows every wrapped command line when expanding an image-returning shell tool", async () => {
+		const imageBash = defineTool({
+			name: "bash", label: "bash", description: "Returns a chart",
+			parameters: Type.Object({ command: Type.String() }),
+			async execute() {
+				return { content: [{
+					type: "image", mimeType: "image/png",
+					data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+				}], details: {} };
+			},
+		});
+		harness = await createInteractiveHarness({
+			width: 72, height: 32, customTools: [imageBash],
+			responses: [fauxAssistantMessage([
+				fauxToolCall("bash", { command: "echo first\necho SECOND_COMMAND_LINE" }, { id: "image-bash" }),
+			], { stopReason: "toolUse" }), fauxAssistantMessage("Done.")],
+		});
+		setCapabilityOverrides({ images: null });
+		resetCapabilitiesCache();
+		harness.session.setActiveToolsByName(["bash"]);
+		await harness.submitInput("Show shell chart");
+		expect(harness.screen().text()).not.toContain("SECOND_COMMAND_LINE");
+		const row = harness.screen().findText("Ran echo first")!;
+		await harness.mouseClick(row.col + 1, row.row);
+		expect(harness.screen().text()).toContain("$ echo first");
+		expect(harness.screen().text()).toContain("echo SECOND_COMMAND_LINE");
+		expect(harness.screen().text()).toContain("[Image: [image/png] 1x1]");
 	});
 
 	it("keeps image-returning tool calls outside collapsed groups across Balanced/Compact/Grouped, renders inline Kitty & iTerm2 images with clean non-graphic fallback, and live-switches via Command Palette", async () => {

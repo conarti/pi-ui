@@ -298,7 +298,10 @@ export class WorkingStatusController {
 			return;
 		}
 		if (this.contextualSummary) {
-			this.contextualExpiresAt = now + WORKING_TOOL_COMPLETION_HOLD_MS;
+			this.contextualExpiresAt = Math.max(
+				now + WORKING_TOOL_COMPLETION_HOLD_MS,
+				(this.contextualUpdatedAt ?? now) + WORKING_CONTEXTUAL_HOLD_MS,
+			);
 		}
 	}
 

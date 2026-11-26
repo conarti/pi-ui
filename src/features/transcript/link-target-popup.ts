@@ -1,7 +1,5 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
-	ScrollView,
-	TuiAltScreen,
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
@@ -21,13 +19,15 @@ import {
 } from "../../shared/ansi.ts";
 import {
 	getActiveHostRuntime,
+	installClickedHoverPopupDismissHooks,
 	registerTransientHoverDismisser,
 	resolveActiveExternalOpener,
 	unwrapHostTui,
 } from "../../shared/host-runtime.ts";
+import { t } from "../../shared/i18n.ts";
 import type { InspectableLinkTarget } from "../../shared/link-targets.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
-import { copyToClipboard, hookMethod } from "../../shared/runtime-hooks.ts";
+import { copyToClipboard } from "../../shared/runtime-hooks.ts";
 
 interface PopupActionHit {
 	readonly kind: "open" | "copy";
@@ -37,6 +37,9 @@ interface PopupActionHit {
 
 class LinkTargetPopup implements Component {
 	target: InspectableLinkTarget | undefined;
+	scrollOffset = 0;
+	private maxScroll = 0;
+	private targetRows = 3;
 	hoveredAction: "open" | "copy" | undefined;
 	onOpen?: (target: InspectableLinkTarget) => void;
 	onCopy?: (target: InspectableLinkTarget) => void;
@@ -47,28 +50,25 @@ class LinkTargetPopup implements Component {
 
 	invalidate(): void {}
 
-	computeDimensions(termCols: number): { width: number; height: number } {
-		const maxW = Math.max(26, Math.min(72, termCols - 6));
-		const innerMax = Math.max(16, maxW - 4);
-		const targetText = this.target?.displayTarget ?? "";
-		const wrapped = targetText ? wrapTextWithAnsi(targetText, innerMax) : [""];
-		const visibleTargetLines = wrapped.slice(0, 3);
-		const contentW = Math.max(
-			visibleWidth("[Open]  [Copy]"),
-			...visibleTargetLines.map(visibleWidth),
-		);
-		const width = Math.max(24, Math.min(maxW, contentW + 4));
-		return {
-			width,
-			height: visibleTargetLines.length + 3,
-		};
+	computeDimensions(termCols: number, termRows: number): { width: number; height: number } {
+		const maxWidth = Math.max(12, Math.min(72, termCols - 4));
+		const target = this.target?.displayTarget ?? "";
+		const actions = `${t("transcript.action.open")}  ${t("transcript.action.copy")}`;
+		const width = Math.min(maxWidth, Math.max(24, visibleWidth(target) + 4, visibleWidth(actions) + 4));
+		this.targetRows = Math.max(1, Math.min(8, termRows - 6));
+		const wrapped = wrapTextWithAnsi(target, width - 4);
+		const scrollable = wrapped.length > this.targetRows;
+		return { width, height: Math.min(wrapped.length, this.targetRows) + (scrollable ? 4 : 3) };
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		if (!this.target) return undefined;
 
 		if (event.type === "wheel") {
-			return { handled: true, render: false };
+			const next = Math.max(0, Math.min(this.maxScroll, this.scrollOffset + (event.wheelDelta ?? 0)));
+			const changed = next !== this.scrollOffset;
+			this.scrollOffset = next;
+			return { handled: true, render: changed };
 		}
 
 		if (event.type === "move") {
@@ -110,13 +110,17 @@ class LinkTargetPopup implements Component {
 		if (!this.target) return [];
 		const theme = this.getTheme();
 		const palette = getThemeSurfacePalette(theme);
-		const safeWidth = Math.max(22, width);
+		const safeWidth = width;
 		const innerSpan = Math.max(2, safeWidth - 2);
 		const textWidth = Math.max(1, safeWidth - 4);
 		const b = (s: string) => themeFgRgb(theme, palette.borderSubtle, s);
 		const accentFg = palette.isLight ? palette.accent : palette.accentBright;
 
-		const wrapped = wrapTextWithAnsi(this.target.displayTarget, textWidth).slice(0, 3);
+		const wrapped = wrapTextWithAnsi(this.target.displayTarget, textWidth);
+		this.maxScroll = Math.max(0, wrapped.length - this.targetRows);
+		this.scrollOffset = Math.min(this.scrollOffset, this.maxScroll);
+		const visibleRows = wrapped.slice(this.scrollOffset, this.scrollOffset + this.targetRows);
+		if (this.maxScroll) visibleRows.push(theme.fg("muted", t("transcript.popup.scrollHint")));
 		const out: string[] = [
 			paintThemeSurfaceRow(
 				theme,
@@ -126,7 +130,7 @@ class LinkTargetPopup implements Component {
 			),
 		];
 
-		for (const row of wrapped) {
+		for (const row of visibleRows) {
 			const clipped = truncateToWidth(row, textWidth, "…");
 			const pad = " ".repeat(Math.max(0, textWidth - visibleWidth(clipped)));
 			out.push(
@@ -139,8 +143,8 @@ class LinkTargetPopup implements Component {
 			);
 		}
 
-		const openLabel = "[Open]";
-		const copyLabel = "[Copy]";
+		const openLabel = t("transcript.action.open");
+		const copyLabel = t("transcript.action.copy");
 		const paintBtn = (label: string, hovered: boolean) =>
 			hovered
 				? themeBgRgb(theme, palette.badgeHoverBg, themeFgRgb(theme, accentFg, label))
@@ -190,8 +194,7 @@ interface LinkPopupState {
 	activeKey?: string;
 	activeTui?: TUI;
 	activeRenderer?: object;
-	hooksInstalled: boolean;
-	clickedInsideCurrentRelease: boolean;
+	markOpened?: () => void;
 }
 
 function getLinkPopupState(): LinkPopupState {
@@ -199,8 +202,6 @@ function getLinkPopupState(): LinkPopupState {
 	if (!g[LINK_POPUP_SLOT_KEY]) {
 		const state: LinkPopupState = {
 			visible: false,
-			hooksInstalled: false,
-			clickedInsideCurrentRelease: false,
 		};
 		g[LINK_POPUP_SLOT_KEY] = state;
 		registerTransientHoverDismisser("linkTarget.popup", () => hideLinkTargetPopup());
@@ -233,78 +234,6 @@ export function hideLinkTargetPopup(): void {
 	}
 }
 
-function ensureLinkPopupDismissHooks(): void {
-	const state = getLinkPopupState();
-	if (state.hooksInstalled) return;
-	state.hooksInstalled = true;
-
-	const scrollProto = (ScrollView as unknown as { prototype?: object } | undefined)?.prototype;
-	if (scrollProto) {
-		for (const methodName of ["scrollTo", "scrollBy", "scrollToStart", "scrollToEnd"] as const) {
-			hookMethod(
-				scrollProto,
-				methodName,
-				`linkTarget.scrollDismiss.${methodName}`,
-				(self, args, original) => {
-					const prevTop = self.scrollTop;
-					const result = original.apply(self, args);
-					if (state.visible && self.scrollTop !== prevTop && self === getActiveHostRuntime()?.scroll) {
-						hideLinkTargetPopup();
-						getActiveHostRuntime()?.requestRender();
-					}
-					return result;
-				},
-			);
-		}
-	}
-
-	const altProto = (TuiAltScreen as unknown as { prototype?: object } | undefined)?.prototype;
-	if (altProto) {
-		hookMethod(
-			altProto,
-			"handleMouseEvent",
-			"linkTarget.outsideReleaseDismiss",
-			(self, args, original) => {
-				const raw = args[0] as { button: number; x: number; y: number; release: boolean } | undefined;
-				const isButtonRelease = Boolean(raw && raw.release && (raw.button & 32) === 0);
-				if (!isButtonRelease || !state.visible) {
-					return original.apply(self, args);
-				}
-
-				const col = raw!.x - 1;
-				const row = raw!.y - 1;
-				const layouts = (
-					self as {
-						renderedOverlayLayouts?: ReadonlyArray<{
-							entry: { component?: Component };
-							col: number;
-							row: number;
-							width: number;
-							height: number;
-						}>;
-					}
-				).renderedOverlayLayouts;
-				const ownLayout = layouts?.find((l) => l.entry?.component === state.popup);
-				const insidePopup = Boolean(
-					ownLayout &&
-						col >= ownLayout.col &&
-						col < ownLayout.col + ownLayout.width &&
-						row >= ownLayout.row &&
-						row < ownLayout.row + ownLayout.height,
-				);
-
-				state.clickedInsideCurrentRelease = insidePopup;
-				const res = original.apply(self, args);
-				if (!state.clickedInsideCurrentRelease && state.visible) {
-					hideLinkTargetPopup();
-					self.requestRender?.();
-				}
-				return res;
-			},
-		);
-	}
-}
-
 export function toggleLinkTargetPopup(
 	target: InspectableLinkTarget,
 	screenX: number,
@@ -317,9 +246,10 @@ export function toggleLinkTargetPopup(
 		return;
 	}
 
-	ensureLinkPopupDismissHooks();
 	const state = getLinkPopupState();
-	state.clickedInsideCurrentRelease = true;
+	state.markOpened ??= installClickedHoverPopupDismissHooks(
+		"linkTarget", () => state.visible ? state.popup : undefined, hideLinkTargetPopup,
+	);
 
 	const key = `${target.kind}:${target.copyText}`;
 	if (state.visible && state.activeKey === key) {
@@ -359,10 +289,11 @@ export function toggleLinkTargetPopup(
 
 	state.popup.target = target;
 	state.popup.hoveredAction = undefined;
+	state.popup.scrollOffset = 0;
 
 	const termCols = Math.max(24, tui.terminal?.columns ?? 80);
 	const termRows = Math.max(8, tui.terminal?.rows ?? 30);
-	const { width, height } = state.popup.computeDimensions(termCols);
+	const { width, height } = state.popup.computeDimensions(termCols, termRows);
 
 	const col = Math.max(2, Math.min(screenX - 2, Math.max(2, termCols - width - 2)));
 	const belowRow = screenY + 1;
@@ -376,6 +307,7 @@ export function toggleLinkTargetPopup(
 
 	state.visible = true;
 	state.activeKey = key;
+	state.markOpened();
 
 	if (!state.options) {
 		state.options = {

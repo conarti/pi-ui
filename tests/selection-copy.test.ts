@@ -9,6 +9,7 @@ import {
 	extractCleanSelectionText,
 	type SelectedTranscriptLine,
 } from "../src/shared/selection-copy.ts";
+import { renderUserPromptCardLines } from "../src/features/transcript/user-prompt.ts";
 import { loadPackageThemes } from "./harness/index.ts";
 
 function makeFullLineSelection(
@@ -54,7 +55,7 @@ describe("Clean selection text extractor (pure seam over real package themes)", 
 
 			const lines = [
 				`${pad}✦ › Thought for 4s`,
-				`${pad}✦ Read src/index.ts`,
+				`${pad}✦ Inspect repo state (200ms) · bash 1 · read 6`,
 				`${pad}Run ${theme.fg("mdCode", "npm run check")} after updating the config`,
 				`${pad}file so every invariant stays green.`,
 				"",
@@ -104,6 +105,20 @@ describe("Clean selection text extractor (pure seam over real package themes)", 
 		expect(
 			extractCleanSelectionText(makeFullLineSelection(quotedLines, 52), { theme: dark }),
 		).toBe("Quoted prose that wraps smoothly onto the next line inside a blockquote.");
+	});
+
+	it("copies a wrapped User Prompt without its chevron or timestamp in either package theme", async () => {
+		const { dark, light } = await loadPackageThemes();
+		for (const theme of [dark, light]) {
+			const text = "This is a fairly long prompt asking the agent for help with a repeated build failure.";
+			const { lines } = renderUserPromptCardLines(text, 70, theme, {
+				surface: "transcript",
+				showCopyBadge: true,
+				formattedTime: "25 Nov, 10:15",
+			});
+			expect(lines).toHaveLength(4);
+			expect(extractCleanSelectionText(makeFullLineSelection(lines, 70), { theme })).toBe(text);
+		}
 	});
 
 	it("keeps single-line selection of a chrome row intact when selected on its own", async () => {

@@ -227,7 +227,7 @@ export function prefixedSentence(text: string, firstPrefix: string, continuation
  * its own do. `fromEnd` follows a running command's tail and reports even a single
  * hidden row. Completion rows never count toward the output-preview limit.
  */
-export function claudeRows(
+export function classicRows(
 	lines: readonly string[],
 	firstPrefix: string,
 	continuationPrefix: string,
@@ -692,7 +692,7 @@ export function renderCodeView(code: string, path: string, theme: Theme, options
  * across the whole width. A wrapped row continues under the code; `⋮` marks a gap
  * between hunks. `maxRows` keeps the first rows, as Codex's collapsed preview does.
  */
-export function renderCodexDiff(
+export function renderTailDiff(
 	lines: readonly CodeDiffLine[],
 	path: string,
 	theme: Theme,

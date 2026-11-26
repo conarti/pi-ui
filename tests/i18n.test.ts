@@ -24,6 +24,17 @@ describe("i18n catalog (pure seam)", () => {
 		}
 	});
 
+	it("owns questionnaire prompts and overlay actions in the typed English catalog", () => {
+		expect(EN_MESSAGES).toMatchObject({
+			"askUser.customPlaceholder": "Type something.",
+			"askUser.review.title": "Review your answers",
+			"askUser.review.ready": "Ready to submit your answers?",
+			"transcript.action.open": "[Open]",
+			"transcript.action.copyTsv": "[Copy TSV]",
+			"transcript.popup.scrollHint": "Scroll · Esc close",
+		});
+	});
+
 	it("interpolates named placeholders cleanly and leaves unmatched keys or missing params safe", () => {
 		expect(t("composer.placeholder")).toBe("Ask or describe a task…");
 		expect(t("sessionMode.notification", { icon: "●", label: "Always-approve", desc: "Full access" })).toBe(

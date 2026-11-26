@@ -36,8 +36,8 @@ import {
 	registerSlotOwnershipChangeListener,
 } from "../../shared/slot-arbitration.ts";
 import { runAppAction, setAppActionRunner, setRequestRender } from "../../shared/ui-action-bridge.ts";
-import { setSessionMode } from "../plan-studio/index.ts";
-import { showPlanStudio } from "../plan-studio/studio-overlay.ts";
+import { setSessionMode } from "../plan-approval/index.ts";
+import { showPlanApproval } from "../plan-approval/approval-overlay.ts";
 import {
 	closeActiveComposerPopover,
 	getActiveComposerPopoverKind,
@@ -1176,7 +1176,7 @@ export class PiUiComposerEditor extends CustomEditor {
 						theme,
 					},
 				),
-				onClick: () => void showPlanStudio(pi, ctx),
+				onClick: () => void showPlanApproval(pi, ctx),
 			});
 		}
 

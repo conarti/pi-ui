@@ -174,6 +174,13 @@ describe("Tool Calls: O(1) step-summary index and semantic fallbacks (pure seam)
 		});
 		expect(bashWithSummary).toEqual({ verb: "Check git status", target: "git status -sb" });
 
+		for (const name of ["read", "edit", "write", "ls"]) {
+			expect(buildStepHeaderParts({
+				name, args: {}, status: "success", rawPath: "/repo/src", cwd: "/repo",
+				stepSummary: "Inspect repo state", summarizeCustomArgs: summarizeCustomArguments,
+			})).toEqual({ verb: "Inspect repo state", target: "src" });
+		}
+
 		const longPattern = "very_long_identifier_pattern_that_exceeds_forty_eight_characters_easily";
 		const collapsedGrep = buildStepHeaderParts({
 			name: "grep",

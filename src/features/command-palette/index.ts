@@ -1,5 +1,4 @@
 import {
-	ExtensionRunner,
 	type ExtensionAPI,
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
@@ -36,7 +35,8 @@ import {
 	updatePiUiUserConfig,
 } from "../../shared/pi-ui-config.ts";
 import { notifyLiveToolDensityChange } from "../tool-calls/command.ts";
-import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
+import { claimHover } from "../../shared/runtime-hooks.ts";
+import { COMMAND_PALETTE_CHORD, dispatchPaletteShortcut } from "../../shared/slot-arbitration.ts";
 import { getSessionWorkflow, MODE_META } from "../../shared/session-workflow.ts";
 import { requestRender, runAppAction } from "../../shared/ui-action-bridge.ts";
 import {
@@ -44,9 +44,10 @@ import {
 	showContextInspector,
 } from "../context-inspector/index.ts";
 import { getOutlineSettings } from "../outline-rail/index.ts";
-import { setSessionMode } from "../plan-studio/index.ts";
-import { showPlanStudio } from "../plan-studio/studio-overlay.ts";
+import { setSessionMode } from "../plan-approval/index.ts";
+import { showPlanApproval } from "../plan-approval/approval-overlay.ts";
 import { showSlotArbitrationModal } from "../slot-arbitration/index.ts";
+import { setPromptSuggestionsEnabled } from "../prompt-suggestion/index.ts";
 import { getStickyConfig } from "../sticky-prompt/index.ts";
 
 interface PaletteItem {
@@ -93,16 +94,16 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 			run: () => setSessionMode(pi, ctx, wf.mode === "plan" ? "always-approve" : "plan"),
 		},
 		{
-			id: "plan-studio",
+			id: "plan-approval",
 			group: t("palette.group.mode"),
 			icon: "📋",
 			label:
 				wf.planLines.length > 0
-					? t("palette.item.planStudioWithLines", { count: wf.planLines.length })
-					: t("palette.item.planStudio"),
+					? t("palette.item.planApprovalWithLines", { count: wf.planLines.length })
+					: t("palette.item.planApproval"),
 			hint: "/plan",
-			keywords: "plan studio review comments",
-			run: () => showPlanStudio(pi, ctx),
+			keywords: "plan approval review comments",
+			run: () => showPlanApproval(pi, ctx),
 		},
 		{
 			id: "mode-auto",
@@ -206,9 +207,7 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 			hint: "/suggestions",
 			keywords: "prompt suggestions follow-up background tokens",
 			run: () => {
-				const next = !loadPiUiUserConfig().promptSuggestions;
-				updatePiUiUserConfig({ promptSuggestions: next });
-				requestRender();
+				const next = setPromptSuggestionsEnabled(!loadPiUiUserConfig().promptSuggestions);
 				ctx.ui.notify(
 					t("suggestions.toggled", { state: next ? t("state.on") : t("state.off") }),
 					"info",
@@ -670,31 +669,10 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 	}
 }
 
-function installCtrlKDiagnosticFilter(): void {
-	const proto = (ExtensionRunner as unknown as { prototype?: object } | undefined)?.prototype;
-	if (!proto) return;
-
-	/* Убираем ctrl+k из карты шорткатов ExtensionRunner, чтобы хост не выводил предупреждение о конфликте с deleteToLineEnd */
-	hookMethod(proto, "getShortcuts", "commandPalette.filterCtrlKConflict", (self, args, original) => {
-		const extensions = (self as { extensions?: Array<{ shortcuts?: Map<string, { description?: string }> }> })
-			.extensions;
-		if (Array.isArray(extensions)) {
-			for (const ext of extensions) {
-				const ctrlK = ext.shortcuts?.get("ctrl+k");
-				if (ctrlK?.description?.includes("Command Palette")) {
-					ext.shortcuts?.delete("ctrl+k");
-				}
-			}
-		}
-		return original.apply(self, args);
-	});
-}
-
 export function registerCommandPaletteFeature(pi: ExtensionAPI): void {
-	installCtrlKDiagnosticFilter();
 	let unsubscribeInput: (() => void) | undefined;
 
-	pi.registerShortcut("ctrl+k", {
+	pi.registerShortcut(COMMAND_PALETTE_CHORD, {
 		description: t("palette.shortcut"),
 		handler: async (ctx) => {
 			await showCommandPalette(pi, ctx);
@@ -719,7 +697,7 @@ export function registerCommandPaletteFeature(pi: ExtensionAPI): void {
 			Boolean(seq) &&
 			!isKeyRelease(seq) &&
 			!isKeyRepeat(seq) &&
-			(matchesKey(seq, "ctrl+k") || matchesLayoutChord(seq, "ctrl+k"));
+			(matchesKey(seq, COMMAND_PALETTE_CHORD) || matchesLayoutChord(seq, COMMAND_PALETTE_CHORD));
 
 		const resolveCtrlKDisposition = (): "passthrough" | "consume" | "open" => {
 			const hostTui = getActiveHostRuntime()?.tui;
@@ -751,7 +729,7 @@ export function registerCommandPaletteFeature(pi: ExtensionAPI): void {
 				const disposition = resolveCtrlKDisposition();
 				if (disposition === "passthrough") return undefined;
 				if (disposition === "open") {
-					void showCommandPalette(pi, ctx);
+					void dispatchPaletteShortcut();
 				}
 				return { consume: true };
 			}
@@ -775,14 +753,14 @@ export function registerCommandPaletteFeature(pi: ExtensionAPI): void {
 			}
 			if (!forwarded) {
 				if (disposition === "open") {
-					void showCommandPalette(pi, ctx);
+					void dispatchPaletteShortcut();
 				}
 				return { consume: true };
 			}
 			if (disposition === "open") {
 				queueMicrotask(() => {
 					if (resolveCtrlKDisposition() === "open") {
-						void showCommandPalette(pi, ctx);
+						void dispatchPaletteShortcut();
 					}
 				});
 			}
