@@ -41,24 +41,32 @@ const DENSITY_HELP =
 	"Usage: /density [balanced|compact|grouped|diff-focus|detailed] [global|project]\n/density status · /density help\nSwitches Tool Density live without reload. Ctrl+O or click expands rows; /silent toggles quiet mode.";
 
 const COMPACT_HELP =
-	"Usage: /compact-tools [detailed|diff-focus|compact|claude|codex|off] [global|project]\nWithout a scope the preset applies live (and updates active settings when configured).\n/compact-tools status · /compact-tools help\nCtrl+O expands rows; /silent toggles quiet mode.";
+	"Usage: /compact-tools [balanced|compact|grouped|diff-focus|detailed|claude|codex|off] [global|project]\nWithout a scope the preset applies live (and updates active settings when configured).\n/compact-tools status · /compact-tools help\nCtrl+O expands rows; /silent toggles quiet mode.";
 
 const BUSY = "Wait for the current response to finish before changing tool styles.";
 
 const DENSITY_CHOICES: Record<ToolDensity, string> = {
-	detailed: "Detailed - inline edit/write diffs + command 2 head + 3 tail previews (default)",
-	"diff-focus": "Diff Focus - inline edit/write diffs, completed commands collapsed to 1 row",
-	compact: "Compact - completed edit, command, and tool runs folded into summary rows",
+	balanced: "Balanced - folds read-only explorations; keeps edits, commands, and custom tools on 1 row (default)",
+	compact: "Compact - folds consecutive tool calls and textless thinking into 1 summary row",
+	grouped: "Grouped - groups consecutive calls separately by category (Explored, Edited, Ran)",
+	"diff-focus": "Diff Focus - inline edit/write diffs open, completed commands collapsed to 1 row",
+	detailed: "Detailed - inline diffs + 2 head + 3 tail command output previews",
 };
 
 const STYLE_CHOICES: Record<Exclude<DisplayStyle, "density">, string> = {
-	detailed: DENSITY_CHOICES.detailed,
-	"diff-focus": DENSITY_CHOICES["diff-focus"],
+	balanced: DENSITY_CHOICES.balanced,
 	compact: DENSITY_CHOICES.compact,
+	grouped: DENSITY_CHOICES.grouped,
+	"diff-focus": DENSITY_CHOICES["diff-focus"],
+	detailed: DENSITY_CHOICES.detailed,
 	claude: "Claude - legacy grouped exploration rows",
 	codex: "Codex - legacy explored groups and output tails",
 	off: "Off - restore Pi's native UI",
 };
+
+function isToolDensityValue(value: DisplayStyle): value is ToolDensity {
+	return (TOOL_DENSITIES as readonly string[]).includes(value);
+}
 
 export interface SessionStyleOverride {
 	style: DisplayStyle;
@@ -66,6 +74,22 @@ export interface SessionStyleOverride {
 }
 
 const SESSION_OVERRIDE_KEY = Symbol.for("conarti.pi-ui.tool-style-override.v1");
+const LIVE_DENSITY_LISTENER_KEY = Symbol.for("conarti.pi-ui.live-density-listener.v1");
+
+type LiveDensityListener = (preset: ToolDensity) => void;
+
+export function setLiveToolDensityListener(listener: LiveDensityListener | undefined): void {
+	(globalThis as Record<symbol, LiveDensityListener | undefined>)[LIVE_DENSITY_LISTENER_KEY] = listener;
+}
+
+/**
+ * Применяет пресет `Tool Density` на лету (например, при переключении из Command Palette)
+ * поверх активного `ToolRuntime` без перезагрузки сессии.
+ */
+export function notifyLiveToolDensityChange(preset: ToolDensity): void {
+	const listener = (globalThis as Record<symbol, LiveDensityListener | undefined>)[LIVE_DENSITY_LISTENER_KEY];
+	listener?.(preset);
+}
 
 export function getSessionStyleOverride(): SessionStyleOverride | undefined {
 	return (globalThis as Record<symbol, SessionStyleOverride | undefined>)[SESSION_OVERRIDE_KEY];
@@ -79,7 +103,7 @@ export function loadEffectiveConfig(cwd?: string, projectTrusted = false): Compa
 	const base = loadConfig(cwd, projectTrusted);
 	const override = getSessionStyleOverride();
 	if (!override) return base;
-	if (override.style === "detailed" || override.style === "diff-focus" || override.style === "compact") {
+	if (isToolDensityValue(override.style)) {
 		return { ...base, style: "density", density: override.style };
 	}
 	return {
@@ -130,12 +154,11 @@ export function saveStyle(path: string, style: DisplayStyle): void {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
 	mkdirSync(dirname(path), { recursive: true });
-	const payload: Record<string, unknown> =
-		style === "detailed" || style === "diff-focus" || style === "compact"
-			? { ...data, style, density: style }
-			: style === "density"
-				? { ...data, style: "density", density: "detailed" }
-				: { ...data, style };
+	const payload: Record<string, unknown> = isToolDensityValue(style)
+		? { ...data, style, density: style }
+		: style === "density"
+			? { ...data, style: "density", density: "balanced" }
+			: { ...data, style };
 	const temporary = join(dirname(path), `.compact-tools-${randomUUID()}.tmp`);
 	try {
 		writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600, flag: "wx" });
@@ -170,7 +193,7 @@ function formatStatus(config: CompactToolsConfig, ctx: ExtensionContext): string
 		`Thinking styling: ${config.thinking} · working override: ${config.working}`,
 		`Global: ${describePath(configPath(ctx.cwd, "global"))}`,
 		`Project: ${describePath(configPath(ctx.cwd, "project"))} (${ctx.isProjectTrusted() ? "trusted; overrides global" : "untrusted; ignored"})`,
-		"/density switches Detailed, Diff Focus, and Compact; /silent toggles quiet mode; Ctrl+O expands rows.",
+		"/density switches Balanced, Compact, Grouped, Diff Focus, and Detailed; /silent toggles quiet mode; Ctrl+O expands rows.",
 	].join("\n");
 }
 
@@ -212,7 +235,7 @@ function applySelection(
 		const effectiveConfig = loadConfig(ctx.cwd, trusted);
 		const effectiveLabel =
 			effectiveConfig.style === "density" ? effectiveConfig.density : effectiveConfig.style;
-		const requestedLabel = selection === "density" ? "detailed" : selection;
+		const requestedLabel = selection === "density" ? "balanced" : selection;
 		const where = targetScope === "project" ? "this project" : "global settings";
 
 		if (targetScope === "global" && effectiveLabel !== requestedLabel) {
@@ -246,26 +269,19 @@ function applySelection(
 		});
 	}
 
-	/* Без явного scope и без существующего файла настроек переключаем плотность только в памяти сессии. */
-	if (selection === "detailed" || selection === "diff-focus" || selection === "compact") {
+	/* Без явного scope и без существующего файла настроек переключаем плотность на лету в сессии. */
+	if (isToolDensityValue(selection)) {
 		setSessionStyleOverride({ style: "density", density: selection });
 	} else if (selection === "density") {
-		setSessionStyleOverride({ style: "density", density: "detailed" });
+		setSessionStyleOverride({ style: "density", density: "balanced" });
 	} else {
 		setSessionStyleOverride({ style: selection });
 	}
 
-	const label = selection === "density" ? "detailed" : selection;
+	const label = selection === "density" ? "balanced" : selection;
 	if (!reloads && applyStyle!(ctx.cwd, trusted, ctx)) {
 		ctx.ui.notify(`Switched to ${label}.`, "info");
 	}
-}
-
-function mapPresetToLiveDensity(preset: ToolDensityPreset): ToolDensity {
-	if (preset === "detailed" || preset === "diff-focus" || preset === "compact") {
-		return preset;
-	}
-	return preset === "grouped" ? "compact" : "detailed";
 }
 
 export function registerDensityCommand(
@@ -331,13 +347,7 @@ export function registerDensityCommand(
 			if (explicitScope !== "project") {
 				updatePiUiUserConfig({ toolDensity: preset });
 			}
-			await applySelection(
-				mapPresetToLiveDensity(preset),
-				explicitScope,
-				ctx,
-				applyStyle,
-				"density",
-			);
+			await applySelection(preset, explicitScope, ctx, applyStyle, "density");
 		},
 	});
 }

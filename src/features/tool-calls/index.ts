@@ -16,6 +16,7 @@ import {
 	loadEffectiveConfig,
 	registerCompactToolsCommand,
 	registerDensityCommand,
+	setLiveToolDensityListener,
 	setSessionStyleOverride,
 } from "./command.ts";
 import { clearRowResolver, installToolRowPatch, setRowResolver, type RowRenderers, type ToolRow } from "./custom.ts";
@@ -62,10 +63,12 @@ import { chromePainter, completionPainter, paintIndicator } from "./palette.ts";
 import { ProgressController } from "./progress.ts";
 import { ToolRuntime } from "./runtime.ts";
 import { SilentModeController } from "./silent.ts";
+import { resolveExternalToolSummary } from "./step-summaries.ts";
 import { attemptUI, createTranscriptRenderer, type UIFailure } from "./transcript.ts";
 import { ThinkingCycleController } from "./thinking.ts";
 import { ViewportKeeper } from "./viewport.ts";
 import {
+	CORE_RENDERER_TOOLS,
 	SUPPORTED_TOOL_SET,
 	toolExpandKey,
 	type CompactToolName,
@@ -80,6 +83,7 @@ const PREVIEW_DIFF_CONTEXT_LINES = 1;
 
 const runtime = new ToolRuntime();
 const nestedSummaries = new NestedCallSummaries();
+let activeModuleSessionContext: ExtensionContext | undefined;
 let registeredConfiguration: string | undefined;
 /**
  * Whether the last session found its directory trusted. A /reload rebuilds the
@@ -241,9 +245,14 @@ function renderRowCallContent(name: string, args: ToolArgs, theme: Theme, ctx: R
 			args,
 			theme,
 			state,
+			cwd: ctx.cwd ?? activeModuleSessionContext?.cwd ?? getActiveHostRuntime()?.ctx.cwd,
 			getStatus: () => callStatus(ctx, state),
 			syncRunning: (running) => {
 				runtime.syncIndicator(ctx.toolCallId, running, () => ctx.invalidate());
+			},
+			getStepSummary: () => {
+				const sm = (activeModuleSessionContext ?? getActiveHostRuntime()?.ctx)?.sessionManager;
+				return resolveExternalToolSummary(ctx.toolCallId, args, sm);
 			},
 			getNestedSummary:
 				name === "codemode"
@@ -462,7 +471,10 @@ function renderRowResult(
 	runtime.syncExpansion(state, ctx.expanded, name);
 	if (canReuseResult(state, result, options, theme, ctx)) return ctx.lastComponent;
 	const kind = rowKind(name);
-	const output = kind === "file" && !author ? getFileOutput(name, ctx.args, result, ctx.isError) : getTextResult(result);
+	const output =
+		kind === "file" && (!author || CORE_RENDERER_TOOLS.has(name))
+			? getFileOutput(name, ctx.args, result, ctx.isError)
+			: getTextResult(result);
 	const hasEditDiff = name === "edit" && getEditDiff(result).length > 0;
 	runtime.setResultAvailable(state, name, hasEditDiff || output.length > 0 || author !== undefined);
 	const nestedSummary = name === "codemode" && !options.isPartial ? nestedSummaries.format(ctx.toolCallId, theme, state.expanded === true) : undefined;
@@ -489,6 +501,7 @@ function renderRowResult(
 			author,
 			nestedSummary,
 			previousWriteContent: name === "write" ? runtime.writeBaseline(ctx.toolCallId) : undefined,
+			showImages: ctx.showImages,
 		});
 	} else if (isCodex()) {
 		component = renderCodexResult({
@@ -603,8 +616,18 @@ function builtinContext(ctx: RenderContext): RenderContext {
 function resolveCustomRow(row: ToolRow): RowRenderers | undefined {
 	if (runtime.config.style === "off") return undefined;
 	const customTools = runtime.config.custom_tools;
-	if (SUPPORTED_TOOL_SET.has(row.toolName) && (!row.toolDefinition || compactRendererDefinitions.has(row.toolDefinition) || (row.toolDefinition.renderResult && compactRendererDefinitions.has(row.toolDefinition.renderResult)) || !hasAuthorRenderers(row.toolName, row.toolDefinition))) {
+	const isCoreBuiltin = SUPPORTED_TOOL_SET.has(row.toolName) && CORE_RENDERER_TOOLS.has(row.toolName);
+	if (
+		SUPPORTED_TOOL_SET.has(row.toolName) &&
+		(isCoreBuiltin ||
+			!row.toolDefinition ||
+			compactRendererDefinitions.has(row.toolDefinition) ||
+			(row.toolDefinition.renderResult && compactRendererDefinitions.has(row.toolDefinition.renderResult)) ||
+			!hasAuthorRenderers(row.toolName, row.toolDefinition))
+	) {
 		if (!runtime.config.tools.includes(row.toolName as CompactToolName)) return undefined;
+		/* Для ключевых инструментов даже при наличии провайдерской обёртки рендерера
+		   приоритет всегда за нативным представлением @conarti/pi-ui. */
 		const renderers: RowRenderers = {
 			renderCall: (args, theme, ctx) => renderRowCall(row.toolName, asToolArgs(args), theme, builtinContext(ctx as RenderContext)),
 			renderResult: (result, options, theme, ctx) => renderRowResult(row.toolName, result, options, theme, builtinContext(ctx as RenderContext)),
@@ -613,19 +636,13 @@ function resolveCustomRow(row: ToolRow): RowRenderers | undefined {
 		compactRendererDefinitions.add(renderers.renderResult);
 		return renderers;
 	}
-	const isBuiltInCodemode =
-		row.toolName === "codemode" &&
-		!customTools.exclude.includes("codemode") &&
-		(!row.toolDefinition ||
-			compactRendererDefinitions.has(row.toolDefinition) ||
-			(row.toolDefinition.renderResult !== undefined &&
-				compactRendererDefinitions.has(row.toolDefinition.renderResult)) ||
-			!hasAuthorRenderers("codemode", row.toolDefinition));
-	if (!isBuiltInCodemode && (!customTools.enabled || customTools.exclude.includes(row.toolName))) {
+	const isCoreCodemode =
+		row.toolName === "codemode" && !customTools.exclude.includes("codemode");
+	if (!isCoreCodemode && (!customTools.enabled || customTools.exclude.includes(row.toolName))) {
 		return undefined;
 	}
 	const renderers = createCustomRenderers(row.toolName, row.toolDefinition);
-	if (isBuiltInCodemode) {
+	if (isCoreCodemode) {
 		compactRendererDefinitions.add(renderers);
 		compactRendererDefinitions.add(renderers.renderResult);
 	}
@@ -849,6 +866,13 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 	};
 	registerDensityCommand(pi, () => runtime.config, handleLiveSwitch);
 	registerCompactToolsCommand(pi, () => runtime.config, handleLiveSwitch);
+	setLiveToolDensityListener((preset) => {
+		setSessionStyleOverride({ style: "density", density: preset });
+		const activeCtx = sessionContext ?? getActiveHostRuntime()?.ctx;
+		if (activeCtx) {
+			handleLiveSwitch(activeCtx.cwd, activeCtx.isProjectTrusted(), activeCtx);
+		}
+	});
 	// Configure UI routing before Pi rebuilds transcript rows. Tool declarations
 	// and the active loadout must remain exactly as the host selected them.
 	const cwd = process.cwd();
@@ -858,6 +882,7 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 		const failures: UIFailure[] = [];
 		detachUI({ restoreNative: true }, failures);
 		sessionContext = ctx;
+		activeModuleSessionContext = ctx;
 		if (event.reason !== "reload") {
 			setSessionStyleOverride(undefined);
 			runtime.clearTimings();
@@ -931,6 +956,8 @@ export function registerToolCallsFeature(pi: ExtensionAPI): void {
 		detachUI({ clearTimings: event.reason !== "reload" }, failures);
 		reportFailures(sessionContext, failures);
 		sessionContext = undefined;
+		activeModuleSessionContext = undefined;
+		setLiveToolDensityListener(undefined);
 		if (event.reason !== "reload") {
 			setSessionStyleOverride(undefined);
 			nestedSummaries.clear();
