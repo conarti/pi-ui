@@ -26,7 +26,9 @@ import {
 
 function readComposerBorderRgb(harness: InteractiveHarness): [number, number, number] {
 	const topRow = findComposerTopRow(harness);
-	const fg = harness.screen().cellAt(topRow, 0)?.fg;
+	const screen = harness.screen();
+	const col = screen.cellAt(topRow, 2)?.char === "╭" ? 2 : 0;
+	const fg = screen.cellAt(topRow, col)?.fg;
 	if (!fg || fg.kind !== "rgb") {
 		throw new Error("Expected truecolor RGB foreground on composer top-left corner");
 	}
@@ -178,10 +180,10 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 
 		const emptyScreen = harness.screen();
 		const topRow = findComposerTopRow(harness);
-		expect(emptyScreen.rowText(topRow)).toBe(`╭${"─".repeat(78)}╮`);
-		expect(emptyScreen.rowText(topRow + 1).startsWith("│ › Ask or describe a task…")).toBe(true);
-		expect(emptyScreen.rowText(topRow + 1).endsWith(" │")).toBe(true);
-		expect(emptyScreen.rowText(topRow + 2)).toBe(`╰${"─".repeat(78)}╯`);
+		expect(emptyScreen.rowText(topRow)).toBe(`  ╭${"─".repeat(74)}╮  `);
+		expect(emptyScreen.rowText(topRow + 1).startsWith("  │ › Ask or describe a task…")).toBe(true);
+		expect(emptyScreen.rowText(topRow + 1).endsWith(" │  ")).toBe(true);
+		expect(emptyScreen.rowText(topRow + 2)).toBe(`  ╰${"─".repeat(74)}╯  `);
 
 		await harness.typeText("Сделай рефакторинг");
 		await harness.pressKey("\x1b[13;2u");
@@ -189,13 +191,13 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 
 		const typedScreen = harness.screen();
 		const typedTop = findComposerTopRow(harness);
-		expect(typedScreen.rowText(typedTop)).toBe(`╭${"─".repeat(78)}╮`);
-		expect(typedScreen.rowText(typedTop + 1).startsWith("│ › Сделай рефакторинг")).toBe(true);
-		expect(typedScreen.rowText(typedTop + 1).endsWith(" │")).toBe(true);
+		expect(typedScreen.rowText(typedTop)).toBe(`  ╭${"─".repeat(74)}╮  `);
+		expect(typedScreen.rowText(typedTop + 1).startsWith("  │ › Сделай рефакторинг")).toBe(true);
+		expect(typedScreen.rowText(typedTop + 1).endsWith(" │  ")).toBe(true);
 		expect(typedScreen.rowText(typedTop + 1)).not.toContain("Ask or describe a task");
-		expect(typedScreen.rowText(typedTop + 2).startsWith("│   второй строки")).toBe(true);
-		expect(typedScreen.rowText(typedTop + 2).endsWith(" │")).toBe(true);
-		expect(typedScreen.rowText(typedTop + 3)).toBe(`╰${"─".repeat(78)}╯`);
+		expect(typedScreen.rowText(typedTop + 2).startsWith("  │   второй строки")).toBe(true);
+		expect(typedScreen.rowText(typedTop + 2).endsWith(" │  ")).toBe(true);
+		expect(typedScreen.rowText(typedTop + 3)).toBe(`  ╰${"─".repeat(74)}╯  `);
 		expect(typedScreen.text()).not.toContain("⌥↵");
 		expect(typedScreen.text()).not.toContain("отправить");
 
@@ -228,7 +230,7 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 			harness
 				.screen()
 				.rowText(findComposerTopRow(harness) + 1)
-				.startsWith("│ › Ask or describe a task…"),
+				.startsWith("  │ › Ask or describe a task…"),
 		).toBe(true);
 	});
 
@@ -325,8 +327,8 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		const darkScreen = harness.screen();
 		const topBorderRow = findComposerTopRow(harness);
 		const plainTop = darkScreen.rowText(topBorderRow);
-		expect(plainTop.startsWith("╭")).toBe(true);
-		expect(plainTop.endsWith("╮")).toBe(true);
+		expect(plainTop.startsWith("  ╭")).toBe(true);
+		expect(plainTop.endsWith("╮  ")).toBe(true);
 		expect(plainTop).toContain(" Plan ");
 		expect(plainTop).toContain(" Plan (1) ");
 		expect(/\p{Extended_Pictographic}/u.test(plainTop)).toBe(false);
@@ -362,7 +364,7 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		editor.setText("abcdef");
 		harness.flushFrame();
 		const bodyRow = findComposerTopRow(harness) + 1;
-		await harness.mouseClick(4 + 3, bodyRow);
+		await harness.mouseClick(6 + 3, bodyRow);
 		await harness.typeText("X");
 		expect(editor.getText()).toBe("abcXdef");
 
@@ -488,7 +490,7 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		harness.flushFrame(true);
 		expect(wrapperRenderCalls).toBeGreaterThanOrEqual(1);
 		const composerRow = harness.screen().rowText(findComposerTopRow(harness) + 1);
-		expect(composerRow.endsWith(" │")).toBe(true);
+		expect(composerRow.endsWith(" │  ")).toBe(true);
 
 		const wf = getSessionWorkflow();
 		expect(wf.mode).toBe("always-approve");

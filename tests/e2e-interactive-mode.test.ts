@@ -403,16 +403,16 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 
 		await harness.mouseWheel("up", 30, 10, 5);
 		const scrolledTopScreen = harness.screen();
-		const topChromeRows = [1, 2, 3].map((r) => scrolledTopScreen.rowText(r)).join("\n");
+		const topChromeRows = [3, 4, 5].map((r) => scrolledTopScreen.rowText(r)).join("\n");
 		expect(topChromeRows).toContain("› Design Turn One cache strategy");
 
-		const railColStart = harness.width - 3;
-		const railColEnd = harness.width - 1;
+		const railColStart = harness.width - 2;
+		const railColEnd = harness.width;
 		let secondTickRow = -1;
 		const tickRows: number[] = [];
-		for (let r = 0; r < harness.height - 6; r += 1) {
+		for (let r = 3; r < harness.height - 6; r += 1) {
 			const slice = scrolledTopScreen.sliceText(r, railColStart, railColEnd);
-			if (slice === " ─" || slice === "──") {
+			if (slice === " ─" || slice === "━━") {
 				tickRows.push(r);
 			}
 		}
@@ -478,7 +478,7 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(serializedChipTurn).toContain('"type":"image"');
 
 		await harness.mouseWheel("up", 30, 10, 2);
-		const stickyBand = [1, 2, 3].map((r) => harness!.screen().rowText(r)).join("\n");
+		const stickyBand = [3, 4, 5].map((r) => harness!.screen().rowText(r)).join("\n");
 		expect(stickyBand).toContain("[📋 Pasted #3 · 4 lines]");
 		expect(stickyBand).not.toContain("log-line-4");
 		await harness.mouseWheel("down", 30, 10, 6);
@@ -792,11 +792,11 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(runtime.viewportSlots?.topSlot).toBeDefined();
 		expect(runtime.viewportSlots?.rightRail).toBeDefined();
 
-		const railStart = harness.width - 3;
-		const railEnd = harness.width - 1;
+		const railStart = harness.width - 2;
+		const railEnd = harness.width;
 		const hasRailAfterSwitch = Array.from({ length: harness.height - 6 }, (_, r) =>
-			harness!.screen().sliceText(r, railStart, railEnd),
-		).some((s) => /[▲▼─]/.test(s));
+			harness!.screen().sliceText(r + 3, railStart, railEnd),
+		).some((s) => /[▲▼━─]/.test(s));
 		expect(hasRailAfterSwitch).toBe(true);
 
 		const targetAfterSwitch = harness.screen().findText("Selectable across mode switch");
@@ -829,7 +829,7 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(harness.session.getActiveToolNames()).not.toContain("edit");
 
 		await harness.mouseWheel("up", 30, 10, 10);
-		const topAfterReload = [1, 2, 3].map((r) => harness!.screen().rowText(r)).join("\n");
+		const topAfterReload = [3, 4, 5].map((r) => harness!.screen().rowText(r)).join("\n");
 		expect(topAfterReload).toContain("Inspect [📋 Pasted #1 · 4 lines]");
 		expect(topAfterReload).not.toContain("persist-log-4");
 		await harness.mouseWheel("down", 30, 10, 14);
@@ -866,14 +866,15 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 
 		await harness.submitInput("Show 256color card");
 		const headingHit = harness.screen().findText("Heading Three");
-		const codeHeaderHit = harness.screen().findText("ts");
+		const codeBodyHit = harness.screen().findText("export const answer = 42;");
 		expect(headingHit).toBeDefined();
-		expect(codeHeaderHit).toBeDefined();
+		expect(codeBodyHit).toBeDefined();
+		const codeHeaderRow = codeBodyHit!.row - 1;
 
-		await harness.mouseMove(codeHeaderHit!.col + 1, codeHeaderHit!.row);
+		await harness.mouseMove(codeBodyHit!.col + 1, codeHeaderRow);
 		const hoveredFrame = harness.renderFrame();
 		const headingAnsi = hoveredFrame[headingHit!.row] ?? "";
-		const codeHeaderAnsi = hoveredFrame[codeHeaderHit!.row] ?? "";
+		const codeHeaderAnsi = hoveredFrame[codeHeaderRow] ?? "";
 		expect(headingAnsi).toContain("\x1b[38;5;");
 		expect(headingAnsi).not.toContain("\x1b[38;2;");
 		expect(codeHeaderAnsi).toContain("\x1b[48;5;");

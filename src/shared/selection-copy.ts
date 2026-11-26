@@ -1,0 +1,466 @@
+import type { Theme } from "@earendil-works/pi-coding-agent";
+import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	getThemeSurfacePalette,
+	parseAnsiColorRgb,
+	type RgbTuple,
+} from "./ansi.ts";
+
+export interface SelectedTranscriptLine {
+	/** Полная исходная ANSI-строка документа до обрезки по колонкам выделения. */
+	readonly fullLine: string;
+	/** Выделенный ANSI-фрагмент строки. */
+	readonly selectedAnsi: string;
+	/** Начальная и конечная колонки выделения на этой строке. */
+	readonly startCol: number;
+	readonly endCol: number;
+	/** Ширина контейнера контента (колонок) для точного распознавания мягкого переноса. */
+	readonly contentWidth?: number;
+}
+
+export interface ExtractCleanSelectionOptions {
+	/** Активная тема для распознавания `mdCode` и фонов карточек. */
+	readonly theme?: Theme;
+}
+
+type SurfaceKind = "code-header" | "code-body" | "user-card" | "plain";
+
+interface ParsedItem {
+	readonly kind: "blank" | "code" | "blockquote" | "prose";
+	readonly text: string;
+	readonly screenWidth: number;
+	readonly wrapWidth: number;
+}
+
+const COLLAPSED_THINKING_RE =
+	/^(?:[✦◆❙┃•]\s*(?:›\s*)?)?(?:Thought(?:\s+for\s+\S+(?:\s+\S+)?)?|Thinking…)(?:\s+›)?$/u;
+const COLLAPSED_TOOL_RE =
+	/^[✦◆•]\s+(?:Read|Edit|Edited|Write|Wrote|Run|Ran|Explored|Search|Searched|Find|Found|List|Listed|Bash|PowerShell|Codemode|Batch|Called|Running)\b/u;
+const RESPONSE_METRICS_RE =
+	/^Worked for\s+\S+(?:\s+\S+)?(?:\s+·.*)?(?:\s+\d{1,2}\s+[A-Z][a-z]{2}(?:\s+\d{4})?,\s*\d{2}:\d{2}|\s+\d{2}:\d{2})?$/u;
+const COPY_ACTION_ROW_RE =
+	/^(?:(?:[a-z0-9_+#.-]+\s+)?(?:·\s*)?(?:\[?Copy\]?|✓\s*Copied)|\[Copy TSV\]\s+\[Copy CSV\]\s+\[Copy MD\])$/i;
+const BOX_HORIZONTAL_BORDER_RE = /^[╭╰├┌└][─┬┴┼]+[╮╯┤┐┘]$/u;
+const USER_CARD_TRAILING_TIME_RE =
+	/\s{2,}(?:\d{1,2}\s+[A-Z][a-z]{2}(?:\s+\d{4})?,\s*\d{2}:\d{2}|\d{2}:\d{2})$/u;
+const STRUCTURAL_LINE_START_RE = /^(?:#{1,6}\s|(?:[-*+•]|\d+[.)])\s|[│|┌├└─┬┼┴]|[-─═_*]{3,}$)/u;
+
+function rgbMatches(a: RgbTuple | undefined, b: RgbTuple | undefined, tolerance = 14): boolean {
+	if (!a || !b) return false;
+	return (
+		Math.abs(a[0] - b[0]) <= tolerance &&
+		Math.abs(a[1] - b[1]) <= tolerance &&
+		Math.abs(a[2] - b[2]) <= tolerance
+	);
+}
+
+function extractFirstBgRgb(ansiLine: string): RgbTuple | undefined {
+	if (!ansiLine.includes("\x1b[")) return undefined;
+	const match = /\x1b\[48;(?:2;\d+;\d+;\d+|5;\d+)m/.exec(ansiLine);
+	return match ? parseAnsiColorRgb(match[0]) : undefined;
+}
+
+function detectRowSurfaceKind(fullLine: string, theme?: Theme): SurfaceKind {
+	const bgRgb = extractFirstBgRgb(fullLine);
+	if (!bgRgb) return "plain";
+
+	const palette = getThemeSurfacePalette(theme);
+	if (rgbMatches(bgRgb, palette.codeBodyBg)) {
+		return "code-body";
+	}
+	if (
+		rgbMatches(bgRgb, palette.codeHeaderBg) ||
+		rgbMatches(bgRgb, palette.codeHeaderActiveBg)
+	) {
+		return "code-header";
+	}
+
+	const userCandidates: RgbTuple[] = [
+		[27, 35, 50],
+		[33, 43, 60],
+		[237, 243, 252],
+		[228, 238, 252],
+	];
+	const themeUserBg = parseAnsiColorRgb(
+		(theme as { getBgAnsi?: (token: string) => string } | undefined)?.getBgAnsi?.("userMessageBg"),
+	);
+	if (themeUserBg) userCandidates.push(themeUserBg);
+
+	for (const candidate of userCandidates) {
+		if (rgbMatches(bgRgb, candidate)) {
+			return "user-card";
+		}
+	}
+	return "plain";
+}
+
+export function isCollapsedChromeRow(plainTrimmed: string): boolean {
+	if (!plainTrimmed) return false;
+	return (
+		COLLAPSED_THINKING_RE.test(plainTrimmed) ||
+		COLLAPSED_TOOL_RE.test(plainTrimmed) ||
+		RESPONSE_METRICS_RE.test(plainTrimmed) ||
+		COPY_ACTION_ROW_RE.test(plainTrimmed) ||
+		BOX_HORIZONTAL_BORDER_RE.test(plainTrimmed)
+	);
+}
+
+function wrapInlineCodeSegment(rawCode: string): string {
+	const match = /^(\s*)(.*?)(\s*)$/s.exec(rawCode);
+	const lead = match?.[1] ?? "";
+	const core = match?.[2] ?? "";
+	const tail = match?.[3] ?? "";
+	if (!core) return rawCode;
+	if (core.includes("`")) {
+		const needsPad = core.startsWith("`") || core.endsWith("`");
+		return `${lead}\`\`${needsPad ? ` ${core} ` : core}\`\`${tail}`;
+	}
+	return `${lead}\`${core}\`${tail}`;
+}
+
+/**
+ * Восстанавливает обратные кавычки `` `inline code` `` по SGR-токену `mdCode` активной темы,
+ * игнорируя цветные ссылки (подчёркнутые) и строки с фоном карточек/кода.
+ */
+export function restoreInlineCodeBackticks(
+	ansiText: string,
+	mdCodeRgb: RgbTuple | undefined,
+): string {
+	if (!mdCodeRgb || !ansiText.includes("\x1b[")) {
+		return stripTerminalSequences(ansiText);
+	}
+
+	let currentFg: RgbTuple | undefined;
+	let hasBg = false;
+	let underlined = false;
+	let inCode = false;
+	let codeBuf = "";
+	let out = "";
+
+	const flushCode = () => {
+		if (!codeBuf) return;
+		out += wrapInlineCodeSegment(codeBuf);
+		codeBuf = "";
+	};
+
+	const syncCodeState = () => {
+		const nextInCode = Boolean(currentFg && rgbMatches(currentFg, mdCodeRgb, 6) && !hasBg && !underlined);
+		if (inCode && !nextInCode) {
+			flushCode();
+		}
+		inCode = nextInCode;
+	};
+
+	let i = 0;
+	while (i < ansiText.length) {
+		if (ansiText.charCodeAt(i) === 0x1b) {
+			const next = ansiText[i + 1];
+			if (next === "[") {
+				const csi = /^\x1b\[([0-9;:?<=>]*)([A-Za-z])/.exec(ansiText.slice(i));
+				if (csi) {
+					if (csi[2] === "m" && !/^[?<=>]/.test(csi[1] ?? "")) {
+						const raw = csi[1] ?? "";
+						const tokens = raw.length === 0 ? ["0"] : raw.split(";");
+						let k = 0;
+						while (k < tokens.length) {
+							const tok = tokens[k] ?? "";
+							const num = Number(tok);
+							if (num === 0) {
+								currentFg = undefined;
+								hasBg = false;
+								underlined = false;
+								k += 1;
+							} else if (num === 4) {
+								underlined = true;
+								k += 1;
+							} else if (num === 24) {
+								underlined = false;
+								k += 1;
+							} else if (num === 39) {
+								currentFg = undefined;
+								k += 1;
+							} else if (num === 49) {
+								hasBg = false;
+								k += 1;
+							} else if ((num >= 40 && num <= 47) || (num >= 100 && num <= 107)) {
+								hasBg = true;
+								k += 1;
+							} else if (num === 38) {
+								const mode = Number(tokens[k + 1] ?? -1);
+								if (mode === 5 && tokens[k + 2] !== undefined) {
+									currentFg = parseAnsiColorRgb(`\x1b[38;5;${tokens[k + 2]}m`);
+									k += 3;
+								} else if (
+									mode === 2 &&
+									tokens[k + 2] !== undefined &&
+									tokens[k + 3] !== undefined &&
+									tokens[k + 4] !== undefined
+								) {
+									currentFg = [
+										Number(tokens[k + 2]),
+										Number(tokens[k + 3]),
+										Number(tokens[k + 4]),
+									];
+									k += 5;
+								} else {
+									k += 1;
+								}
+							} else if (num === 48) {
+								const mode = Number(tokens[k + 1] ?? -1);
+								hasBg = true;
+								if (mode === 5 && tokens[k + 2] !== undefined) {
+									k += 3;
+								} else if (mode === 2 && tokens[k + 4] !== undefined) {
+									k += 5;
+								} else {
+									k += 1;
+								}
+							} else {
+								k += 1;
+							}
+						}
+						syncCodeState();
+					}
+					i += csi[0].length;
+					continue;
+				}
+			} else if (next === "]") {
+				const osc = /^\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/.exec(ansiText.slice(i));
+				if (osc) {
+					i += osc[0].length;
+					continue;
+				}
+			} else if (next === "_") {
+				const apc = /^\x1b_[^\x1b]*\x1b\\/.exec(ansiText.slice(i));
+				if (apc) {
+					i += apc[0].length;
+					continue;
+				}
+			}
+			i += Math.min(2, ansiText.length - i);
+			continue;
+		}
+
+		const nextEsc = ansiText.indexOf("\x1b", i);
+		const plainChunk = nextEsc === -1 ? ansiText.slice(i) : ansiText.slice(i, nextEsc);
+		if (inCode) {
+			codeBuf += plainChunk;
+		} else {
+			out += plainChunk;
+		}
+		i = nextEsc === -1 ? ansiText.length : nextEsc;
+	}
+
+	flushCode();
+	return out;
+}
+
+function stripFrameAndRailPrefix(text: string): { text: string; isBlockquote: boolean } {
+	let s = text.trimEnd();
+	/* Симметричная рамка карточек/попапов `│ ... │` */
+	const framed = /^\s*│\s?(.*?)\s?│\s*$/u.exec(s);
+	if (framed) {
+		return { text: framed[1]!.trim(), isBlockquote: false };
+	}
+	/* Цитаты и декоративные вертикальные полосы `│ ` / `▎ ` */
+	const quoted = /^\s*[│▎]\s(.*)$/u.exec(s);
+	if (quoted) {
+		return { text: quoted[1]!.trimEnd(), isBlockquote: true };
+	}
+	s = s.replace(/^\s+/u, "");
+	return { text: s, isBlockquote: false };
+}
+
+function dedentCodeBlock(lines: readonly string[]): string[] {
+	let minIndent = Number.POSITIVE_INFINITY;
+	for (const line of lines) {
+		if (!line.trim()) continue;
+		const leadMatch = /^(\s*)/.exec(line);
+		const lead = leadMatch ? leadMatch[1]!.length : 0;
+		if (lead < minIndent) minIndent = lead;
+	}
+	if (!Number.isFinite(minIndent) || minIndent <= 0) {
+		return [...lines];
+	}
+	return lines.map((line) => (line.trim() ? line.slice(minIndent) : ""));
+}
+
+function shouldUnwrapProsePair(prev: ParsedItem, curr: ParsedItem): boolean {
+	if (prev.kind !== curr.kind) return false;
+	if (prev.kind !== "prose" && prev.kind !== "blockquote") return false;
+	if (!prev.text || !curr.text) return false;
+	if (STRUCTURAL_LINE_START_RE.test(curr.text)) return false;
+	if (/^[│|┌├└─┬┼┴]|^[-─═_*]{3,}$/u.test(prev.text)) return false;
+
+	const firstWord = curr.text.split(/\s+/u)[0] ?? "";
+	const firstWordPlainWidth = visibleWidth(firstWord.replace(/`/g, ""));
+	if (firstWordPlainWidth <= 0) return false;
+
+	return prev.screenWidth + 1 + firstWordPlainWidth > prev.wrapWidth - 1;
+}
+
+function joinWrappedText(prevText: string, currText: string, prevScreenWidth: number, wrapWidth: number): string {
+	/* Склейка одного inline-code спана, перенесённого терминалом на следующую строку */
+	if (prevText.endsWith("`") && currText.startsWith("`")) {
+		const sep = prevScreenWidth >= wrapWidth && !/\s/u.test(prevText) ? "" : " ";
+		return `${prevText.slice(0, -1)}${sep}${currText.slice(1)}`;
+	}
+	if (prevScreenWidth >= wrapWidth && !/\s/u.test(prevText)) {
+		return `${prevText}${currText}`;
+	}
+	return `${prevText} ${currText}`;
+}
+
+/**
+ * Извлекает чистый текст из выделенных строк транскрипта:
+ * - пропускает свёрнутые строки `✦` / `Thought for …` / `Worked for …` и шапки код-блоков при многострочном выделении;
+ * - восстанавливает `` `inline code` `` обратные кавычки;
+ * - склеивает мягкие переносы прозы без рамок и левых отступов, сохраняя абзацы, явные переносы и переносы строк в коде.
+ */
+export function extractCleanSelectionText(
+	lines: readonly SelectedTranscriptLine[],
+	options?: ExtractCleanSelectionOptions,
+): string {
+	if (lines.length === 0) return "";
+
+	const theme = options?.theme;
+	const mdCodeAnsi = (
+		theme as { getFgAnsi?: (token: string) => string } | undefined
+	)?.getFgAnsi?.("mdCode");
+	const mdCodeRgb = parseAnsiColorRgb(mdCodeAnsi);
+
+	const nonEmptyInputCount = lines.filter(
+		(entry) => stripTerminalSequences(entry.selectedAnsi).trim().length > 0,
+	).length;
+	const isMultiLineSelection = nonEmptyInputCount > 1 || lines.length > 1;
+
+	const parsed: ParsedItem[] = [];
+
+	for (const entry of lines) {
+		const surface = detectRowSurfaceKind(entry.fullLine, theme);
+		const plainSelected = stripTerminalSequences(entry.selectedAnsi);
+		const plainTrimmed = plainSelected.trim();
+		const fullPlainTrimmed = stripTerminalSequences(entry.fullLine).trim();
+
+		if (!plainTrimmed) {
+			parsed.push({ kind: "blank", text: "", screenWidth: 0, wrapWidth: 0 });
+			continue;
+		}
+
+		if (isMultiLineSelection) {
+			if (surface === "code-header") continue;
+			if (isCollapsedChromeRow(fullPlainTrimmed) && isCollapsedChromeRow(plainTrimmed)) {
+				continue;
+			}
+			if (surface === "user-card" && (plainTrimmed === "Copy" || plainTrimmed === "✓ Copied")) {
+				continue;
+			}
+		}
+
+		const contentW = entry.contentWidth ?? Math.max(40, visibleWidth(entry.fullLine));
+
+		if (surface === "code-body") {
+			const strippedCode = plainSelected
+				.replace(/^\s*▎\s?/u, "")
+				.trimEnd();
+			parsed.push({
+				kind: "code",
+				text: strippedCode,
+				screenWidth: visibleWidth(strippedCode),
+				wrapWidth: contentW,
+			});
+			continue;
+		}
+
+		if (surface === "user-card") {
+			let cardText = plainSelected.trimEnd().replace(/^\s+/u, "");
+			if (entry.startCol <= 6 && cardText.startsWith("› ")) {
+				cardText = cardText.slice(2);
+			}
+			cardText = cardText.replace(USER_CARD_TRAILING_TIME_RE, "").trimEnd();
+			if (!cardText) {
+				parsed.push({ kind: "blank", text: "", screenWidth: 0, wrapWidth: 0 });
+				continue;
+			}
+			const wrapW = Math.max(12, contentW - 4 - 4 - 9);
+			parsed.push({
+				kind: "prose",
+				text: cardText,
+				screenWidth: visibleWidth(cardText),
+				wrapWidth: wrapW,
+			});
+			continue;
+		}
+
+		const withBackticks = restoreInlineCodeBackticks(entry.selectedAnsi, mdCodeRgb);
+		const cleaned = stripFrameAndRailPrefix(withBackticks);
+		const plainCleaned = stripFrameAndRailPrefix(plainSelected);
+		if (!cleaned.text) {
+			parsed.push({ kind: "blank", text: "", screenWidth: 0, wrapWidth: 0 });
+			continue;
+		}
+
+		const leftPad = Math.max(
+			0,
+			stripTerminalSequences(entry.fullLine).length -
+				stripTerminalSequences(entry.fullLine).trimStart().length,
+		);
+		const horizontalPad = leftPad >= 4 ? leftPad * 2 : 4;
+		const quoteExtra = cleaned.isBlockquote ? 2 : 0;
+		const wrapW = Math.max(16, contentW - horizontalPad - quoteExtra);
+
+		parsed.push({
+			kind: cleaned.isBlockquote ? "blockquote" : "prose",
+			text: cleaned.text,
+			screenWidth: visibleWidth(plainCleaned.text),
+			wrapWidth: wrapW,
+		});
+	}
+
+	const outputBlocks: string[] = [];
+	let i = 0;
+
+	while (i < parsed.length) {
+		const item = parsed[i]!;
+		if (item.kind === "blank") {
+			i += 1;
+			continue;
+		}
+
+		if (item.kind === "code") {
+			const codeChunk: string[] = [];
+			while (i < parsed.length && parsed[i]!.kind === "code") {
+				codeChunk.push(parsed[i]!.text);
+				i += 1;
+			}
+			outputBlocks.push(dedentCodeBlock(codeChunk).join("\n"));
+			continue;
+		}
+
+		const proseLines: string[] = [item.text];
+		let prev = item;
+		i += 1;
+
+		while (i < parsed.length) {
+			const curr = parsed[i]!;
+			if (curr.kind === "blank" || curr.kind === "code") break;
+			if (shouldUnwrapProsePair(prev, curr)) {
+				const lastIdx = proseLines.length - 1;
+				proseLines[lastIdx] = joinWrappedText(
+					proseLines[lastIdx]!,
+					curr.text,
+					prev.screenWidth,
+					prev.wrapWidth,
+				);
+			} else {
+				proseLines.push(curr.text);
+			}
+			prev = curr;
+			i += 1;
+		}
+
+		outputBlocks.push(proseLines.join("\n"));
+	}
+
+	return outputBlocks.join("\n\n").trim();
+}

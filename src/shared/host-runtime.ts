@@ -15,11 +15,13 @@ import {
 	type TUI,
 } from "@earendil-works/pi-tui";
 import {
+	isCoveredByRenderedOverlay,
 	ViewportChromeCompositor,
 	type FullscreenShellContext,
 	type MountedViewportSlots,
 } from "./fullscreen-layout.ts";
 import { hasBlockingModalOverlay } from "./modal-card.ts";
+import { loadPiUiUserConfig } from "./pi-ui-config.ts";
 import {
 	beginHoverMovePass,
 	finishHoverMovePass,
@@ -332,12 +334,14 @@ function installViewportChromeHooks(): void {
 		"compositeScrollToEndIndicator",
 		"viewport.passthroughEndIndicator",
 		(self, args, original) => {
-			const base = original.apply(self, args) as string[];
 			const compositor = getCompositorMap().get(self);
-			if (!compositor) return base;
+			if (!compositor) return original.apply(self, args) as string[];
+			/* Подавляем нативный баннер «Jump to latest message» хоста и рисуем компактный кликабельный ▼ */
+			self.scrollToEndIndicatorRect = undefined;
+			const screen = args[0] as string[];
 			const layout = args[1] as { root?: any } | undefined;
 			const width = Number(args[2] ?? self.terminal?.columns ?? 80);
-			return compositor.compositeFrame(base, layout, width);
+			return compositor.compositeFrame(screen, layout, width);
 		},
 		["pi.grok-ui.hook.chat.timelineComposite"],
 	);
@@ -382,13 +386,79 @@ function installViewportChromeHooks(): void {
 		"dispatchMouseToLayout",
 		"viewport.blockChromeWheelPassthrough",
 		(self, args, original) => {
-			const event = args[0] as { type?: string; screenX?: number; screenY?: number } | undefined;
+			const event = args[0] as
+				| {
+						type?: string;
+						screenX?: number;
+						screenY?: number;
+						wheelDelta?: number;
+						button?: string;
+						shift?: boolean;
+						alt?: boolean;
+						ctrl?: boolean;
+				  }
+				| undefined;
 			if (event?.type === "wheel" && typeof event.screenX === "number" && typeof event.screenY === "number") {
+				const topmostModal = (
+					self as { getTopmostVisibleOverlay?: () => { component?: Component } | undefined }
+				).getTopmostVisibleOverlay?.();
+				if (topmostModal) {
+					const modalLayouts = (
+						self as {
+							renderedOverlayLayouts?: ReadonlyArray<{
+								entry: { component?: Component };
+								col: number;
+								row: number;
+								width: number;
+								height: number;
+							}>;
+						}
+					).renderedOverlayLayouts;
+					const layout = modalLayouts?.find((item) => item.entry === topmostModal);
+					const modalComp = topmostModal.component as
+						| { handleMouse?: (ev: unknown) => { handled?: boolean; render?: boolean } | undefined }
+						| undefined;
+					if (layout && typeof modalComp?.handleMouse === "function") {
+						const res = modalComp.handleMouse({
+							...event,
+							x: event.screenX - layout.col,
+							y: event.screenY - layout.row,
+							width: layout.width,
+							height: layout.height,
+						});
+						if (res?.render) {
+							self.requestRender?.();
+						}
+					}
+					return undefined;
+				}
+
+				if (!isCoveredByRenderedOverlay(self, event.screenX, event.screenY)) {
+					dismissTransientHoverPopups();
+				}
+
 				const compositor = getCompositorMap().get(self);
 				if (compositor?.isChromeHit(self, event.screenX, event.screenY)) {
 					return undefined;
 				}
 			}
+			return original.apply(self, args);
+		},
+	);
+
+	hookMethod(
+		altProto,
+		"routeWheel",
+		"viewport.wheelOverscrollContain",
+		(self, args, original) => {
+			const topmostModal = (
+				self as { getTopmostVisibleOverlay?: () => unknown }
+			).getTopmostVisibleOverlay?.();
+			if (topmostModal) {
+				/* overscroll = "contain": колесо при открытой модальной карточке не прокручивает ScrollView под ней */
+				return undefined;
+			}
+			dismissTransientHoverPopups();
 			return original.apply(self, args);
 		},
 	);
@@ -853,6 +923,10 @@ export async function acquireHostRuntime(
 			return;
 		}
 
+		(renderer as { setCopyOnSelect?: (enabled: boolean) => void }).setCopyOnSelect?.(
+			loadPiUiUserConfig().copyOnSelect,
+		);
+
 		if (!registeredSlotBuilder || !keybindings) {
 			healLegacyTranscriptPatches(scroll);
 			enablePointerMotionTracking(renderer);
@@ -887,7 +961,7 @@ export async function acquireHostRuntime(
 		const slots = registeredSlotBuilder(shellCtx);
 		currentViewportSlots = slots;
 
-		const compositor = new ViewportChromeCompositor(tui, scroll, slots);
+		const compositor = new ViewportChromeCompositor(tui, scroll, slots, layoutHost.layoutRoot, theme);
 		activeCompositor = compositor;
 		mountedRenderer = renderer;
 		getCompositorMap().set(renderer, compositor);

@@ -56,7 +56,8 @@ describe("conartiPiUi end-to-end InteractiveMode smoke", () => {
 			(layoutRoot as { entries?: Array<{ component: unknown }> }).entries ?? [];
 		expect(rootEntries.some((entry) => entry.component instanceof HStack)).toBe(false);
 		expect(runtime!.scroll).toBeInstanceOf(ScrollView);
-		expect(runtime!.scroll?.scrollbar).toBe("auto");
+		expect(runtime!.scroll?.scrollbar).toBe("hidden");
+		expect(runtime!.viewportSlots?.pinnedHeader).toBeDefined();
 		expect(runtime!.viewportSlots?.topSlot).toBeDefined();
 		expect(runtime!.viewportSlots?.rightRail).toBeDefined();
 
@@ -78,9 +79,9 @@ describe("conartiPiUi end-to-end InteractiveMode smoke", () => {
 
 		const bottomScreen = harness.screen();
 		let hasRailGlyph = false;
-		for (let r = 0; r < bottomScreen.height; r += 1) {
-			const railSlice = bottomScreen.sliceText(r, 117, 119);
-			if (/[●○▲▼│]/.test(railSlice)) {
+		for (let r = 3; r < bottomScreen.height; r += 1) {
+			const railSlice = bottomScreen.sliceText(r, 118, 120);
+			if (/[▲▼━─]/.test(railSlice)) {
 				hasRailGlyph = true;
 				break;
 			}
@@ -89,7 +90,7 @@ describe("conartiPiUi end-to-end InteractiveMode smoke", () => {
 
 		await harness.mouseWheel("up", 40, 10, 8);
 		const scrolledScreen = harness.screen();
-		const topRows = [0, 1, 2, 3].map((r) => scrolledScreen.rowText(r)).join("\n");
+		const topRows = [3, 4, 5].map((r) => scrolledScreen.rowText(r)).join("\n");
 		expect(topRows).toContain("First turn anchor question");
 
 		await harness.mouseWheel("down", 40, 10, 12);
@@ -98,21 +99,22 @@ describe("conartiPiUi end-to-end InteractiveMode smoke", () => {
 		expect(targetPos).toBeDefined();
 
 		const railGeo = getActiveHostRuntime()!.viewportSlots!.rightRail!.geometry!;
+		const railScreenDownY = 3 + railGeo.downY;
 		await harness.mouseDrag(
 			targetPos!.col,
 			targetPos!.row,
-			118,
-			Math.min(targetPos!.row, railGeo.downY),
+			119,
+			Math.min(targetPos!.row, railScreenDownY),
 			{ steps: 3 },
 		);
 		const selectedScreen = harness.screen();
 		expect(selectedScreen.cellAt(targetPos!.row, targetPos!.col)?.inverse).toBe(true);
-		expect(selectedScreen.cellAt(railGeo.downY, 117)?.inverse).toBe(false);
-		expect(selectedScreen.cellAt(railGeo.downY, 118)?.inverse).toBe(false);
+		expect(selectedScreen.cellAt(railScreenDownY, 118)?.inverse).toBe(false);
+		expect(selectedScreen.cellAt(railScreenDownY, 119)?.inverse).toBe(false);
 
-		const quotePopupPos = selectedScreen.findText("Quote");
+		const quotePopupPos = selectedScreen.findText("[Quote · Alt+Q]");
 		expect(quotePopupPos).toBeDefined();
-		expect(selectedScreen.text()).toContain("╭ ❝ Quote ╮");
+		expect(selectedScreen.text()).toContain("[Copy]  [Quote · Alt+Q]");
 
 		await harness.mouseClick(quotePopupPos!.col + 2, quotePopupPos!.row);
 		const afterQuoteScreen = harness.screen();

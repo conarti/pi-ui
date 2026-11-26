@@ -22,6 +22,7 @@ import {
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 import { fgRgb, isLightTheme, renderPill, type HitBox, type RgbTuple } from "../../shared/ansi.ts";
+import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { t } from "../../shared/i18n.ts";
 import { matchesLayoutChord } from "../../shared/keyboard-layout.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
@@ -198,14 +199,18 @@ export class PiUiComposerEditor extends CustomEditor {
 
 	private resolveBoxLayout(totalWidth: number): {
 		readonly compact: boolean;
+		readonly outerPad: number;
+		readonly boxWidth: number;
 		readonly leftOffset: number;
 		readonly innerWidth: number;
 		readonly visualLines: Array<{ logicalLine: number; startCol: number; length: number }>;
 	} {
 		const internal = this.internals();
-		const compact = totalWidth < 9;
-		const leftOffset = compact ? 1 : 4;
-		const innerWidth = Math.max(1, compact ? totalWidth - 2 : totalWidth - 6);
+		const outerPad = computeOuterCanvasMargin(totalWidth);
+		const boxWidth = Math.max(1, totalWidth - outerPad * 2);
+		const compact = boxWidth < 9;
+		const leftOffset = outerPad + (compact ? 1 : 4);
+		const innerWidth = Math.max(1, compact ? boxWidth - 2 : boxWidth - 6);
 		const fallbackWrapWidth = Math.max(1, (compact ? Math.max(3, innerWidth) : innerWidth) - 1);
 		const wrapWidth = internal.lastWidth && internal.lastWidth > 0 ? internal.lastWidth : fallbackWrapWidth;
 		const visualLines =
@@ -215,7 +220,7 @@ export class PiUiComposerEditor extends CustomEditor {
 				startCol: 0,
 				length: line.length,
 			}));
-		return { compact, leftOffset, innerWidth, visualLines };
+		return { compact, outerPad, boxWidth, leftOffset, innerWidth, visualLines };
 	}
 
 	getTui(): TUI {
@@ -669,12 +674,13 @@ export class PiUiComposerEditor extends CustomEditor {
 		hooks?.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
 	}
 
-	private renderRoundedTopBorder(width: number): string {
+	private renderRoundedTopBorder(boxWidth: number, outerPad = 0): string {
 		this.topHits = [];
-		const spanWidth = Math.max(0, width - 2);
+		const spanWidth = Math.max(0, boxWidth - 2);
 		const bLine = (s: string) => this.paintBorder(s);
+		const margin = " ".repeat(outerPad);
 		if (spanWidth === 0) {
-			return `${bLine("╭")}${bLine("╮")}`;
+			return `${margin}${bLine("╭")}${bLine("╮")}${margin}`;
 		}
 
 		const { pi, ctx } = this.deps;
@@ -761,7 +767,7 @@ export class PiUiComposerEditor extends CustomEditor {
 			row += bLine("─".repeat(fillCount));
 		}
 
-		let curX = visibleWidth(row);
+		let curX = outerPad + visibleWidth(row);
 		for (const pill of fittingPills) {
 			const pw = visibleWidth(pill.str);
 			this.topHits.push({
@@ -775,12 +781,12 @@ export class PiUiComposerEditor extends CustomEditor {
 			curX += pw + 1;
 		}
 
-		const remaining = Math.max(0, width - 1 - visibleWidth(row));
+		const remaining = Math.max(0, boxWidth - 1 - visibleWidth(row));
 		if (remaining > 0) {
 			row += bLine("─".repeat(remaining));
 		}
-		const closed = `${row}${bLine("╮")}`;
-		return fitExactWidth(closed, width);
+		const closed = `${margin}${row}${bLine("╮")}${margin}`;
+		return fitExactWidth(closed, boxWidth + outerPad * 2);
 	}
 
 	private renderEmptyPlaceholderCell(innerWidth: number, placeholderText = COMPOSER_PLACEHOLDER): string {
@@ -823,7 +829,10 @@ export class PiUiComposerEditor extends CustomEditor {
 			return out;
 		}
 
-		const innerWidth = width - 6;
+		const outerPad = computeOuterCanvasMargin(width);
+		const outerMargin = " ".repeat(outerPad);
+		const boxWidth = width - outerPad * 2;
+		const innerWidth = boxWidth - 6;
 		const baseLines = super.render(innerWidth);
 		const internal = this.internals();
 		const visibleRows = internal.renderedVisibleLineCount ?? Math.max(1, baseLines.length - 2);
@@ -843,12 +852,15 @@ export class PiUiComposerEditor extends CustomEditor {
 			}
 		}
 
-		const out: string[] = [this.renderRoundedTopBorder(width)];
+		const out: string[] = [this.renderRoundedTopBorder(boxWidth, outerPad)];
 
 		for (let i = 0; i < visibleRows; i++) {
 			const visualIdx = internal.scrollOffset + i;
-			const leftPrefix = visualIdx === 0 ? `${bLine("│")} ${chevron} ` : `${bLine("│")}   `;
-			const rightSuffix = ` ${bLine("│")}`;
+			const leftPrefix =
+				visualIdx === 0
+					? `${outerMargin}${bLine("│")} ${chevron} `
+					: `${outerMargin}${bLine("│")}   `;
+			const rightSuffix = ` ${bLine("│")}${outerMargin}`;
 
 			let cell: string;
 			if (isEmpty && i === 0) {
@@ -864,10 +876,12 @@ export class PiUiComposerEditor extends CustomEditor {
 			out.push(`${leftPrefix}${cell}${rightSuffix}`);
 		}
 
-		out.push(`${bLine("╰")}${bLine("─".repeat(width - 2))}${bLine("╯")}`);
+		out.push(`${outerMargin}${bLine("╰")}${bLine("─".repeat(boxWidth - 2))}${bLine("╯")}${outerMargin}`);
 
+		const acLeftPad = " ".repeat(outerPad + 4);
+		const acRightPad = " ".repeat(outerPad + 2);
 		for (let idx = visibleRows + 2; idx < baseLines.length; idx++) {
-			out.push(`    ${fitExactWidth(baseLines[idx] ?? "", innerWidth)}  `);
+			out.push(`${acLeftPad}${fitExactWidth(baseLines[idx] ?? "", innerWidth)}${acRightPad}`);
 		}
 
 		return out;
@@ -876,11 +890,48 @@ export class PiUiComposerEditor extends CustomEditor {
 	override handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		const hooks = getComposerHooks();
 		const totalWidth = event.width ?? 80;
-		const { compact, leftOffset, innerWidth } = this.resolveBoxLayout(totalWidth);
-		const visibleRows = this.internals().renderedVisibleLineCount ?? 1;
+		const { compact, leftOffset, innerWidth, visualLines } = this.resolveBoxLayout(totalWidth);
+		const internal = this.internals();
+		const visibleRows = internal.renderedVisibleLineCount ?? 1;
 		const autocompleteStartRow = visibleRows + 2;
 		const inBox = event.y >= 0 && event.y < autocompleteStartRow;
 		let hoverStateChanged = false;
+
+		/* Локальная прокрутка переполненного черновика Composer с overscroll = "contain" */
+		if (event.type === "wheel" && event.wheelDelta && inBox) {
+			if (visualLines.length > visibleRows) {
+				const maxScroll = Math.max(0, visualLines.length - visibleRows);
+				const prevScroll = internal.scrollOffset ?? 0;
+				const nextScroll = Math.max(0, Math.min(maxScroll, prevScroll + event.wheelDelta));
+				const changed = nextScroll !== prevScroll;
+				if (changed) {
+					internal.scrollOffset = nextScroll;
+					const cursorVisualIdx = visualLines.findIndex(
+						(vl) =>
+							vl.logicalLine === internal.state.cursorLine &&
+							internal.state.cursorCol >= vl.startCol &&
+							internal.state.cursorCol <= vl.startCol + vl.length,
+					);
+					const targetVisualIdx =
+						cursorVisualIdx < nextScroll
+							? nextScroll
+							: cursorVisualIdx >= nextScroll + visibleRows
+								? nextScroll + visibleRows - 1
+								: cursorVisualIdx;
+					const targetVl = visualLines[targetVisualIdx];
+					if (targetVl && targetVisualIdx !== cursorVisualIdx) {
+						internal.state.cursorLine = targetVl.logicalLine;
+						internal.setCursorCol(
+							Math.min(
+								targetVl.startCol + targetVl.length,
+								Math.max(targetVl.startCol, internal.state.cursorCol),
+							),
+						);
+					}
+				}
+				return { handled: true, render: changed };
+			}
+		}
 
 		if (event.type === "move") {
 			if (inBox) {

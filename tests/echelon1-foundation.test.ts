@@ -104,7 +104,7 @@ describe("Ticket #41 foundation end-to-end (real InteractiveMode)", () => {
 		expect(hit).toBeDefined();
 		await harness.mouseDrag(hit!.col, hit!.row, hit!.col + 12, hit!.row);
 		const hoverText = harness.screen().text();
-		expect(hoverText).toContain("╭ ❝ Quote ╮");
+		expect(hoverText).toContain("[Copy]  [Quote · Alt+Q]");
 		expect(cyrillicRe.test(hoverText)).toBe(false);
 	});
 
@@ -242,7 +242,7 @@ describe("Ticket #41 foundation end-to-end (real InteractiveMode)", () => {
 			expect(textHit).toBeDefined();
 			await harness.mouseDrag(textHit!.col, textHit!.row, textHit!.col + 10, textHit!.row);
 			const popupScreen = harness.screen();
-			const popupHit = popupScreen.findText("╭ ❝ Quote ╮");
+			const popupHit = popupScreen.findText("[Copy]  [Quote · Alt+Q]");
 			expect(popupHit).toBeDefined();
 			const popupBg = popupScreen.cellAt(popupHit!.row, popupHit!.col + 2)?.bg;
 			expect(popupBg).toEqual({

@@ -4,10 +4,12 @@ import { getActiveGlobalTheme } from "../../shared/ansi.ts";
 import {
 	getActiveHostRuntime,
 	resolveActiveClipboardProvider,
+	unwrapHostTui,
 } from "../../shared/host-runtime.ts";
-import { registerOptionShortcutChord } from "../../shared/keyboard-layout.ts";
+import { matchesLayoutChord, registerOptionShortcutChord } from "../../shared/keyboard-layout.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import { t } from "../../shared/i18n.ts";
+import { copyToClipboard } from "../../shared/runtime-hooks.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
 import { getActiveComposerEditor } from "../chrome/composer.ts";
 import {
@@ -95,6 +97,22 @@ export function registerQuotesFeature(pi: ExtensionAPI): void {
 	let activeCtx: ExtensionContext | undefined;
 	let unsubscribeInput: (() => void) | undefined;
 
+	const copySelectedAndFlash = (selectedText: string, tui: NonNullable<ReturnType<typeof getActiveHostRuntime>>["tui"]) => {
+		const cleaned = selectedText.trim();
+		if (!cleaned) return;
+		copyToClipboard(cleaned);
+		const renderer = unwrapHostTui(tui) as unknown as {
+			resetTextSelection?: () => void;
+			clearTextSelection?: () => void;
+			flash?: (message: string, durationMs?: number) => void;
+			requestRender?: () => void;
+		};
+		renderer.resetTextSelection?.();
+		renderer.clearTextSelection?.();
+		renderer.flash?.(t("quotes.selectionPopup.copied"), 1200);
+		renderer.requestRender?.();
+	};
+
 	const getTheme = () => activeCtx?.ui.theme ?? getActiveGlobalTheme();
 	const selectionController = new SelectionQuoteOverlayController(
 		getTheme,
@@ -115,6 +133,9 @@ export function registerQuotesFeature(pi: ExtensionAPI): void {
 				editor.focused = true;
 			}
 			selTui.requestRender?.();
+		},
+		(selectedText, tui) => {
+			copySelectedAndFlash(selectedText, tui);
 		},
 	);
 
@@ -218,15 +239,29 @@ export function registerQuotesFeature(pi: ExtensionAPI): void {
 		if (ctx.mode === "tui" && ctx.hasUI) {
 			unsubscribeInput = ctx.ui.onTerminalInput((data) => {
 				const tui = getActiveHostRuntime()?.tui;
-				if (
-					!isKeyRelease(data) &&
-					(data === "\x1b" || matchesKey(data, "escape")) &&
-					selectionController.isShowing &&
-					!(tui && hasBlockingModalOverlay(tui))
-				) {
-					selectionController.hide();
-					requestRender();
-					return { consume: true };
+				if (!isKeyRelease(data) && tui && !hasBlockingModalOverlay(tui)) {
+					if ((data === "\x1b" || matchesKey(data, "escape")) && selectionController.isShowing) {
+						selectionController.hide();
+						requestRender();
+						return { consume: true };
+					}
+					const isCopyChord =
+						data === "\x03" ||
+						data === "\x18" ||
+						matchesLayoutChord(data, "ctrl+c") ||
+						matchesLayoutChord(data, "ctrl+x");
+					if (isCopyChord) {
+						const renderer = unwrapHostTui(tui) as unknown as {
+							getActiveSelectionText?: () => string | undefined;
+						};
+						const activeText =
+							renderer.getActiveSelectionText?.() || selectionController.snapshottedText;
+						if (activeText && activeText.trim().length > 0) {
+							selectionController.hide();
+							copySelectedAndFlash(activeText, tui);
+							return { consume: true };
+						}
+					}
 				}
 				queueMicrotask(() => {
 					const curTui = getActiveHostRuntime()?.tui;

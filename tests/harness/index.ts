@@ -78,7 +78,7 @@ export async function waitForCondition(
 export function findComposerTopRow(harness: InteractiveHarness): number {
 	const screen = harness.screen();
 	for (let r = screen.height - 1; r >= 0; r -= 1) {
-		if (screen.cellAt(r, 0)?.char === "╭") {
+		if (screen.cellAt(r, 2)?.char === "╭" || screen.cellAt(r, 0)?.char === "╭") {
 			return r;
 		}
 	}

@@ -79,7 +79,7 @@ export function createOutlineRailSlot(
 		const termCols = shell.tui.terminal?.columns ?? 80;
 		const termRows = shell.tui.terminal?.rows ?? 30;
 		const viewportRows = shell.scroll.viewportHeight || termRows;
-		const maxCardW = Math.max(10, termCols - RAIL_WIDTH - 5);
+		const maxCardW = Math.max(10, termCols - RAIL_WIDTH - 4);
 		const maxText = Math.max(
 			6,
 			Math.min(40, maxCardW - 4, Math.floor((termCols - RAIL_WIDTH - 2) * 0.55)),
@@ -91,22 +91,20 @@ export function createOutlineRailSlot(
 			messageId: turn.id,
 			entries,
 		});
-		const previewSource = reconstructed || turn.title || turn.prompt;
+		const previewSource = reconstructed || turn.prompt;
 		const bodyLines = wrapPreviewLines(previewSource, maxText);
-		const timeText = turn.formattedTime ?? "";
 		const contentW = Math.max(
 			Math.min(10, maxText),
-			visibleWidth(timeText),
 			...bodyLines.map(visibleWidth),
 		);
 		const cardW = Math.min(maxCardW, contentW + 4);
-		const cardH = (bodyLines.length || 1) + 2 + (timeText ? 1 : 0);
+		const cardH = (bodyLines.length || 1) + 2;
 
 		const maxRow = Math.max(0, Math.min(termRows - cardH, viewportRows - cardH));
-		popup.time = timeText;
+		popup.time = "";
 		popup.preview = previewSource;
 		popupOptions.width = cardW;
-		popupOptions.col = Math.max(1, termCols - RAIL_WIDTH - 1 - cardW - 1);
+		popupOptions.col = Math.max(1, termCols - RAIL_WIDTH - cardW - 1);
 		popupOptions.row = Math.max(0, Math.min(screenY - Math.floor(cardH / 2), maxRow));
 		popupVisible = true;
 		if (!popupHandle) {

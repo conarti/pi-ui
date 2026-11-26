@@ -30,10 +30,10 @@ function buildMultiLineText(prefix: string, lines: number): string {
 
 function hasRenderedOutlineRail(harness: InteractiveHarness): boolean {
 	const screen = harness.screen();
-	const railStart = screen.width - 3;
-	const railEnd = screen.width - 1;
-	for (let r = 0; r < screen.height; r += 1) {
-		if (/[●○▲▼│]/.test(screen.sliceText(r, railStart, railEnd))) {
+	const railStart = screen.width - 2;
+	const railEnd = screen.width;
+	for (let r = 3; r < screen.height; r += 1) {
+		if (/[▲▼━─]/.test(screen.sliceText(r, railStart, railEnd))) {
 			return true;
 		}
 	}
@@ -79,7 +79,7 @@ describe("Host Runtime seam (real InteractiveMode)", () => {
 		expect(unwrapHostTui(runtime!.tui)).toBeInstanceOf(TuiAltScreen);
 		expect(runtime!.isFullscreen).toBe(true);
 		expect(runtime!.scroll).toBeInstanceOf(ScrollView);
-		expect(runtime!.scroll?.scrollbar).toBe("auto");
+		expect(runtime!.scroll?.scrollbar).toBe("hidden");
 		expect(runtime!.chatContainer).toBeDefined();
 		expect(runtime!.viewportSlots?.topSlot).toBeDefined();
 		expect(runtime!.viewportSlots?.rightRail).toBeDefined();
@@ -140,7 +140,7 @@ describe("Host Runtime seam (real InteractiveMode)", () => {
 			quoteTarget!.col + 12,
 			quoteTarget!.row,
 		);
-		expect(harness.screen().text()).toContain("╭ ❝ Quote ╮");
+		expect(harness.screen().text()).toContain("[Copy]  [Quote · Alt+Q]");
 
 		const switchedToRegular = await harness.setTuiMode("regular");
 		expect(switchedToRegular).toBe(true);
@@ -159,7 +159,7 @@ describe("Host Runtime seam (real InteractiveMode)", () => {
 		expect(hasRenderedOutlineRail(harness)).toBe(true);
 
 		await harness.mouseWheel("up", 40, 10, 8);
-		const stickyTop = [0, 1, 2, 3].map((r) => harness!.screen().rowText(r)).join("\n");
+		const stickyTop = [3, 4, 5].map((r) => harness!.screen().rowText(r)).join("\n");
 		expect(stickyTop).toContain("Prompt in regular mode 1");
 		await harness.mouseWheel("down", 40, 10, 12);
 
@@ -179,7 +179,7 @@ describe("Host Runtime seam (real InteractiveMode)", () => {
 			reboundTarget!.col + 12,
 			reboundTarget!.row,
 		);
-		expect(harness.screen().text()).toContain("╭ ❝ Quote ╮");
+		expect(harness.screen().text()).toContain("[Copy]  [Quote · Alt+Q]");
 
 		await harness.dispose();
 		expect(getActiveHostRuntime()).toBeUndefined();

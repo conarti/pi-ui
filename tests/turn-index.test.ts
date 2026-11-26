@@ -101,7 +101,7 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 
 		await harness.mouseWheel("up", 40, 8, 8);
 		const midScreen = harness.screen();
-		const stickyBand = [0, 1, 2].map((r) => midScreen.sliceText(r, 0, 119)).join("\n");
+		const stickyBand = [3, 4, 5].map((r) => midScreen.sliceText(r, 0, 120)).join("\n");
 
 		expect(stickyBand).not.toContain("#4/5");
 		expect(stickyBand).toContain("09:15");
@@ -109,25 +109,26 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 		expect(stickyBand).toContain("Inspect compacted");
 		expect(stickyBand).toContain("turn four");
 
+		const headerRows = 3;
 		const geo = getRailGeometry();
 		expect(geo.windowEnd - geo.windowStart).toBe(5);
 
-		const turn4TickRow = geo.ticksY + 3;
-		await harness.mouseMove(117, turn4TickRow);
+		const turn4TickRow = headerRows + geo.ticksY + 3;
+		await harness.mouseMove(119, turn4TickRow);
 
 		const hoverScreen = harness.screen();
 		const hoverText = hoverScreen.text();
-		expect(hoverText).toContain("09:15");
 		expect(hoverText).not.toContain("Реплика");
+		expect(hoverText).not.toContain("Turn #4");
 		expect(hoverText).toContain("Inspect compacted turn four");
 
 		const prevScrollTop = scroll.scrollTop;
-		await harness.mouseClick(117, turn4TickRow);
+		await harness.mouseClick(119, turn4TickRow);
 		expect(scroll.scrollTop).not.toBe(prevScrollTop);
 		expect(scroll.isFollowingEnd).toBe(false);
 
 		const jumpedScreen = harness.screen();
-		expect(jumpedScreen.rowText(1)).toContain("Inspect compacted");
+		expect(jumpedScreen.rowText(4)).toContain("Inspect compacted");
 	});
 
 	it("computes structural Turn offsets without full-document ANSI matching and stays stable across hover, copy badge, OSC markers, and duplicate prompts", async () => {
@@ -153,13 +154,14 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 		const runtime = getActiveHostRuntime()!;
 		const scroll = runtime.scroll!;
 		await harness.mouseWheel("up", 40, 6, 9);
-		expect(harness.screen().sliceText(1, 0, 119)).toContain("10:05");
+		expect(harness.screen().sliceText(4, 0, 120)).toContain("10:05");
 
+		const headerRows = 3;
 		const geoAtTurn2 = getRailGeometry();
-		const tick0Row = geoAtTurn2.ticksY;
-		const tick1Row = geoAtTurn2.ticksY + 1;
+		const tick0Row = headerRows + geoAtTurn2.ticksY;
+		const tick1Row = headerRows + geoAtTurn2.ticksY + 1;
 
-		await harness.mouseClick(117, tick0Row);
+		await harness.mouseClick(119, tick0Row);
 		const turn1StartOffset = scroll.scrollTop;
 		expect(scroll.isFollowingEnd).toBe(false);
 
@@ -168,7 +170,7 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 		await harness.mouseMove(cardPos!.col + 3, cardPos!.row);
 		expect(harness.screen().rowText(cardPos!.row - 1)).toContain("Copy");
 
-		await harness.mouseClick(117, tick1Row);
+		await harness.mouseClick(119, tick1Row);
 		const turn2StartOffset = scroll.scrollTop;
 		expect(turn2StartOffset).toBeGreaterThan(turn1StartOffset + 10);
 		expect(scroll.isFollowingEnd).toBe(false);
@@ -176,11 +178,11 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 		const chatRenderSpy = vi.spyOn(runtime.chatContainer!, "render");
 		chatRenderSpy.mockClear();
 		scroll.scrollTo(turn1StartOffset + 6, { disableFollow: true });
-		expect(harness.screen().rowText(1)).toContain("10:00");
+		expect(harness.screen().rowText(4)).toContain("10:00");
 		expect(chatRenderSpy).toHaveBeenCalledTimes(1);
 		chatRenderSpy.mockRestore();
 
-		await harness.mouseClick(117, tick1Row);
+		await harness.mouseClick(119, tick1Row);
 		await harness.submitInput("/sticky prev");
 		expect(scroll.scrollTop).toBe(turn1StartOffset);
 		expect(scroll.isFollowingEnd).toBe(false);
@@ -228,7 +230,7 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 
 		scroll.scrollToEnd();
 		await harness.submitInput("Third turn live");
-		const stickyTop = [0, 1, 2].map((r) => harness!.screen().rowText(r)).join("\n");
+		const stickyTop = [3, 4, 5].map((r) => harness!.screen().rowText(r)).join("\n");
 		expect(stickyTop).toContain("Third turn live");
 	});
 
@@ -253,28 +255,29 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 		expect(scroll.isFollowingEnd).toBe(true);
 		expect(maxScrollTop).toBeGreaterThan(20);
 
+		const headerRows = 3;
 		const geo = getRailGeometry();
-		const tick0Row = geo.ticksY;
-		const tick2Row = geo.ticksY + 2;
-		const downArrowRow = geo.downY;
+		const tick0Row = headerRows + geo.ticksY;
+		const tick2Row = headerRows + geo.ticksY + 2;
+		const downArrowRow = headerRows + geo.downY;
 
-		await harness.mouseClick(117, tick0Row);
+		await harness.mouseClick(119, tick0Row);
 		const turn1Top = scroll.scrollTop;
 		expect(scroll.isFollowingEnd).toBe(false);
 		expect(turn1Top).toBeLessThan(maxScrollTop);
 
-		await harness.mouseClick(117, downArrowRow);
+		await harness.mouseClick(119, downArrowRow);
 		expect(scroll.scrollTop).toBeGreaterThan(turn1Top);
 		expect(scroll.isFollowingEnd).toBe(false);
 
-		await harness.mouseClick(117, downArrowRow);
+		await harness.mouseClick(119, downArrowRow);
 		expect(scroll.scrollTop).toBe(maxScrollTop);
 		expect(scroll.isFollowingEnd).toBe(true);
 
 		await harness.submitInput("/sticky prev");
 		expect(scroll.isFollowingEnd).toBe(false);
 
-		await harness.mouseClick(117, tick2Row);
+		await harness.mouseClick(119, tick2Row);
 		expect(scroll.scrollTop).toBe(maxScrollTop);
 		expect(scroll.isFollowingEnd).toBe(true);
 
@@ -304,13 +307,14 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 
 			await harness.submitInput("Alpha prompt");
 			await harness.submitInput("Beta prompt");
-			await harness.mouseWheel("up", 40, 8, 3);
+			await harness.mouseWheel("up", 40, 8, 5);
 
 			const scroll = getActiveHostRuntime()!.scroll!;
-			expect(scroll.scrollbar).toBe("auto");
+			expect(scroll.scrollbar).toBe("hidden");
 
+			const headerRows = 3;
 			const geo = getRailGeometry();
-			await harness.mouseMove(117, geo.ticksY);
+			await harness.mouseMove(119, headerRows + geo.ticksY);
 			expect(harness.screen().text()).toContain("Alpha prompt");
 			expect(harness.screen().text()).toContain("╭─");
 
@@ -323,22 +327,22 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 
 			await harness.mouseMove(20, 6);
 			const afterLeaveLines = Array.from({ length: scroll.viewportHeight }, (_, r) =>
-				harness!.screen().sliceText(r, 40, 116),
+				harness!.screen().sliceText(headerRows + r, 40, 118),
 			).join("\n");
 			expect(afterLeaveLines).not.toContain("╭─");
 
-			expect(harness.screen().rowText(1)).toContain("› ");
+			expect(harness.screen().rowText(4)).toContain("› ");
 			await harness.submitInput("/sticky toggle");
-			expect(harness.screen().rowText(1)).not.toContain("› Alpha prompt");
-			expect(harness.screen().rowText(1)).not.toContain("› Beta prompt");
+			expect(harness.screen().rowText(4)).not.toContain("› Alpha prompt");
+			expect(harness.screen().rowText(4)).not.toContain("› Beta prompt");
 
 			await harness.submitInput("/sticky toggle");
-			expect(harness.screen().rowText(1)).toContain("› ");
+			expect(harness.screen().rowText(4)).toContain("› ");
 
 			const hasRail = () =>
 				Array.from({ length: scroll.viewportHeight }, (_, r) =>
-					harness!.screen().sliceText(r, 117, 119),
-				).some((cell) => cell === " ▲" || cell === "──" || cell === " ─");
+					harness!.screen().sliceText(headerRows + r, 118, 120),
+				).some((cell) => cell === " ▲" || cell === "━━" || cell === " ─");
 
 			expect(hasRail()).toBe(true);
 			await harness.submitInput("/outline");

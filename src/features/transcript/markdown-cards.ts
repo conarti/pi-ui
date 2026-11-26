@@ -129,7 +129,6 @@ export function installMarkdownCardsAndHeadings(): void {
 					highlighted = rawCode.split("\n").map((l: string) => self.theme.codeBlock(l));
 				}
 
-				const rail = themeFgRgb(activeTheme, palette.codeRailFg, "▎");
 				for (const hlLine of highlighted) {
 					const expandedTabs = hlLine.replace(/\t/g, "  ");
 					const wrapped = wrapTextWithAnsi(expandedTabs, codeInnerW);
@@ -137,7 +136,7 @@ export function installMarkdownCardsAndHeadings(): void {
 						out.push(
 							paintThemeSurfaceRow(
 								activeTheme,
-								`${rail} ${wLine}`,
+								`  ${wLine}`,
 								cardW,
 								palette.codeBodyBg,
 							),

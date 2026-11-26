@@ -11,6 +11,10 @@ import {
 	type FullscreenShellContext,
 	type StickyOverlayRender,
 } from "../../shared/fullscreen-layout.ts";
+import {
+	matchesLayoutChord,
+	registerOptionShortcutChord,
+} from "../../shared/keyboard-layout.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import { t } from "../../shared/i18n.ts";
 import {
@@ -53,6 +57,7 @@ export class StickyPromptBar implements Component {
 	private expanded = new Set<string>();
 	private hovered = false;
 	private pillHits: readonly PromptPillHitTarget[] = [];
+	private lastTruncated = false;
 	private disposed = false;
 	lastRenderedHeight = 0;
 	lastVisibleHeight = 0;
@@ -74,6 +79,7 @@ export class StickyPromptBar implements Component {
 		this.expanded.clear();
 		this.hovered = false;
 		this.pillHits = [];
+		this.lastTruncated = false;
 		this.lastRenderedHeight = 0;
 		this.lastVisibleHeight = 0;
 		this.lastPushOffset = 0;
@@ -161,6 +167,12 @@ export class StickyPromptBar implements Component {
 			return { handled: true, render: true };
 		}
 
+		/* Клик по неусечённой карточке Sticky Prompt прокручивает транскрипт к началу текущего Turn */
+		if (!this.lastTruncated && !this.expanded.has(this.active.id)) {
+			this.turnIndex.jumpToTurn(this.active.index, { direction: "prev" });
+			return { handled: true, render: true };
+		}
+
 		this.toggleExpanded();
 		return { handled: true, render: true };
 	}
@@ -199,6 +211,7 @@ export class StickyPromptBar implements Component {
 	private renderInternal(cardWidth: number, viewportWidth?: number): string[] {
 		this.active = undefined;
 		this.pillHits = [];
+		this.lastTruncated = false;
 		if (this.disposed || !this.config.enabled || cardWidth < 16) {
 			this.lastRenderedHeight = 0;
 			return [];
@@ -249,6 +262,7 @@ export class StickyPromptBar implements Component {
 		);
 
 		this.pillHits = rendered.pillHits;
+		this.lastTruncated = rendered.truncated;
 		this.lastRenderedHeight = rendered.lines.length;
 		return rendered.lines;
 	}
@@ -321,19 +335,25 @@ export function registerStickyPromptCommands(
 
 export function bindStickyExpandKey(
 	ctx: ExtensionContext,
-	shell: FullscreenShellContext,
+	_shell: FullscreenShellContext,
 	bar: StickyPromptBar,
 ): () => void {
-	return ctx.ui.onTerminalInput((data) => {
+	const unregisterOptionChord = registerOptionShortcutChord("alt+s");
+	const unsubscribeInput = ctx.ui.onTerminalInput((data) => {
 		if (
 			!isKeyRelease(data) &&
 			!isKeyRepeat(data) &&
 			bar.config.enabled &&
 			bar.getActivePrompt() &&
-			shell.keybindings.matches(data, "app.tools.expand")
+			matchesLayoutChord(data, "alt+s")
 		) {
 			bar.toggleExpanded();
+			return { consume: true };
 		}
 		return undefined;
 	});
+	return () => {
+		unregisterOptionChord();
+		unsubscribeInput();
+	};
 }

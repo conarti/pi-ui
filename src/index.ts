@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerAskUserFeature } from "./features/ask-user/index.ts";
 import { mountComposer, setActiveComposerEditor } from "./features/chrome/composer.ts";
 import { registerComposerWorkingAnimation } from "./features/chrome/working-indicator.ts";
-import { mountSessionHeader } from "./features/chrome/header.ts";
+import { createPinnedSessionHeaderSlot, mountSessionHeader } from "./features/chrome/header.ts";
 import { registerCommandPaletteFeature } from "./features/command-palette/index.ts";
 import { showContextInspector } from "./features/context-inspector/index.ts";
 import { createOutlineRailSlot, registerOutlineCommands } from "./features/outline-rail/index.ts";
@@ -265,9 +265,11 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 				origStickyDispose();
 			};
 
+			const pinnedHeader = createPinnedSessionHeaderSlot(pi, ctx);
 			const outlineRail = createOutlineRailSlot(ctx, shell, turnIndex);
 
 			return {
+				pinnedHeader,
 				topSlot: stickyBar,
 				rightRail: outlineRail,
 			};
