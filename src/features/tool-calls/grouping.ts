@@ -24,6 +24,7 @@ import {
 	type ExploreAction,
 	type Segment,
 } from "./exploration-tail.ts";
+import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { getActiveHostRuntime, type HostRuntimeHandle } from "../../shared/host-runtime.ts";
 import { hookMethod } from "../../shared/runtime-hooks.ts";
 import { formatDurationMs, type RowStatus } from "./core.ts";
@@ -266,38 +267,36 @@ export class ToolGroupComponent extends Container {
 				if (isKind(member, ToolExecutionComponent) || isKind(member, AssistantMessageComponent)) {
 					const comp = member as Component;
 					let strippedTopBlank = false;
+					let guideWidth = 0;
+					let removedMargins: number[] = [];
 					this.addChild({
 						render: (w: number) => {
-							const innerW = Math.max(8, w - 2);
-							const rendered = comp.render(innerW);
+							const outer = computeOuterCanvasMargin(w);
+							guideWidth = outer + 2;
+							const rendered = comp.render(w);
 							strippedTopBlank =
 								rendered.length > 1 && stripTerminalSequences(rendered[0] ?? "").trim() === "";
 							const body = strippedTopBlank ? rendered.slice(1) : rendered;
 							const hostTheme = getActiveHostRuntime()?.ctx.ui.theme as Theme | undefined;
-							const guide = hostTheme ? densityPalette(hostTheme).rail(" │") : " │";
-							return body.map((line) => {
-								const trimmedLead = line.startsWith("  ")
-									? line.slice(1)
-									: line.startsWith(" ")
-										? line
-										: ` ${line}`;
-								return truncateToWidth(`${guide}${trimmedLead}`, Math.max(1, w), "…");
-							});
+							const guideText = `${" ".repeat(outer)}│ `;
+							const guide = hostTheme ? densityPalette(hostTheme).rail(guideText) : guideText;
+							removedMargins = body.map((line) => Math.min(guideWidth, /^ */u.exec(line)![0].length));
+							return body.map((line, row) => truncateToWidth(
+								`${guide}${line.slice(removedMargins[row])}`, w, "…",
+							));
 						},
 						invalidate: () => comp.invalidate(),
 						handleMouse: (ev: unknown) => {
 							if (typeof (comp as { handleMouse?: (e: unknown) => unknown }).handleMouse !== "function") {
 								return undefined;
 							}
-							const mouseEv = ev as { x?: number; y?: number; width?: number };
+							const mouseEv = ev as { x?: number; y?: number };
+							const xOffset = (removedMargins[mouseEv.y ?? 0] ?? 0) - guideWidth;
 							return (comp as { handleMouse: (e: unknown) => unknown }).handleMouse({
 								...mouseEv,
-								...(typeof mouseEv.x === "number" ? { x: Math.max(0, mouseEv.x - 2) } : {}),
+								...(typeof mouseEv.x === "number" ? { x: Math.max(0, mouseEv.x + xOffset) } : {}),
 								...(typeof mouseEv.y === "number"
 									? { y: mouseEv.y + (strippedTopBlank ? 1 : 0) }
-									: {}),
-								...(typeof mouseEv.width === "number"
-									? { width: Math.max(8, mouseEv.width - 2) }
 									: {}),
 							});
 						},
@@ -785,6 +784,7 @@ export class ToolGroupController {
 			}
 		}
 
-		return ["", fit(` ${diamond} ${styledSummary}${diffBadge}${meta}`)];
+		const margin = " ".repeat(computeOuterCanvasMargin(width) + 2);
+		return ["", fit(`${margin}${diamond} ${styledSummary}${diffBadge}${meta}`)];
 	}
 }

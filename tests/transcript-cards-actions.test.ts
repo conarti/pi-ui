@@ -1,10 +1,10 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { fstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resetCapabilitiesCache, setCapabilities, setCapabilityOverrides } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it } from "vitest";
 import { OutlineRailComponent } from "../src/features/outline-rail/rail-view.ts";
-import { getActiveHostRuntime } from "../src/shared/host-runtime.ts";
+import { defaultHostExternalOpener, getActiveHostRuntime } from "../src/shared/host-runtime.ts";
 import {
 	createAssistantMessageEventStream,
 	createInteractiveHarness,
@@ -427,6 +427,51 @@ describe("Post-stream Markdown code, table, and blockquote copy actions", () => 
 });
 
 describe("Link [text](url) and file path:line [Open] [Copy] Hover Popups", () => {
+	it("does not add assistant blockquote actions to third-party transcript notices", async () => {
+		harness = await createInteractiveHarness({ extensionFactories: [(pi) => {
+			pi.registerCommand("notice", {
+				handler: async () => pi.sendMessage({ customType: "notice", content: "> Third-party notice", display: true }),
+			});
+		}] });
+		await harness.submitInput("/notice");
+		expect(harness.screen().text()).toContain("Third-party notice");
+		expect(harness.screen().text()).not.toContain("[Copy]");
+	});
+
+	it.skipIf(process.platform === "win32")("hands the terminal to the configured editor and resumes accepting input", async () => {
+		const dir = allocateTempDir("pi-ui-editor-stdio-");
+		const script = join(dir, "editor.cjs");
+		const output = join(dir, "received.json");
+		const path = join(dir, "sample.ts");
+		writeFileSync(path, "export const demo = 1;\n");
+		writeFileSync(script, `const fs = require('node:fs');\nconst { dev, ino } = fs.fstatSync(0);\nfs.writeFileSync(${JSON.stringify(output)}, JSON.stringify({ dev, ino, args: process.argv.slice(2) }));`);
+		const visual = process.env.VISUAL;
+		try {
+			process.env.VISUAL = `"${process.execPath}" "${script}"`;
+			let editorDone: ReturnType<typeof defaultHostExternalOpener.openPath> | undefined;
+			harness = await createInteractiveHarness({
+				externalOpener: {
+					...defaultHostExternalOpener,
+					openPath: (...args) => editorDone = defaultHostExternalOpener.openPath(...args),
+				},
+				responses: [fauxAssistantMessage(`Open \`${path}:12:3\`.`)],
+			});
+			await harness.submitInput("Show source");
+			const hit = harness.screen().findText("sample.ts:12:3")!;
+			await harness.mouseClick(hit.col + 2, hit.row);
+			const open = harness.screen().findText("[Open]")!;
+			await harness.mouseClick(open.col + 2, open.row);
+			expect(await editorDone).toEqual({ ok: true });
+			const { dev, ino } = fstatSync(0);
+			expect(JSON.parse(readFileSync(output, "utf8"))).toMatchObject({ dev, ino, args: expect.arrayContaining([path]) });
+			await harness.typeText("back in Pi");
+			expect(harness.screen().text()).toContain("back in Pi");
+		} finally {
+			if (visual === undefined) delete process.env.VISUAL;
+			else process.env.VISUAL = visual;
+		}
+	});
+
 	it("opens [Open] [Copy] Hover Popup when clicking a hidden-URL Markdown link or path:line reference and invokes HostExternalOpener / clipboard", async () => {
 		const openedUrls: string[] = [];
 		const openedPaths: Array<{ filePath: string; line?: number; column?: number }> = [];

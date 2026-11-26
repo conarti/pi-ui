@@ -30,6 +30,7 @@ export class ResponseMetricsRowComponent implements Component {
 		private readonly data: ResponseMetricsData,
 		private readonly themeRef: Theme,
 		private readonly onOpenSessionUsage: () => void,
+		private readonly getTurnTtft: () => number | undefined,
 	) {}
 
 	invalidate(): void {}
@@ -81,9 +82,10 @@ export class ResponseMetricsRowComponent implements Component {
 
 			const hoverExtras: string[] = [];
 			if (this.hovered) {
-				if (computed.ttftMs !== undefined) {
+				const ttft = this.getTurnTtft() ?? computed.ttftMs;
+				if (ttft !== undefined) {
 					hoverExtras.push(
-						t("metrics.ttftPart", { duration: formatMetricsDuration(computed.ttftMs) }),
+						t("metrics.ttftPart", { duration: formatMetricsDuration(ttft) }),
 					);
 				}
 				const rate = computed.streamTps ?? computed.effectiveTps;

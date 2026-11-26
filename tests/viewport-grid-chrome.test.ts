@@ -1,12 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { getActiveComposerEditor } from "../src/features/chrome/composer.ts";
 import { getOutlineSettings } from "../src/features/outline-rail/index.ts";
-import type { OutlineRailComponent } from "../src/features/outline-rail/rail-view.ts";
 import { getStickyConfig } from "../src/features/sticky-prompt/index.ts";
+import { parseAnsiColorRgb, rgbHueDegrees } from "../src/shared/ansi.ts";
 import { getActiveHostRuntime, unwrapHostTui } from "../src/shared/host-runtime.ts";
 import { hasBlockingModalOverlay } from "../src/shared/modal-card.ts";
 import { updatePiUiUserConfig } from "../src/shared/pi-ui-config.ts";
@@ -140,15 +140,10 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 			],
 		});
 
-		const scroll = getActiveHostRuntime()!.scroll!;
-		scroll.scrollTo(6, { disableFollow: true });
+		await harness.mouseWheel("up", 12, 12, 4);
 		const scrolled = harness.screen();
 
 		expect(scrolled.text()).not.toContain("Jump to latest message");
-
-		const rail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
-		const geo = rail.geometry!;
-		expect(geo).toBeDefined();
 
 		const railSlices = Array.from({ length: scrolled.height }, (_, r) =>
 			scrolled.sliceText(r, width - 2, width),
@@ -176,7 +171,7 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 		expect(hovered.text()).not.toContain("Turn #1");
 
 		await harness.mouseClick(centerCol, downIndicatorRow!);
-		expect(scroll.isFollowingEnd).toBe(true);
+		expect(harness.screen().text()).toContain("reply-two-20");
 	});
 
 	it("pins a symmetric 3-row Header at y = 0..2 outside ScrollView, copies full cwd on click, morphs context usage into a fixed-width hover bar, and opens Context Inspector on click", async () => {
@@ -184,9 +179,13 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 		tempDirs.push(gitRepoDir);
 		execFileSync("git", ["init", "-b", "feature/grid"], { cwd: gitRepoDir, stdio: "ignore" });
 
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-ui-hdr-owner-"));
+		tempDirs.push(agentDir);
+		writeFileSync(join(agentDir, "pi-ui.json"), JSON.stringify({ slotOwners: { header: "removed-plugin" } }));
 		const t1 = new Date(2026, 3, 19, 10, 0).getTime();
 		const width = 110;
 		harness = await createInteractiveHarness({
+			agentDir,
 			theme: "dark",
 			cwd: gitRepoDir,
 			width,
@@ -271,6 +270,12 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 		expect(stickyCollapsed.rowText(6)).toContain("+2 lines (Alt+s)");
 		expect(stickyCollapsed.text()).not.toContain("Long sticky line 5");
 
+		await harness.pressKey("\x1b[200~");
+		await harness.pressKey("ß");
+		await harness.pressKey("\x1b[201~");
+		expect(harness.screen().text()).toContain("ß");
+		expect(harness.screen().text()).not.toContain("Long sticky line 5");
+
 		await harness.pressKey("\x0f");
 		expect(harness.screen().text()).not.toContain("Long sticky line 5");
 
@@ -281,15 +286,13 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 		await harness.pressKey("\x1bs");
 		expect(harness.screen().text()).not.toContain("Long sticky line 5");
 
-		const rail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
-		const turn2Start = rail.offsetOf(1);
-		scroll.scrollTo(turn2Start + 6, { disableFollow: true });
+		await harness.mouseWheel("down", 28, 16, 12);
 		const shortSticky = harness.screen();
 		expect(shortSticky.rowText(4)).toContain("› Short sticky prompt");
 		expect(shortSticky.rowText(4)).not.toContain("(Alt+s)");
 
 		await harness.mouseClick(10, 4);
-		expect(scroll.scrollTop).toBe(turn2Start);
+		expect(harness.screen().findText("short-reply-1")?.row).toBeLessThan(12);
 	});
 
 	it("enforces overscroll = contain on active Modal Cards, scrollable Hover Popups, and overflowed Composer drafts, and dismisses Hover Popups when wheeling outside", async () => {
@@ -362,6 +365,7 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 			theme: "dark",
 			width: 68,
 			height: 28,
+			trueColor: false,
 			clipboard: { text: "PRESERVED_CLIPBOARD" },
 			responses: [
 				fauxAssistantMessage([
@@ -392,7 +396,6 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 			{ steps: 4 },
 		);
 
-		/* copyOnSelect = false: clipboard untouched on mouse-up, popup shows [Copy]  [Quote · Alt+Q] */
 		expect(await getActiveHostRuntime()!.clipboard.readText?.()).toBe("PRESERVED_CLIPBOARD");
 		const popupScreen = harness.screen();
 		const copyBtn = popupScreen.findText("[Copy]");
@@ -415,7 +418,6 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 		expect(harness.screen().text()).toContain("✓ Copied");
 		expect(harness.screen().text()).not.toContain("[Quote · Alt+Q]");
 
-		/* Ctrl+C copies clean selection and clears selection + popup */
 		const proseStart = harness.screen().findText("Use npm run check")!;
 		await harness.mouseDrag(
 			proseStart.col,
@@ -430,7 +432,6 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 		expect(renderer.getActiveSelectionText?.()).toBeUndefined();
 		expect(harness.screen().text()).not.toContain("[Quote · Alt+Q]");
 
-		/* Ctrl+X also copies clean selection */
 		harness.setClipboard({ text: "BEFORE_CTRL_X" });
 		await harness.mouseDrag(
 			proseStart.col,
@@ -443,7 +444,6 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 		expect(await getActiveHostRuntime()!.clipboard.readText?.()).toContain("`npm run check`");
 		expect(renderer.getActiveSelectionText?.()).toBeUndefined();
 
-		/* copyOnSelect = true: copies immediately on release and shows ✓ Copied · [Quote · Alt+Q] */
 		updatePiUiUserConfig({ copyOnSelect: true });
 		harness.setClipboard({ text: "BEFORE_AUTO_COPY" });
 		await harness.mouseDrag(
@@ -456,7 +456,18 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 		expect(await getActiveHostRuntime()!.clipboard.readText?.()).toContain("`npm run check`");
 		expect(harness.screen().text()).toContain("✓ Copied · [Quote · Alt+Q]");
 		const quoteBtn = harness.screen().findText("[Quote · Alt+Q]")!;
-		await harness.mouseClick(quoteBtn.col + 2, quoteBtn.row);
+		await harness.mouseMove(quoteBtn.col + 2, quoteBtn.row);
+		const hoverBg = harness.screen().cellAt(quoteBtn.row, quoteBtn.col + 2)?.bg;
+		expect(hoverBg?.kind).toBe("palette256");
+		if (hoverBg?.kind === "palette256") {
+			const { hue, saturation } = rgbHueDegrees(parseAnsiColorRgb(`\x1b[48;5;${hoverBg.index}m`)!);
+			expect(saturation < 0.04 || (hue > 198 && hue < 255)).toBe(true);
+		}
+		await harness.mouseMove(10, 1);
+		expect(harness.screen().text()).not.toContain("[Quote · Alt+Q]");
+		await harness.mouseDrag(proseStart.col, proseStart.row, proseStart.col + 28, proseStart.row, { steps: 2 });
+		const reOpened = harness.screen().findText("[Quote · Alt+Q]")!;
+		await harness.mouseClick(reOpened.col + 2, reOpened.row);
 		expect(getActiveComposerEditor()!.getText()).toContain("[❝ Quote #1");
 	});
 });

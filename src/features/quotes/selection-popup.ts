@@ -18,7 +18,7 @@ import {
 	getThemeSurfacePalette,
 	isLightTheme,
 	paintThemeSurfaceRow,
-	themeBgRgb,
+	blueBgRgb,
 	themeFgRgb,
 	type RgbTuple,
 } from "../../shared/ansi.ts";
@@ -125,10 +125,8 @@ export class QuoteSelectionPopup implements Component {
 		if (event.type === "move") {
 			const nextAction = this.hitAction(event.x, event.y);
 			claimHover(this, () => {
-				if (this.hoveredAction !== null) {
-					this.hoveredAction = null;
-					this.requestRender();
-				}
+				this.onDismiss?.();
+				this.requestRender();
 			});
 			if (nextAction !== this.hoveredAction) {
 				this.hoveredAction = nextAction;
@@ -192,7 +190,7 @@ export class QuoteSelectionPopup implements Component {
 
 		const paintButton = (label: string, hovered: boolean): string => {
 			if (hovered) {
-				return themeBgRgb(
+				return blueBgRgb(
 					theme,
 					palette.selectedRowBg,
 					themeFgRgb(theme, light ? palette.accent : palette.accentBright, label),
@@ -299,8 +297,7 @@ export class SelectionQuoteOverlayController {
 		selectedText: string,
 		anchorCtx: SelectionPopupAnchorContext,
 	): void {
-		const cleaned = selectedText.trim();
-		if (!tui || !cleaned || hasBlockingModalOverlay(tui)) {
+		if (!tui || !selectedText.trim() || hasBlockingModalOverlay(tui)) {
 			this.hide();
 			return;
 		}
@@ -336,7 +333,7 @@ export class SelectionQuoteOverlayController {
 		const copyOnSelectMode = Boolean(anchorCtx.copyOnSelect);
 		this.popup.resetGesture();
 		this.popup.copyOnSelectMode = copyOnSelectMode;
-		this.popup.selectedTextSnapshot = cleaned;
+		this.popup.selectedTextSnapshot = selectedText;
 
 		const termCols = Math.max(8, tui.terminal?.columns ?? 80);
 		const width = Math.min(computeSelectionPopupWidth(copyOnSelectMode), termCols);
@@ -604,7 +601,7 @@ export function installSelectionQuoteRuntimeHooks(
 						| { start?: SelectionPointLike; end?: SelectionPointLike }
 						| undefined;
 					const rawSelected = self.getActiveSelectionText?.() as string | undefined;
-					const cleaned = typeof rawSelected === "string" ? rawSelected.trim() : "";
+					const cleaned = typeof rawSelected === "string" ? rawSelected : "";
 
 					const scrollBox = runtime.scroll
 						? findScrollViewLayoutBox(self.currentLayout?.root, runtime.scroll)
@@ -613,7 +610,7 @@ export function installSelectionQuoteRuntimeHooks(
 						? bounds?.start?.scrollView === runtime.scroll
 						: !scrollBox || raw.y < scrollBox.rect.y + scrollBox.rect.height;
 
-					if (cleaned && bounds && inTranscript) {
+					if (cleaned.trim() && bounds && inTranscript) {
 						const focusPt = self.selectionFocus as SelectionPointLike | undefined;
 						const anchorPt = self.selectionAnchor as SelectionPointLike | undefined;
 						const focusCoords = pointToScreenCoords(focusPt, scrollBox, raw.x, raw.y);

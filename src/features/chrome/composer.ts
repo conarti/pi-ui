@@ -31,6 +31,7 @@ import { loadPiUiUserConfig } from "../../shared/pi-ui-config.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import { getSessionWorkflow, MODE_META } from "../../shared/session-workflow.ts";
 import {
+	dispatchLocalShortcut,
 	isSlotOwnedByPiUi,
 	PI_UI_OWNER_ID,
 	registerSlotOwnershipChangeListener,
@@ -939,12 +940,12 @@ export class PiUiComposerEditor extends CustomEditor {
 			!isKeyRelease(data) &&
 			!hasBlockingModalOverlay(this.tui)
 		) {
-			if (matchesLayoutChord(data, "ctrl+l") && isSlotOwnedByPiUi("shortcut:ctrl+l")) {
-				openComposerPopover(this.deps.pi, this.deps.ctx, "model");
+			if (matchesLayoutChord(data, "ctrl+l")) {
+				void dispatchLocalShortcut("ctrl+l");
 				return;
 			}
-			if (matchesLayoutChord(data, "alt+t") && isSlotOwnedByPiUi("shortcut:alt+t")) {
-				openComposerPopover(this.deps.pi, this.deps.ctx, "thinking");
+			if (matchesLayoutChord(data, "alt+t")) {
+				void dispatchLocalShortcut("alt+t");
 				return;
 			}
 			if (matchesLayoutChord(data, "alt+m") && isSlotOwnedByPiUi("shortcut:alt+m")) {
@@ -958,10 +959,9 @@ export class PiUiComposerEditor extends CustomEditor {
 		if (
 			!data.startsWith("\x1b[200~") &&
 			!isKeyRelease(data) &&
-			!this.isShowingAutocomplete() &&
 			!hasBlockingModalOverlay(this.tui)
 		) {
-			/* Ctrl+Shift+Z / Ctrl+Y — Redo, Ctrl+Z — Undo (без SIGTSTP) */
+			/* Даже с открытым автодополнением Ctrl+Z не должен доходить до привязки SIGTSTP хоста. */
 			if (matchesLayoutChord(data, "ctrl+shift+z") || matchesLayoutChord(data, "ctrl+y")) {
 				this.performRedo();
 				return;
@@ -971,6 +971,13 @@ export class PiUiComposerEditor extends CustomEditor {
 				return;
 			}
 
+		}
+		if (
+			!data.startsWith("\x1b[200~") &&
+			!isKeyRelease(data) &&
+			!this.isShowingAutocomplete() &&
+			!hasBlockingModalOverlay(this.tui)
+		) {
 			/* Ctrl+C во время активного хода прерывает генерацию */
 			if (
 				(data === "\x03" || matchesLayoutChord(data, "ctrl+c")) &&

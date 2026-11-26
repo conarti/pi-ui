@@ -2,16 +2,16 @@ import { randomUUID } from "node:crypto";
 import {
 	chmodSync,
 	existsSync,
-	lstatSync,
 	mkdirSync,
 	readFileSync,
+	readlinkSync,
 	realpathSync,
 	renameSync,
 	rmSync,
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 const PI_UI_CONFIG_FILE = "pi-ui.json";
@@ -69,7 +69,7 @@ function parseChoice<T extends string>(value: unknown, choices: readonly T[]): T
 		: undefined;
 }
 
-export function parseToolDensityPreset(value: unknown): ToolDensityPreset | undefined {
+function parseLegacyToolDensityPreset(value: unknown): ToolDensityPreset | undefined {
 	if (typeof value !== "string") return undefined;
 	const normalized = value.trim().toLowerCase();
 	if (normalized === "diff_focus" || normalized === "difffocus") return "diff-focus";
@@ -148,9 +148,9 @@ function readLegacyToolDensity(legacyPath: string): ToolDensityPreset | undefine
 		const parsed: unknown = JSON.parse(readFileSync(legacyPath, "utf8"));
 		if (!isJsonObject(parsed)) return undefined;
 		return (
-			parseToolDensityPreset(parsed.toolDensity) ??
-			parseToolDensityPreset(parsed.density) ??
-			parseToolDensityPreset(parsed.style)
+			parseLegacyToolDensityPreset(parsed.toolDensity) ??
+			parseLegacyToolDensityPreset(parsed.density) ??
+			parseLegacyToolDensityPreset(parsed.style)
 		);
 	} catch {
 		return undefined;
@@ -191,25 +191,28 @@ export function loadPiUiUserConfig(): PiUiUserConfig {
 	return parsePiUiUserConfig(rawObject);
 }
 
+function resolveConfigWritePath(path: string): string {
+	const seen = new Set<string>();
+	while (!seen.has(path)) {
+		seen.add(path);
+		try {
+			const target = readlinkSync(path);
+			path = resolve(realpathSync(dirname(path)), target);
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "EINVAL" || code === "ENOENT") return path;
+			throw error;
+		}
+	}
+	throw new Error(`Symlink cycle in configuration path: ${path}`);
+}
+
 /**
  * Атомарно обновляет поля `pi-ui.json`, сохраняя симлинки дотфайлов, права доступа
  * и соседние ключи будущей `Settings Modal`.
  */
 export function updatePiUiUserConfig(patch: Partial<PiUiUserConfig>): PiUiUserConfig {
-	let targetPath = getPiUiConfigPath();
-	let linked = false;
-	try {
-		linked = lstatSync(targetPath).isSymbolicLink();
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-	}
-	if (linked) {
-		try {
-			targetPath = realpathSync(targetPath);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		}
-	}
+	const targetPath = resolveConfigWritePath(resolve(getPiUiConfigPath()));
 
 	let existing: Record<string, unknown> = {};
 	let mode = 0o600;

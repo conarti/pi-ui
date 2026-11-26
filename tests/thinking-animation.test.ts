@@ -309,7 +309,7 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		await turn1;
 	});
 
-	it("renders completed collapsed Thinking blocks as ✦ › Thought for Xs per block, preserves timings across /reload, and shows ✦ › Thought for unmeasured historical entries", async () => {
+	it("renders completed collapsed Thinking blocks as ✦ › Thought for Xs per block, preserves timings across /reload, and marks unmeasured historical durations as unknown", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date("2026-11-24T12:00:00Z"));
 		const queue = createDeferredStreamQueue();
@@ -341,7 +341,7 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		const initialText = harness.screen().text();
 		expect(initialText).toContain("✦ › Thought");
 		expect(initialText).toContain("Restored reply.");
-		expect(initialText).not.toContain("Thought for");
+		expect(initialText).toContain("Thought for ?s");
 		expect(initialText).not.toContain("Historical thought from disk");
 
 		const liveTurn = harness.submitInput("Run two-stage reasoning");
@@ -455,7 +455,7 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		const histExpandedText = harness.screen().text();
 		expect(histExpandedText).toContain("✦ ⌄ Thought");
 		expect(histExpandedText).toContain("│ Restored historical reasoning");
-		expect(histExpandedText).not.toContain("Thought for");
+		expect(histExpandedText).toContain("Thought for ?s");
 
 		/* Клик по строке тела (y > 0) не сворачивает открытый блок */
 		const histBodyPos = harness.screen().findText("Restored historical reasoning")!;
@@ -795,6 +795,21 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		expect(vi.getTimerCount()).toBe(0);
 	});
 
+	it("restores the measured Thinking duration from session history at the dialogue axis", async () => {
+		harness = await createInteractiveHarness({
+			width: 36,
+			height: 28,
+			responses: [fauxAssistantMessage([fauxThinking("Reasoning to restore"), fauxText("Done.")])],
+		});
+		await harness.submitInput("Check the session");
+		const label = harness.screen().text().match(/✦ › Thought for \d+s/u)?.[0];
+		expect(label).toBeDefined();
+		const history = [...harness.sessionManager.getEntries()];
+		await harness.dispose();
+		harness = await createInteractiveHarness({ width: 36, height: 28, initialEntries: history });
+		expect(harness.screen().findText(label!)?.col).toBe(4);
+	});
+
 	it("renders Working status 1 blank row below above-editor widgets at x=4 with heading/toolSummary/Drafting transitions and clickable [stop] abort", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date("2026-11-26T09:00:00Z"));
@@ -863,6 +878,10 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		});
 		await harness.flush();
 		expect(harness.screen().rowText(stopPos!.row)).toContain("✦ Auditing parser edge cases…");
+		await harness.resize(36, 32);
+		const narrow = harness.screen();
+		expect(narrow.findText("✦ Auditing")?.col).toBe(4);
+		await harness.resize(100, 32);
 
 		/* Переход на toolSummary после >= 4.5s */
 		vi.advanceTimersByTime(4600);

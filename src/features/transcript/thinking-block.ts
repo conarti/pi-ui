@@ -1,4 +1,4 @@
-import { AssistantMessageComponent, type Theme } from "@earendil-works/pi-coding-agent";
+import { AssistantMessageComponent, type SessionEntry, type Theme } from "@earendil-works/pi-coding-agent";
 import {
 	Markdown,
 	Spacer,
@@ -20,6 +20,7 @@ import {
 	paintPolarisStar,
 } from "../../shared/animation-scheduler.ts";
 import { fgRgb, getActiveGlobalTheme, isLightTheme } from "../../shared/ansi.ts";
+import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { t } from "../../shared/i18n.ts";
 import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
@@ -31,6 +32,7 @@ const THINKING_TIMINGS_KEY = Symbol.for("conarti.pi-ui.thinking-timings.v1");
 const GLOBAL_THINKING_EXPAND_KEY = Symbol.for("conarti.pi-ui.thinking-expand-all.v1");
 const THINKING_DISPLAY_PROVIDER_KEY = Symbol.for("conarti.pi-ui.thinking-display-provider.v1");
 const MAX_TRACKED_THINKING_RUNS = 2000;
+export const THINKING_DURATION_ENTRY = "pi-ui-thinking-duration";
 
 export const STREAMING_THINKING_PAGE_LINES = 6;
 export const STREAMING_THINKING_PAGE_STEP = 3;
@@ -68,6 +70,7 @@ interface ThinkingRunTiming {
 
 interface SharedThinkingTimingStore {
 	byRunKey: Map<string, ThinkingRunTiming>;
+	restoredByRunKey: Map<string, ThinkingRunTiming>;
 	messageStartedAt: Map<number, number>;
 	activeTurnStartedAt?: number;
 }
@@ -195,10 +198,7 @@ export function formatThinkingDuration(durationMs: number | undefined): string |
 }
 
 export function formatThoughtLabel(durationMs: number | undefined): string {
-	const formatted = formatThinkingDuration(durationMs);
-	return formatted
-		? t("thinking.thoughtFor", { duration: formatted })
-		: t("thinking.thought");
+	return t("thinking.thoughtFor", { duration: formatThinkingDuration(durationMs) ?? t("thinking.unknownDuration") });
 }
 
 export function isThinkingBlock(value: unknown): boolean {
@@ -215,6 +215,7 @@ function getSharedThinkingTimingStore(): SharedThinkingTimingStore {
 	if (!g[THINKING_TIMINGS_KEY]) {
 		g[THINKING_TIMINGS_KEY] = {
 			byRunKey: new Map(),
+			restoredByRunKey: new Map(),
 			messageStartedAt: new Map(),
 		};
 	}
@@ -242,8 +243,36 @@ export function noteThinkingTurnStart(now = Date.now()): void {
 export function clearRecordedThinkingTimings(): void {
 	const store = getSharedThinkingTimingStore();
 	store.byRunKey.clear();
+	store.restoredByRunKey?.clear();
 	store.messageStartedAt.clear();
 	store.activeTurnStartedAt = undefined;
+}
+
+export function getMeasuredThinkingDurations(message: { timestamp: number; content: readonly unknown[] }) {
+	const { byRunKey } = getSharedThinkingTimingStore();
+	const runs: Record<number, number> = {};
+	for (let index = 0; index < message.content.length; index += 1) {
+		const timing = byRunKey.get(`${message.timestamp}:${index}`);
+		if (timing?.endedAt !== undefined) runs[index] = Math.max(0, timing.endedAt - timing.startedAt);
+	}
+	return Object.keys(runs).length ? { timestamp: message.timestamp, runs } : undefined;
+}
+
+export function restoreThinkingDurations(entries: readonly SessionEntry[]): void {
+	const store = getSharedThinkingTimingStore();
+	const restored = store.restoredByRunKey ??= new Map();
+	for (const entry of entries) {
+		if (entry.type !== "custom" || entry.customType !== THINKING_DURATION_ENTRY) continue;
+		const data = entry.data as { timestamp?: unknown; runs?: unknown } | undefined;
+		if (typeof data?.timestamp !== "number" || !Number.isFinite(data.timestamp) ||
+			!data.runs || typeof data.runs !== "object") continue;
+		for (const [index, duration] of Object.entries(data.runs)) {
+			if (!/^\d+$/u.test(index) || typeof duration !== "number" || !Number.isFinite(duration) || duration < 0) continue;
+			restored.set(`${data.timestamp}:${index}`, {
+				startedAt: 0, endedAt: duration, signature: "", closedByEvent: true,
+			});
+		}
+	}
 }
 
 function makeThinkingRunKey(message: any, runIndex: number): string | undefined {
@@ -280,7 +309,8 @@ function lookupSharedTiming(
 	isStreaming: boolean,
 ): ThinkingRunTiming | undefined {
 	if (!key) return undefined;
-	const existing = getSharedThinkingTimingStore().byRunKey.get(key);
+	const { byRunKey, restoredByRunKey } = getSharedThinkingTimingStore();
+	const existing = byRunKey.get(key) ?? (!isStreaming ? restoredByRunKey?.get(key) : undefined);
 	if (!existing) return undefined;
 	if (!existing.signature || !sig) return existing;
 	if (
@@ -483,8 +513,8 @@ export class ThinkingBlock implements Component {
 		if (width <= 0) return [];
 		const activeTheme = getActiveGlobalTheme(this.themeRef);
 		const light = isLightTheme(activeTheme);
-		const leftPad = width >= 48 ? 4 : 2;
-		const rightPad = width >= 48 ? 2 : 1;
+		const rightPad = computeOuterCanvasMargin(width);
+		const leftPad = rightPad + 2;
 		const margin = " ".repeat(leftPad);
 		const maxRowWidth = Math.max(8, width - rightPad);
 		const cappedWidth = Math.max(8, Math.min(width - leftPad - rightPad, MAX_THOUGHTS_WIDTH));
@@ -746,9 +776,10 @@ export function installAssistantTranscriptBlocks(): void {
 			const markdownBlock = (kind: string, text: string, create: () => Markdown) => {
 				const slot = previousSlots[self.markdownSlots.length];
 				const markdown = slot?.kind === kind ? slot.markdown : create();
-				const mdAny = markdown as unknown as { __conartiStreaming?: boolean };
+				const mdAny = markdown as Markdown & { __conartiStreaming?: boolean; __conartiAssistantMarkdown?: boolean };
 				const nextStreaming = Boolean(isStreaming);
-				if (mdAny.__conartiStreaming !== nextStreaming) {
+				if (!mdAny.__conartiAssistantMarkdown || mdAny.__conartiStreaming !== nextStreaming) {
+					mdAny.__conartiAssistantMarkdown = true;
 					mdAny.__conartiStreaming = nextStreaming;
 					markdown.invalidate();
 				}

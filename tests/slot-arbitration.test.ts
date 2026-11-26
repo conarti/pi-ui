@@ -548,6 +548,41 @@ describe("Dynamic capability-based Slot Arbitration (ADR-0007)", () => {
 		expect(harness.screen().text()).toContain("REPLACEMENT_EDITOR");
 	});
 
+	it("does not collide with a differently cased command name", async () => {
+		harness = await createInteractiveHarness({ extensionFactories: [(pi) => {
+			pi.registerCommand("Stats", {
+				description: "Case-sensitive command",
+				handler: async (_args, ctx) => ctx.ui.notify("CAPITALIZED_STATS", "info"),
+			});
+		}] });
+		await flushDeferredUi(harness);
+		expect(harness.screen().text()).not.toContain("Slot Arbitration");
+		await harness.submitInput("/Stats");
+		expect(harness.screen().text()).toContain("CAPITALIZED_STATS");
+	});
+
+	it("batches and switches locally dispatched Composer and Sticky Prompt shortcuts", async () => {
+		const plugin: ExtensionFactory = (pi) => {
+			for (const chord of ["ctrl+l", "alt+t", "alt+s"] as const) {
+				pi.registerShortcut(chord, {
+					description: `Third-party ${chord}`,
+					handler: async (ctx) => ctx.ui.notify(`THIRD_PARTY_${chord}`, "info"),
+				});
+			}
+		};
+		harness = await createInteractiveHarness({ width: 112, height: 32, extensionFactories: [plugin] });
+		await waitForCondition(() => harness!.screen().text().includes("Slot Arbitration"));
+		for (const chord of ["ctrl+l", "alt+t", "alt+s"]) {
+			expect(harness.screen().text()).toContain(`Shortcut ${chord}`);
+		}
+		await harness.pressKey("\r");
+		for (const [chord, sequence] of [["ctrl+l", "\x0c"], ["alt+t", "\x1bt"], ["alt+s", "\x1bs"]] as const) {
+			await harness.submitInput(`/slots shortcut:${chord} inline-1`);
+			await harness.pressKey(sequence);
+			expect(harness.screen().text()).toContain(`THIRD_PARTY_${chord}`);
+		}
+	});
+
 	it("arbitrates Ctrl+K live even though Pi reserves that chord for the editor", async () => {
 		const plugin: ExtensionFactory = (pi) => pi.registerShortcut("ctrl+k", {
 			description: "Third-party picker",

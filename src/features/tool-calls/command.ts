@@ -26,30 +26,25 @@ import {
 	type ToolDensity,
 } from "./types.ts";
 import {
-	parseToolDensityPreset,
 	TOOL_DENSITY_PRESETS,
 	updatePiUiUserConfig,
 	type ToolDensityPreset,
 } from "../../shared/pi-ui-config.ts";
+import { t } from "../../shared/i18n.ts";
 import { loadConfig } from "./config.ts";
 
 type Scope = "global" | "project";
 const SCOPES: readonly Scope[] = ["global", "project"];
 
-const DENSITY_HELP =
-	"Usage: /density [balanced|compact|grouped|diff-focus|detailed] [global|project]\n/density status · /density help\nSwitches Tool Density live without reload. Ctrl+O or click expands rows; /silent toggles quiet mode.";
-
-const COMPACT_HELP =
-	"Usage: /compact-tools [balanced|compact|grouped|diff-focus|detailed|off] [global|project]\nWithout a scope the preset applies live (and updates active settings when configured).\n/compact-tools status · /compact-tools help\nCtrl+O expands rows; /silent toggles quiet mode.";
-
-const BUSY = "Wait for the current response to finish before changing tool styles.";
+const DENSITY_HELP = t("density.help");
+const COMPACT_HELP = t("density.compatHelp");
 
 const DENSITY_CHOICES: Record<ToolDensity, string> = {
-	balanced: "Balanced - folds read-only explorations; keeps edits, commands, and custom tools on 1 row (default)",
-	compact: "Compact - folds consecutive tool calls and textless thinking into 1 summary row",
-	grouped: "Grouped - groups consecutive calls separately by category (Explored, Edited, Ran)",
-	"diff-focus": "Diff Focus - inline edit/write diffs open, completed commands collapsed to 1 row",
-	detailed: "Detailed - inline diffs + 2 head + 3 tail command output previews",
+	balanced: t("density.choice.balanced"),
+	compact: t("density.choice.compact"),
+	grouped: t("density.choice.grouped"),
+	"diff-focus": t("density.choice.diff-focus"),
+	detailed: t("density.choice.detailed"),
 };
 
 type SelectableStyle = ToolDensity | "off";
@@ -59,7 +54,7 @@ const STYLE_CHOICES: Record<SelectableStyle, string> = {
 	grouped: DENSITY_CHOICES.grouped,
 	"diff-focus": DENSITY_CHOICES["diff-focus"],
 	detailed: DENSITY_CHOICES.detailed,
-	off: "Off - restore Pi's native UI",
+	off: t("density.choice.off"),
 };
 
 function isToolDensityValue(value: DisplayStyle): value is ToolDensity {
@@ -177,7 +172,7 @@ function globalSetsStyle(cwd: string): boolean {
 }
 
 function describePath(path: string): string {
-	return `${path} (${existsSync(path) ? "exists" : "not created"})`;
+	return t(existsSync(path) ? "density.fileExists" : "density.fileMissing", { path });
 }
 
 function errorMessage(error: unknown): string {
@@ -187,11 +182,13 @@ function errorMessage(error: unknown): string {
 function formatStatus(config: CompactToolsConfig, ctx: ExtensionContext): string {
 	const activePreset = config.style === "density" ? config.density : config.style;
 	return [
-		`Density: ${config.density} · active style: ${activePreset} · mode: ${config.mode} · preview: ${config.previewLines} lines`,
-		`Thinking styling: ${config.thinking} · working override: ${config.working}`,
-		`Global: ${describePath(configPath(ctx.cwd, "global"))}`,
-		`Project: ${describePath(configPath(ctx.cwd, "project"))} (${ctx.isProjectTrusted() ? "trusted; overrides global" : "untrusted; ignored"})`,
-		"/density switches Balanced, Compact, Grouped, Diff Focus, and Detailed; /silent toggles quiet mode; Ctrl+O expands rows.",
+		t("density.status.main", { density: config.density, active: activePreset, mode: config.mode, lines: config.previewLines }),
+		t("density.status.thinking", { thinking: String(config.thinking), working: String(config.working) }),
+		t("density.status.global", { path: describePath(configPath(ctx.cwd, "global")) }),
+		t(ctx.isProjectTrusted() ? "density.status.projectTrusted" : "density.status.projectUntrusted", {
+			path: describePath(configPath(ctx.cwd, "project")),
+		}),
+		t("density.status.hint"),
 	].join("\n");
 }
 
@@ -206,13 +203,13 @@ function applySelection(
 ): Promise<void> | void {
 	const trusted = ctx.isProjectTrusted();
 	if (explicitScope === "project" && !trusted) {
-		ctx.ui.notify("Project settings require a trusted project. No file was changed.", "warning");
+		ctx.ui.notify(t("density.projectUntrusted"), "warning");
 		return;
 	}
 
 	const reloads = !applyStyle;
 	if (reloads && !ctx.isIdle()) {
-		ctx.ui.notify(BUSY, "warning");
+		ctx.ui.notify(t("density.busy"), "warning");
 		return;
 	}
 
@@ -226,7 +223,7 @@ function applySelection(
 		try {
 			saveStyle(path, selection);
 		} catch (error) {
-			ctx.ui.notify(`Could not save ${path}: ${errorMessage(error)}. No settings were replaced.`, "error");
+			ctx.ui.notify(t("density.saveFailed", { path, error: errorMessage(error) }), "error");
 			return;
 		}
 		setSessionStyleOverride(undefined);
@@ -234,34 +231,34 @@ function applySelection(
 		const effectiveLabel =
 			effectiveConfig.style === "density" ? effectiveConfig.density : effectiveConfig.style;
 		const requestedLabel = selection === "density" ? "balanced" : selection;
-		const where = targetScope === "project" ? "this project" : "global settings";
+		const where = t(targetScope === "project" ? "density.scope.project" : "density.scope.global");
 
 		if (targetScope === "global" && effectiveLabel !== requestedLabel) {
 			ctx.ui.notify(
-				`Saved ${requestedLabel} to global settings, but this project keeps its own ${effectiveLabel} setting. Run /${commandName} ${requestedLabel} project to switch it here.`,
+				t("density.savedOverridden", { preset: requestedLabel, effective: effectiveLabel, command: commandName }),
 				"warning",
 			);
 			return;
 		}
 		if (!reloads && applyStyle!(ctx.cwd, trusted, ctx)) {
-			ctx.ui.notify(`Switched to ${requestedLabel} (saved to ${where}).`, "info");
+			ctx.ui.notify(t("density.switchedAndSaved", { preset: requestedLabel, where }), "info");
 			return;
 		}
 		if (!ctx.isIdle()) {
 			ctx.ui.notify(
-				`Saved ${requestedLabel} to ${where}. It applies once the response finishes; run /reload then.`,
+				t("density.savedPending", { preset: requestedLabel, where }),
 				"warning",
 			);
 			return;
 		}
 		if (typeof ctx.reload !== "function") {
-			ctx.ui.notify(`Saved ${requestedLabel} to ${where}. Run /reload to apply it.`, "info");
+			ctx.ui.notify(t("density.savedReload", { preset: requestedLabel, where }), "info");
 			return;
 		}
 		const ui = ctx.ui;
 		return Promise.resolve(ctx.reload()).catch((error) => {
 			ui.notify(
-				`Setting was saved, but reload failed: ${errorMessage(error)}. Run /reload to apply it.`,
+				t("density.reloadFailed", { error: errorMessage(error) }),
 				"error",
 			);
 		});
@@ -278,7 +275,7 @@ function applySelection(
 
 	const label = selection === "density" ? "balanced" : selection;
 	if (!reloads && applyStyle!(ctx.cwd, trusted, ctx)) {
-		ctx.ui.notify(`Switched to ${label}.`, "info");
+		ctx.ui.notify(t("density.switched", { preset: label }), "info");
 	}
 }
 
@@ -288,11 +285,11 @@ export function registerDensityCommand(
 	applyStyle?: ApplyStyle,
 ): void {
 	pi.registerCommand("density", {
-		description: "Switch Tool Density live (balanced, compact, grouped, diff-focus, detailed)",
+		description: t("density.command"),
 		getArgumentCompletions: (prefix) => {
 			const typed = prefix.trimStart().toLowerCase();
 			const parts = typed.split(/\s+/);
-			const scoped = parts.length === 2 && Boolean(parseToolDensityPreset(parts[0]));
+			const scoped = parts.length === 2 && TOOL_DENSITY_PRESETS.some((preset) => preset === parts[0]);
 			const values = scoped
 				? SCOPES.map((scope) => `${parts[0]} ${scope}`)
 				: [...TOOL_DENSITY_PRESETS, "status", "help"];
@@ -302,12 +299,8 @@ export function registerDensityCommand(
 			return items.length ? items : null;
 		},
 		handler: async (args, ctx) => {
-			const rawParts = args.trim() ? args.trim().toLowerCase().split(/\s+/) : [];
-			const parsedPreset = rawParts[0] !== undefined ? parseToolDensityPreset(rawParts[0]) : undefined;
-			const parts =
-				parsedPreset !== undefined
-					? [parsedPreset, ...rawParts.slice(1)]
-					: rawParts;
+			const parts = args.trim() ? args.trim().toLowerCase().split(/\s+/) : [];
+			const parsedPreset = TOOL_DENSITY_PRESETS.find((preset) => preset === parts[0]);
 
 			if (parts.length === 1 && parts[0] === "help") {
 				ctx.ui.notify(DENSITY_HELP, "info");
@@ -335,7 +328,7 @@ export function registerDensityCommand(
 				}
 				const current = getConfig();
 				const selected = await ctx.ui.select(
-					`Tool Density (current: ${current.density})`,
+					t("density.select", { preset: current.density }),
 					Object.values(DENSITY_CHOICES),
 				);
 				preset = TOOL_DENSITIES.find((value) => DENSITY_CHOICES[value] === selected);
@@ -357,7 +350,7 @@ export function registerCompactToolsCommand(
 ): void {
 	const selectableStyles = Object.keys(STYLE_CHOICES) as SelectableStyle[];
 	pi.registerCommand("compact-tools", {
-		description: "Choose Tool Density or restore Pi’s native tool rendering",
+		description: t("density.compatCommand"),
 		getArgumentCompletions: (prefix) => {
 			const typed = prefix.trimStart().toLowerCase();
 			const parts = typed.split(/\s+/);
@@ -403,24 +396,18 @@ export function registerCompactToolsCommand(
 				const current = getConfig();
 				const activeLabel = current.style === "density" ? current.density : current.style;
 				const selected = await ctx.ui.select(
-					`Tool density / style (current: ${activeLabel})`,
+					t("density.selectStyle", { preset: activeLabel }),
 					Object.values(STYLE_CHOICES),
 				);
 				style = selectableStyles.find((value) => STYLE_CHOICES[value] === selected);
 				if (!style) return;
 				const projectDecides = projectSetsStyle(ctx.cwd, ctx.isProjectTrusted());
-				const scopes = projectDecides
-					? [
-							"Project - this trusted project only",
-							"Global - all projects (this project keeps its own setting)",
-						]
-					: [
-							"Global - all projects",
-							...(ctx.isProjectTrusted() ? ["Project - this trusted project only"] : []),
-						];
-				const selectedScope = await ctx.ui.select("Save setting where?", scopes);
+				const project = t("density.scope.projectChoice");
+				const global = t(projectDecides ? "density.scope.globalOverriddenChoice" : "density.scope.globalChoice");
+				const scopes = projectDecides ? [project, global] : ctx.isProjectTrusted() ? [global, project] : [global];
+				const selectedScope = await ctx.ui.select(t("density.selectScope"), scopes);
 				if (!selectedScope) return;
-				explicitScope = selectedScope.startsWith("Project") ? "project" : "global";
+				explicitScope = selectedScope === project ? "project" : "global";
 			}
 
 			await applySelection(style, explicitScope, ctx, applyStyle, "compact-tools");

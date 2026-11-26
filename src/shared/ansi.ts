@@ -222,8 +222,8 @@ const BLUE_ANSI_CUBE = Array.from({ length: 216 }, (_, i) => {
 	return { index, rgb: ansi256ToRgb(index)! };
 }).filter(({ rgb }) => isBlueOrNeutral(rgb));
 
-export function blueFgRgbPrefix(rgb: RgbTuple, theme?: unknown): string {
-	if (!is256ColorTheme(theme)) return openAnsiRgb(38, ...rgb, theme);
+function blueAnsiPrefix(set: 38 | 48, rgb: RgbTuple, theme?: unknown): string {
+	if (!is256ColorTheme(theme)) return openAnsiRgb(set, ...rgb, theme);
 	const [r, g, b] = rgb;
 	let index = rgbToAnsi256(r, g, b);
 	/* Квантование может превратить безопасный RGB в бирюзу; для волны подбираем ближайший допустимый цвет. */
@@ -238,7 +238,15 @@ export function blueFgRgbPrefix(rgb: RgbTuple, theme?: unknown): string {
 			}
 		}
 	}
-	return `\x1b[38;5;${index}m`;
+	return `\x1b[${set};5;${index}m`;
+}
+
+export function blueFgRgbPrefix(rgb: RgbTuple, theme?: unknown): string {
+	return blueAnsiPrefix(38, rgb, theme);
+}
+
+export function blueBgRgb(theme: unknown, rgb: RgbTuple, text: string): string {
+	return `${blueAnsiPrefix(48, clampHueOutsideForbiddenBands(rgb), theme)}${text}\x1b[49m`;
 }
 
 export function themeFgRgb(theme: unknown, rgb: RgbTuple, text: string): string {

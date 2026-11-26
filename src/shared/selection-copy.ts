@@ -31,6 +31,7 @@ interface ParsedItem {
 	readonly text: string;
 	readonly screenWidth: number;
 	readonly wrapWidth: number;
+	readonly singleWord?: boolean;
 }
 
 const COLLAPSED_THINKING_RE =
@@ -260,20 +261,6 @@ function stripFrameAndRailPrefix(text: string): { text: string; isBlockquote: bo
 	return { text: s, isBlockquote: false };
 }
 
-function dedentCodeBlock(lines: readonly string[]): string[] {
-	let minIndent = Number.POSITIVE_INFINITY;
-	for (const line of lines) {
-		if (!line.trim()) continue;
-		const leadMatch = /^(\s*)/.exec(line);
-		const lead = leadMatch ? leadMatch[1]!.length : 0;
-		if (lead < minIndent) minIndent = lead;
-	}
-	if (!Number.isFinite(minIndent) || minIndent <= 0) {
-		return [...lines];
-	}
-	return lines.map((line) => (line.trim() ? line.slice(minIndent) : ""));
-}
-
 function shouldUnwrapProsePair(prev: ParsedItem, curr: ParsedItem): boolean {
 	if (prev.kind !== curr.kind) return false;
 	if (prev.kind !== "prose" && prev.kind !== "blockquote") return false;
@@ -288,16 +275,13 @@ function shouldUnwrapProsePair(prev: ParsedItem, curr: ParsedItem): boolean {
 	return prev.screenWidth + 1 + firstWordPlainWidth > prev.wrapWidth - 1;
 }
 
-function joinWrappedText(prevText: string, currText: string, prevScreenWidth: number, wrapWidth: number): string {
+function joinWrappedText(prevText: string, currText: string, prev: ParsedItem): string {
+	const sep = prev.screenWidth >= prev.wrapWidth && prev.singleWord ? "" : " ";
 	/* Склейка одного inline-code спана, перенесённого терминалом на следующую строку */
 	if (prevText.endsWith("`") && currText.startsWith("`")) {
-		const sep = prevScreenWidth >= wrapWidth && !/\s/u.test(prevText) ? "" : " ";
 		return `${prevText.slice(0, -1)}${sep}${currText.slice(1)}`;
 	}
-	if (prevScreenWidth >= wrapWidth && !/\s/u.test(prevText)) {
-		return `${prevText}${currText}`;
-	}
-	return `${prevText} ${currText}`;
+	return `${prevText}${sep}${currText}`;
 }
 
 /**
@@ -333,6 +317,19 @@ export function extractCleanSelectionText(
 		const fullPlainTrimmed = stripTerminalSequences(entry.fullLine).trim();
 		if (surface !== "user-card" || !fullPlainTrimmed) promptWrapWidth = undefined;
 
+		if (surface === "code-body") {
+			/* Две ячейки внутри цветного фона принадлежат карточке, а не коду. */
+			const bgStart = entry.fullLine.search(/\x1b\[48;(?:2;\d+;\d+;\d+|5;\d+)m/u);
+			const codeStart = visibleWidth(entry.fullLine.slice(0, bgStart)) + 2;
+			parsed.push({
+				kind: "code",
+				text: plainSelected.slice(Math.max(0, codeStart - entry.startCol)).trimEnd(),
+				screenWidth: 0,
+				wrapWidth: 0,
+			});
+			continue;
+		}
+
 		if (!plainTrimmed) {
 			parsed.push({ kind: "blank", text: "", screenWidth: 0, wrapWidth: 0 });
 			continue;
@@ -349,19 +346,6 @@ export function extractCleanSelectionText(
 		}
 
 		const contentW = entry.contentWidth ?? Math.max(40, visibleWidth(entry.fullLine));
-
-		if (surface === "code-body") {
-			const strippedCode = plainSelected
-				.replace(/^\s*▎\s?/u, "")
-				.trimEnd();
-			parsed.push({
-				kind: "code",
-				text: strippedCode,
-				screenWidth: visibleWidth(strippedCode),
-				wrapWidth: contentW,
-			});
-			continue;
-		}
 
 		if (surface === "user-card") {
 			const firstRow = fullPlainTrimmed.startsWith("› ");
@@ -384,18 +368,21 @@ export function extractCleanSelectionText(
 				continue;
 			}
 			const wrapW = Math.max(4, promptWrapWidth ?? innerWidth);
+			const fullText = (tail ? fullPlainTrimmed.slice(0, tail.index) : fullPlainTrimmed)
+				.replace(/^› /u, "");
 			parsed.push({
 				kind: "prose",
 				text: cardText,
-				screenWidth: visibleWidth(cardText),
+				screenWidth: visibleWidth(fullText),
 				wrapWidth: wrapW,
+				singleWord: !/\s/u.test(fullText),
 			});
 			continue;
 		}
 
 		const withBackticks = restoreInlineCodeBackticks(entry.selectedAnsi, mdCodeRgb);
 		const cleaned = stripFrameAndRailPrefix(withBackticks);
-		const plainCleaned = stripFrameAndRailPrefix(plainSelected);
+		const fullCleaned = stripFrameAndRailPrefix(stripTerminalSequences(entry.fullLine));
 		if (!cleaned.text) {
 			parsed.push({ kind: "blank", text: "", screenWidth: 0, wrapWidth: 0 });
 			continue;
@@ -407,14 +394,15 @@ export function extractCleanSelectionText(
 				stripTerminalSequences(entry.fullLine).trimStart().length,
 		);
 		const horizontalPad = leftPad >= 4 ? leftPad * 2 : 4;
-		const quoteExtra = cleaned.isBlockquote ? 2 : 0;
+		const quoteExtra = fullCleaned.isBlockquote ? 2 : 0;
 		const wrapW = Math.max(16, contentW - horizontalPad - quoteExtra);
 
 		parsed.push({
-			kind: cleaned.isBlockquote ? "blockquote" : "prose",
+			kind: fullCleaned.isBlockquote ? "blockquote" : "prose",
 			text: cleaned.text,
-			screenWidth: visibleWidth(plainCleaned.text),
+			screenWidth: visibleWidth(fullCleaned.text),
 			wrapWidth: wrapW,
+			singleWord: !/\s/u.test(fullCleaned.text),
 		});
 	}
 
@@ -434,7 +422,7 @@ export function extractCleanSelectionText(
 				codeChunk.push(parsed[i]!.text);
 				i += 1;
 			}
-			outputBlocks.push(dedentCodeBlock(codeChunk).join("\n"));
+			outputBlocks.push(codeChunk.join("\n"));
 			continue;
 		}
 
@@ -450,8 +438,7 @@ export function extractCleanSelectionText(
 				proseLines[lastIdx] = joinWrappedText(
 					proseLines[lastIdx]!,
 					curr.text,
-					prev.screenWidth,
-					prev.wrapWidth,
+					prev,
 				);
 			} else {
 				proseLines.push(curr.text);
@@ -463,5 +450,5 @@ export function extractCleanSelectionText(
 		outputBlocks.push(proseLines.join("\n"));
 	}
 
-	return outputBlocks.join("\n\n").trim();
+	return outputBlocks.join("\n\n");
 }

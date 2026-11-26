@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import {
 	convertToPng,
 	InteractiveMode,
@@ -648,6 +648,35 @@ function execOpenTarget(target: string): Promise<ExternalOpenResult> {
 	});
 }
 
+let externalEditorRunning = false;
+
+async function runTerminalEditor(command: string, args: readonly string[]): Promise<ExternalOpenResult> {
+	if (externalEditorRunning) return { ok: false, error: "An external editor is already running" };
+	const runtime = getActiveHostRuntime();
+	const tui = runtime?.tui;
+	externalEditorRunning = true;
+	/* Интерактивный редактор читает тот же терминал: хост должен снять raw mode и обработчики ввода. */
+	try {
+		tui?.stop();
+		return await new Promise<ExternalOpenResult>((resolve) => {
+			const child = spawn(command, args, { stdio: "inherit" });
+			child.once("error", (error) => resolve({ ok: false, error: error.message }));
+			child.once("close", (code, signal) => resolve(code === 0
+				? { ok: true }
+				: { ok: false, error: `Editor exited with ${signal ?? code}` }));
+		});
+	} catch (error) {
+		return { ok: false, error: error instanceof Error ? error.message : String(error) };
+	} finally {
+		externalEditorRunning = false;
+		if (tui && getActiveHostRuntime() === runtime) {
+			tui.start();
+			if (runtime?.isFullscreen) enablePointerMotionTracking(tui, true);
+			tui.requestRender(true);
+		}
+	}
+}
+
 export const defaultHostExternalOpener: HostExternalOpener = {
 	async openUrl(rawUrl: string): Promise<ExternalOpenResult> {
 		const trimmed = rawUrl.trim();
@@ -675,15 +704,7 @@ export const defaultHostExternalOpener: HostExternalOpener = {
 			options,
 		);
 		if (editorCmd) {
-			return await new Promise((resolve) => {
-				execFile(editorCmd.command, editorCmd.args, { timeout: 5000 }, (err) => {
-					if (err) {
-						resolve({ ok: false, error: err.message });
-						return;
-					}
-					resolve({ ok: true });
-				});
-			});
+			return await runTerminalEditor(editorCmd.command, editorCmd.args);
 		}
 		return await execOpenTarget(trimmed);
 	},

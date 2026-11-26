@@ -52,6 +52,7 @@ import {
 	METRICS_ENTRY_TYPE,
 	normalizeLegacyPiStamp,
 	normalizeResponseMetricsEntry,
+	resolveTurnTtft,
 	type ResponseMetricsData,
 	type SessionTelemetrySummary,
 } from "./telemetry.ts";
@@ -754,7 +755,8 @@ export function registerContextInspectorFeature(pi: ExtensionAPI): void {
 				if (!cfg.responseMetrics && !formatCompletionTimestamp(data.completedAt, cfg.timestamps)) {
 					return undefined;
 				}
-				return new ResponseMetricsRowComponent(data, theme, openSessionUsageTab);
+				return new ResponseMetricsRowComponent(data, theme, openSessionUsageTab,
+					() => resolveTurnTtft(activeCtx?.sessionManager.getBranch() ?? [], entry.id));
 			},
 		);
 
@@ -771,7 +773,8 @@ export function registerContextInspectorFeature(pi: ExtensionAPI): void {
 				) {
 					return undefined;
 				}
-				return new ResponseMetricsRowComponent(normalized, theme, openSessionUsageTab);
+				return new ResponseMetricsRowComponent(normalized, theme, openSessionUsageTab,
+					() => resolveTurnTtft(activeCtx?.sessionManager.getBranch() ?? [], entry.id));
 			},
 		);
 

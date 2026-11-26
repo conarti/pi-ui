@@ -230,7 +230,8 @@ function hasNestedArguments(args: ToolArgs): boolean {
 
 /** The call line: a status dot, the tool, and what it was asked, then any arguments the line leaves out. */
 function renderRowCall(name: string, args: ToolArgs, theme: Theme, ctx: RenderContext): Component {
-	return withOutputPad(renderRowCallContent(name, args, theme, ctx), ctx.outputPad);
+	const row = renderRowCallContent(name, args, theme, ctx);
+	return isDensity() ? row : withOutputPad(row, ctx.outputPad);
 }
 
 function renderRowCallContent(name: string, args: ToolArgs, theme: Theme, ctx: RenderContext): Component {
@@ -535,7 +536,7 @@ function renderRowResult(
 	state.lastResultDurationMs = state.durationMs;
 	state.lastResultOutputPad = ctx.outputPad;
 	state.lastResultExpandKey = toolExpandKey(ctx);
-	let drawn = withOutputPad(component, ctx.outputPad);
+	let drawn = isDensity() ? component : withOutputPad(component, ctx.outputPad);
 	if (name !== "codemode" || options.isPartial || !watchNested) return drawn;
 	// The host can deliver a final nested snapshot (or a cancelled child's end)
 	// after the parent's result. Read through at draw time, not only on updateResult.

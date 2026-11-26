@@ -1,25 +1,12 @@
-import type { TimestampDisplayMode } from "../../shared/pi-ui-config.ts";
+import { formatTranscriptTimestamp } from "../../shared/transcript-timestamp.ts";
+
+export { formatTranscriptTimestamp as formatCompletionTimestamp };
 
 export const METRICS_ENTRY_TYPE = "response-metrics";
 export const LEGACY_STAMP_ENTRY_TYPE = "pi-stamp";
 
 const MIN_STREAM_DECODE_MS = 100;
 const MIN_STREAM_OUTPUT_TOKENS = 2;
-
-const SHORT_MONTH_NAMES = [
-	"Jan",
-	"Feb",
-	"Mar",
-	"Apr",
-	"May",
-	"Jun",
-	"Jul",
-	"Aug",
-	"Sep",
-	"Oct",
-	"Nov",
-	"Dec",
-] as const;
 
 export interface ResponseMetricsData {
 	readonly version: 1;
@@ -207,28 +194,6 @@ export function formatIntegerCount(value: number): string {
 	return Math.round(value).toLocaleString("en-US");
 }
 
-export function formatCompletionTimestamp(
-	timestamp: number | string | undefined,
-	mode: TimestampDisplayMode,
-	now: Date = new Date(),
-): string {
-	if (mode === "off" || timestamp === undefined) return "";
-	const date = new Date(timestamp);
-	if (Number.isNaN(date.getTime())) return "";
-	const hh = String(date.getHours()).padStart(2, "0");
-	const mm = String(date.getMinutes()).padStart(2, "0");
-	if (mode === "time") {
-		return `${hh}:${mm}`;
-	}
-	const day = date.getDate();
-	const month = SHORT_MONTH_NAMES[date.getMonth()] ?? "Jan";
-	const year = date.getFullYear();
-	if (year !== now.getFullYear()) {
-		return `${day} ${month} ${year}, ${hh}:${mm}`;
-	}
-	return `${day} ${month}, ${hh}:${mm}`;
-}
-
 export function normalizeResponseMetricsEntry(raw: unknown): ResponseMetricsData | undefined {
 	if (!isRecord(raw) || !isValidMs(raw.timestamp) || !isValidMs(raw.completedAt)) {
 		return undefined;
@@ -362,6 +327,34 @@ function median(values: readonly number[]): number {
 	return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
 }
 
+function readStepMetrics(entry: Record<string, unknown>) {
+	if (entry.type !== "custom") return undefined;
+	const data = entry.customType === METRICS_ENTRY_TYPE
+		? normalizeResponseMetricsEntry(entry.data)
+		: entry.customType === LEGACY_STAMP_ENTRY_TYPE ? normalizeLegacyPiStamp(entry.data) : undefined;
+	if (!data || "userTimestamp" in data) return undefined;
+	const computed = computeStepMetrics(data);
+	return computed ? { data, computed } : undefined;
+}
+
+function computeTurnTtft(steps: readonly Pick<StepMetricsRecord, "data" | "computed">[]): number | undefined {
+	const firstContent = steps.find((step) => step.computed.ttftMs !== undefined);
+	return firstContent && firstContent.data.timestamp - steps[0]!.data.timestamp + firstContent.computed.ttftMs!;
+}
+
+export function resolveTurnTtft(branch: readonly unknown[], finalEntryId: string): number | undefined {
+	const end = branch.findLastIndex((entry) => isRecord(entry) && entry.id === finalEntryId);
+	const steps: NonNullable<ReturnType<typeof readStepMetrics>>[] = [];
+	for (let index = end; index >= 0; index -= 1) {
+		const entry = branch[index];
+		if (!isRecord(entry)) continue;
+		if (entry.type === "message" && isRecord(entry.message) && entry.message.role === "user") break;
+		const step = readStepMetrics(entry);
+		if (step) steps.push(step);
+	}
+	return computeTurnTtft(steps.reverse());
+}
+
 export function aggregateSessionTelemetry(
 	branch: readonly unknown[],
 	fallbackModel = "unknown",
@@ -404,24 +397,8 @@ export function aggregateSessionTelemetry(
 			continue;
 		}
 
-		if (entry.type !== "custom") continue;
-		let data: ResponseMetricsData | undefined;
-		if (entry.customType === METRICS_ENTRY_TYPE) {
-			data = normalizeResponseMetricsEntry(entry.data);
-		} else if (entry.customType === LEGACY_STAMP_ENTRY_TYPE) {
-			const normalized = normalizeLegacyPiStamp(entry.data);
-			if (normalized && !("userTimestamp" in normalized)) {
-				data = normalized;
-			}
-		}
-		if (!data) continue;
-		const computed = computeStepMetrics(data);
-		if (!computed) continue;
-		records.push({
-			turnIndex: Math.max(1, turnCount || records.length + 1),
-			data,
-			computed,
-		});
+		const step = readStepMetrics(entry);
+		if (step) records.push({ turnIndex: Math.max(1, turnCount || records.length + 1), ...step });
 	}
 
 	const apiTimeMs = records.reduce((acc, rec) => acc + rec.computed.totalMs, 0);
@@ -482,10 +459,7 @@ export function aggregateSessionTelemetry(
 					? finalStep.data.completedAt - userTs
 					: steps.reduce((acc, s) => acc + s.computed.totalMs, 0);
 
-		const firstContentStep = steps.find((step) => step.computed.ttftMs !== undefined);
-		const ttftMs = firstContentStep
-			? firstContentStep.data.timestamp - firstStep.data.timestamp + firstContentStep.computed.ttftMs!
-			: undefined;
+		const ttftMs = computeTurnTtft(steps);
 		const tps =
 			finalStep.computed.streamTps ??
 			finalStep.computed.effectiveTps ??
