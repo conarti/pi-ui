@@ -85,7 +85,8 @@ describe("Ticket #41 foundation end-to-end (real InteractiveMode)", () => {
 		await harness.flush();
 		const contextText = harness.screen().text();
 		expect(contextText).toContain("Context Inspector");
-		expect(contextText).toContain("Dialogue");
+		expect(contextText).toContain("Context usage");
+		expect(contextText).toContain("Messages");
 		expect(cyrillicRe.test(contextText)).toBe(false);
 		await harness.pressKey("\x1b");
 

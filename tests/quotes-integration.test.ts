@@ -57,7 +57,7 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		harness = await createInteractiveHarness({
 			theme: "dark",
 			width: 100,
-			height: 28,
+			height: 34,
 			clipboard: {
 				text: "Clipboard line 1\nClipboard line 2\nClipboard line 3",
 			},

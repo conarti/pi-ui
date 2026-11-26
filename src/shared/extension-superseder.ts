@@ -20,6 +20,8 @@ const RUNNER_METHODS_TO_GUARD = [
 	"bindCore",
 	"setUIContext",
 	"getShortcuts",
+	"getEntryRenderer",
+	"getMessageRenderer",
 	"hasHandlers",
 	"resolveRegisteredCommands",
 	"emit",
@@ -87,10 +89,14 @@ function neutralizeRunnerExtensions(runner: unknown): void {
 			shortcuts?: Map<unknown, unknown>;
 			commands?: Map<unknown, unknown>;
 			handlers?: Map<unknown, unknown>;
+			entryRenderers?: Map<unknown, unknown>;
+			messageRenderers?: Map<unknown, unknown>;
 		};
 		rec.shortcuts?.clear?.();
 		rec.commands?.clear?.();
 		rec.handlers?.clear?.();
+		rec.entryRenderers?.clear?.();
+		rec.messageRenderers?.clear?.();
 	}
 }
 

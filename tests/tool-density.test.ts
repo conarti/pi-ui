@@ -692,7 +692,7 @@ describe("Tool Density: real InteractiveMode integration", () => {
 			cwd: projDir,
 			projectTrusted: true,
 			width: 110,
-			height: 54,
+			height: 58,
 			customTools: [fastBash, fastPs, fastCm, mcpLookup],
 			responses: [
 				fauxAssistantMessage(
@@ -888,7 +888,7 @@ describe("Tool Density: real InteractiveMode integration", () => {
 			cwd: projDir,
 			projectTrusted: true,
 			width: 110,
-			height: 44,
+			height: 50,
 			extensionFactories: [createCodemodeExtension()],
 			customTools: [streamBash],
 			responses: [
@@ -1639,7 +1639,7 @@ describe("Tool Density: real InteractiveMode integration", () => {
 			cwd: projDir,
 			projectTrusted: true,
 			width: 108,
-			height: 44,
+			height: 48,
 			customTools: [chartTool],
 			responses: [
 				fauxAssistantMessage(
