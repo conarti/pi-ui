@@ -346,9 +346,8 @@ export default function (pi) {
 		await harness.submitInput("/metrics off");
 		const offScreen = harness.screen();
 		expect(offScreen.text()).not.toContain("Worked for 4s");
-		const tsOnlyHit = offScreen.findText(expectedTimestamp);
-		expect(tsOnlyHit).toBeDefined();
-		const tsOnlyRow = offScreen.rowText(tsOnlyHit!.row);
+		const tsOnlyRow = offScreen.rowText(workedHit!.row);
+		expect(tsOnlyRow.slice(width - 2 - expectedTimestamp.length, width - 2)).toBe(expectedTimestamp);
 		expect(tsOnlyRow.slice(0, width - 2 - expectedTimestamp.length).trim()).toBe("");
 		expect(tsOnlyRow.slice(width - 2)).toBe("  ");
 	});
