@@ -45,6 +45,7 @@ import {
 	formatMetricsDuration,
 	formatMetricsRate,
 	isMeaningfulAssistantUpdate,
+	isPositiveCount,
 	isRecord,
 	isTextAssistantUpdate,
 	isValidMs,
@@ -98,10 +99,24 @@ interface ActiveStepTiming {
 	timestamp: number;
 	firstContentAt?: number;
 	firstTextAt?: number;
+	lastContentAt?: number;
+	lastToolcallDeltaAt?: number;
+	replayToolWaitMs: number;
+	toolExecutionStartedAt?: number;
+	toolExecutionMs: number;
+	streamedThinkingChars: number;
+	streamDeltaCount: number;
 }
 
-interface FinalizedStepTiming extends ActiveStepTiming {
+interface FinalizedStepTiming {
+	timestamp: number;
 	completedAt: number;
+	firstContentAt?: number;
+	firstTextAt?: number;
+	lastContentAt?: number;
+	toolExecutionMs?: number;
+	streamedThinkingChars: number;
+	streamDeltaCount: number;
 	timeSinceUserMs?: number;
 }
 
@@ -749,11 +764,15 @@ export function registerContextInspectorFeature(pi: ExtensionAPI): void {
 		const metricsRenderer: EntryRenderer<ResponseMetricsData> = markOwnedEntryRenderer(
 			(entry, _options, theme) => {
 				const data = normalizeResponseMetricsEntry(entry.data);
-				if (!data || data.stopReason === "toolUse") {
+				if (!data) {
 					return undefined;
 				}
 				const cfg = loadPiUiUserConfig();
-				if (!cfg.responseMetrics && !formatCompletionTimestamp(data.completedAt, cfg.timestamps)) {
+				if (data.stopReason === "toolUse") {
+					if (!cfg.responseMetrics || !isPositiveCount(data.outputTokens)) {
+						return undefined;
+					}
+				} else if (!cfg.responseMetrics && !formatCompletionTimestamp(data.completedAt, cfg.timestamps)) {
 					return undefined;
 				}
 				return new ResponseMetricsRowComponent(data, theme, openSessionUsageTab,
@@ -764,11 +783,15 @@ export function registerContextInspectorFeature(pi: ExtensionAPI): void {
 		const legacyStampRenderer: EntryRenderer<unknown> = markOwnedEntryRenderer(
 			(entry, _options, theme) => {
 				const normalized = normalizeLegacyPiStamp(entry.data);
-				if (!normalized || "userTimestamp" in normalized || normalized.stopReason === "toolUse") {
+				if (!normalized || "userTimestamp" in normalized) {
 					return undefined;
 				}
 				const cfg = loadPiUiUserConfig();
-				if (
+				if (normalized.stopReason === "toolUse") {
+					if (!cfg.responseMetrics || !isPositiveCount(normalized.outputTokens)) {
+						return undefined;
+					}
+				} else if (
 					!cfg.responseMetrics &&
 					!formatCompletionTimestamp(normalized.completedAt, cfg.timestamps)
 				) {
@@ -815,7 +838,13 @@ export function registerContextInspectorFeature(pi: ExtensionAPI): void {
 				return;
 			}
 			if (event.message.role === "assistant" && isValidMs(event.message.timestamp)) {
-				activeStepTiming = { timestamp: event.message.timestamp };
+				activeStepTiming = {
+					timestamp: event.message.timestamp,
+					replayToolWaitMs: 0,
+					toolExecutionMs: 0,
+					streamedThinkingChars: 0,
+					streamDeltaCount: 0,
+				};
 				finalizedStepTiming = undefined;
 			}
 		});
@@ -832,6 +861,55 @@ export function registerContextInspectorFeature(pi: ExtensionAPI): void {
 			if (activeStepTiming.firstTextAt === undefined && isTextAssistantUpdate(subEvent)) {
 				activeStepTiming.firstTextAt = now;
 			}
+			if (isRecord(subEvent) && typeof subEvent.type === "string") {
+				if (
+					(subEvent.type === "thinking_delta" ||
+						subEvent.type === "text_delta" ||
+						subEvent.type === "toolcall_delta") &&
+					typeof subEvent.delta === "string" &&
+					subEvent.delta.length > 0
+				) {
+					activeStepTiming.lastContentAt = now;
+					activeStepTiming.streamDeltaCount += 1;
+					if (subEvent.type === "thinking_delta") {
+						activeStepTiming.streamedThinkingChars += subEvent.delta.length;
+					} else if (subEvent.type === "toolcall_delta") {
+						activeStepTiming.lastToolcallDeltaAt = now;
+					}
+				} else if (subEvent.type === "toolcall_end") {
+					if (
+						activeStepTiming.lastToolcallDeltaAt !== undefined &&
+						now - activeStepTiming.lastToolcallDeltaAt >= 50
+					) {
+						activeStepTiming.replayToolWaitMs += now - activeStepTiming.lastToolcallDeltaAt;
+					}
+					activeStepTiming.lastToolcallDeltaAt = undefined;
+				} else if (
+					(subEvent.type === "text_end" || subEvent.type === "thinking_end") &&
+					typeof subEvent.content === "string" &&
+					subEvent.content.length > 0
+				) {
+					activeStepTiming.lastContentAt = now;
+				}
+			}
+		});
+
+		pi.on("tool_execution_start", () => {
+			if (!tuiActive || !activeStepTiming) return;
+			if (activeStepTiming.toolExecutionStartedAt === undefined) {
+				activeStepTiming.toolExecutionStartedAt = Date.now();
+			}
+		});
+
+		pi.on("tool_execution_end", () => {
+			if (!tuiActive || !activeStepTiming) return;
+			if (activeStepTiming.toolExecutionStartedAt !== undefined) {
+				activeStepTiming.toolExecutionMs += Math.max(
+					0,
+					Date.now() - activeStepTiming.toolExecutionStartedAt,
+				);
+				activeStepTiming.toolExecutionStartedAt = undefined;
+			}
 		});
 
 		pi.on("message_end", (event, ctx) => {
@@ -841,6 +919,10 @@ export function registerContextInspectorFeature(pi: ExtensionAPI): void {
 			const completedAt = Math.max(event.message.timestamp, Date.now());
 			const matching =
 				activeStepTiming?.timestamp === event.message.timestamp ? activeStepTiming : undefined;
+			if (matching?.toolExecutionStartedAt !== undefined) {
+				matching.toolExecutionMs += Math.max(0, completedAt - matching.toolExecutionStartedAt);
+				matching.toolExecutionStartedAt = undefined;
+			}
 			const firstContentAt =
 				matching?.firstContentAt !== undefined &&
 				matching.firstContentAt >= event.message.timestamp &&
@@ -853,6 +935,14 @@ export function registerContextInspectorFeature(pi: ExtensionAPI): void {
 				matching.firstTextAt <= completedAt
 					? matching.firstTextAt
 					: undefined;
+			const lastContentAt =
+				matching?.lastContentAt !== undefined &&
+				matching.lastContentAt >= event.message.timestamp &&
+				matching.lastContentAt <= completedAt
+					? matching.lastContentAt
+					: undefined;
+			const totalToolWaitMs =
+				(matching?.toolExecutionMs ?? 0) + (matching?.replayToolWaitMs ?? 0);
 
 			const branchElapsed = elapsedSinceLastUser(ctx.sessionManager.getBranch(), completedAt);
 			const trackedElapsed =
@@ -866,6 +956,10 @@ export function registerContextInspectorFeature(pi: ExtensionAPI): void {
 				completedAt,
 				...(firstContentAt !== undefined ? { firstContentAt } : {}),
 				...(firstTextAt !== undefined ? { firstTextAt } : {}),
+				...(lastContentAt !== undefined ? { lastContentAt } : {}),
+				...(totalToolWaitMs > 0 ? { toolExecutionMs: totalToolWaitMs } : {}),
+				streamedThinkingChars: matching?.streamedThinkingChars ?? 0,
+				streamDeltaCount: matching?.streamDeltaCount ?? 0,
 				...(timeSinceUserMs !== undefined ? { timeSinceUserMs } : {}),
 			};
 			activeStepTiming = undefined;
@@ -898,6 +992,12 @@ export function registerContextInspectorFeature(pi: ExtensionAPI): void {
 				completedAt: timing.completedAt,
 				...(timing.firstContentAt !== undefined ? { firstContentAt: timing.firstContentAt } : {}),
 				...(timing.firstTextAt !== undefined ? { firstTextAt: timing.firstTextAt } : {}),
+				...(timing.lastContentAt !== undefined ? { lastContentAt: timing.lastContentAt } : {}),
+				...(timing.toolExecutionMs !== undefined && timing.toolExecutionMs > 0
+					? { toolExecutionMs: timing.toolExecutionMs }
+					: {}),
+				streamedThinkingChars: timing.streamedThinkingChars,
+				streamDeltaCount: timing.streamDeltaCount,
 				...(isFinalTurn && timing.timeSinceUserMs !== undefined
 					? { timeSinceUserMs: timing.timeSinceUserMs }
 					: {}),

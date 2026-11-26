@@ -68,7 +68,7 @@ export function createClickedHoverPopup<T extends AnchoredPopup>(
 			activeTui = tui;
 			renderer = nextRenderer;
 			activeKey = key;
-			markOpened();
+			markOpened({ x, y });
 			if (handle) tui.requestRender();
 			else handle = tui.showOverlay(popup, options);
 		},

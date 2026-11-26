@@ -18,6 +18,7 @@ import {
 	fauxAssistantMessage,
 	fauxText,
 	fauxThinking,
+	findComposerTopRow,
 	type AssistantMessage,
 	type AssistantMessageEventStream,
 	type InteractiveHarness,
@@ -810,7 +811,7 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		expect(harness.screen().findText(label!)?.col).toBe(4);
 	});
 
-	it("renders Working status 1 blank row below above-editor widgets at x=4 with heading/toolSummary/Drafting transitions and clickable [stop] abort", async () => {
+	it("renders Working status on Composer top border below above-editor widgets with heading/toolSummary/Drafting transitions and clickable [stop] abort", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date("2026-11-26T09:00:00Z"));
 		let releaseTool: (() => void) | undefined;
@@ -855,14 +856,13 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		const stopPos = s0.findText("[stop]");
 		expect(widgetPos).toBeDefined();
 		expect(stopPos).toBeDefined();
-		/* Ровно 1 пустая строка между widgetContainerAbove и строкой Working */
-		expect(stopPos!.row).toBe(widgetPos!.row + 2);
-		expect(s0.rowText(widgetPos!.row + 1).trim()).toBe("");
+		/* Статус Working встраивается прямо в верхнюю рамку Composer ниже widgetContainerAbove */
+		expect(stopPos!.row).toBe(widgetPos!.row + 1);
 		const workingRow0 = s0.rowText(stopPos!.row);
-		expect(workingRow0.indexOf("✦")).toBe(4);
+		expect(workingRow0).toContain("╭─ ✦ ");
 		expect(workingRow0).not.toContain("esc to interrupt");
 		expect(workingRow0).not.toContain("↓");
-		expect(s0.rowText(stopPos!.row + 1)).toContain("╭");
+		expect(workingRow0).toContain("╮");
 
 		/* Заголовок из thinking_delta */
 		const thinkMsg = makeStreamMessage(
@@ -880,7 +880,9 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		expect(harness.screen().rowText(stopPos!.row)).toContain("✦ Auditing parser edge cases…");
 		await harness.resize(36, 32);
 		const narrow = harness.screen();
-		expect(narrow.findText("✦ Auditing")?.col).toBe(4);
+		const narrowTopRow = narrow.rowText(findComposerTopRow(harness));
+		expect(narrowTopRow).toContain("╭─ ✦ Auditing");
+		expect(narrowTopRow.indexOf("✦")).toBe(5);
 		await harness.resize(100, 32);
 
 		const callMsg = makeStreamMessage(

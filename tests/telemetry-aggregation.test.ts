@@ -266,4 +266,39 @@ describe("Telemetry aggregation, legacy pi-stamp normalization, and formatting (
 		expect(formatCompletionTimestamp(sameYear, "time", now)).toBe("19:56");
 		expect(formatCompletionTimestamp(sameYear, "off", now)).toBe("");
 	});
+
+	it("excludes tool execution wait and unstreamed reasoning tokens from model generation speed", () => {
+		/* Инструмент выполнялся 10 секунд между toolcall_delta и завершением шага */
+		const withToolWait = computeStepMetrics({
+			timestamp: 1_000,
+			firstContentAt: 2_000,
+			completedAt: 13_000,
+			toolExecutionMs: 10_000,
+			outputTokens: 100,
+			reasoningTokens: 0,
+			streamedThinkingChars: 0,
+			streamDeltaCount: 6,
+			stopReason: "toolUse",
+		});
+		expect(withToolWait).toBeDefined();
+		expect(withToolWait!.totalMs).toBe(2_000);
+		expect(withToolWait!.decodeMs).toBe(1_000);
+		expect(withToolWait!.streamTps).toBeCloseTo(100, 5);
+		expect(withToolWait!.effectiveTps).toBeCloseTo(50, 5);
+
+		/* Провайдер сгенерировал 200 скрытых reasoning-токенов до firstContentAt и буферизованно сбросил вызов инструмента */
+		const bufferedToolStep = computeStepMetrics({
+			timestamp: 0,
+			firstContentAt: 6_000,
+			completedAt: 6_500,
+			outputTokens: 288,
+			reasoningTokens: 193,
+			streamedThinkingChars: 42,
+			streamDeltaCount: 2,
+			stopReason: "toolUse",
+		});
+		expect(bufferedToolStep).toBeDefined();
+		expect(bufferedToolStep!.streamTps).toBeUndefined();
+		expect(bufferedToolStep!.effectiveTps).toBeCloseTo(288 / 6.5, 5);
+	});
 });

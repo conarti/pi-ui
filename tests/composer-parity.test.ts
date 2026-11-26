@@ -990,4 +990,91 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 		);
 		expect(JSON.parse(contentText(toolRes2!.content)).cancelled).toBe(true);
 	});
+
+	it("filters Thinking popover levels per model thinkingLevelMap and moves bottom-border highlight across Model -> Thinking -> Mode on Tab", async () => {
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 100,
+			height: 28,
+			models: [
+				{ id: "gemini-carbon", name: "Gemini 4 Carbon", reasoning: true },
+				{ id: "astra-max", name: "GPT-6.2 Astra", reasoning: true },
+			],
+			thinkingLevel: "high",
+		});
+
+		const allModels = getActiveHostRuntime()!.ctx.modelRegistry.getAll();
+		const carbonModel = allModels.find((m) => m.id === "gemini-carbon")!;
+		carbonModel.thinkingLevelMap = {
+			off: null,
+			minimal: null,
+			low: "low",
+			medium: "medium",
+			high: "high",
+			xhigh: null,
+			max: null,
+		};
+		const astraModel = allModels.find((m) => m.id === "astra-max")!;
+		astraModel.thinkingLevelMap = {
+			xhigh: "xhigh",
+			max: "max",
+		};
+		await harness.session.setModel(carbonModel, { persist: false });
+
+		const topRow = findComposerTopRow(harness);
+		const bottomRow = topRow + 2;
+		const bottomText0 = harness.screen().rowText(bottomRow);
+		const modelCol = bottomText0.indexOf("Gemini 4 Carbon");
+		const thinkingCol = bottomText0.indexOf("(high)");
+		const modeCol = bottomText0.indexOf("Always-approve");
+		expect(modelCol).toBeGreaterThan(0);
+		expect(thinkingCol).toBeGreaterThan(modelCol);
+		expect(modeCol).toBeGreaterThan(thinkingCol);
+
+		const idleModelFg = harness.screen().cellAt(bottomRow, modelCol + 1)?.fg;
+		const idleThinkingFg = harness.screen().cellAt(bottomRow, thinkingCol + 1)?.fg;
+
+		/* Открываем меню моделей кликом мыши: подсвечена только кнопка модели */
+		await harness.mouseMove(modelCol + 2, bottomRow);
+		await harness.mouseClick(modelCol + 2, bottomRow);
+		expect(harness.screen().text()).toContain("Search models");
+		const activeModelFg = harness.screen().cellAt(bottomRow, modelCol + 1)?.fg;
+		expect(activeModelFg).not.toEqual(idleModelFg);
+		expect(harness.screen().cellAt(bottomRow, thinkingCol + 1)?.fg).toEqual(idleThinkingFg);
+
+		/* Нажимаем Tab: открывается Thinking, подсветка уходит с Model и переходит на (high) */
+		await harness.pressKey("\t");
+		const thinkingScreen = harness.screen();
+		expect(thinkingScreen.text()).toContain("Thinking");
+		expect(thinkingScreen.cellAt(bottomRow, modelCol + 1)?.fg).toEqual(idleModelFg);
+		expect(thinkingScreen.cellAt(bottomRow, thinkingCol + 1)?.fg).toEqual(activeModelFg);
+
+		/* Для Gemini 4 Carbon доступны только low, medium, high (без off, minimal, xhigh, max) */
+		expect(thinkingScreen.text()).toContain("low");
+		expect(thinkingScreen.text()).toContain("medium");
+		expect(thinkingScreen.text()).toContain("high");
+		expect(thinkingScreen.text()).not.toContain("minimal");
+		expect(thinkingScreen.text()).not.toContain("xhigh");
+		expect(thinkingScreen.text()).not.toContain("\n  off");
+
+		/* Ещё один Tab переносит подсветку на кнопку режима (Always-approve) */
+		await harness.pressKey("\t");
+		const modeScreen = harness.screen();
+		expect(modeScreen.text()).toContain("Session Mode");
+		expect(modeScreen.cellAt(bottomRow, thinkingCol + 1)?.fg).toEqual(idleThinkingFg);
+		expect(modeScreen.cellAt(bottomRow, modeCol + 1)?.fg).toEqual(activeModelFg);
+
+		/* Переключаемся на GPT-6.2 Astra -> Thinking показывает xhigh и max */
+		await harness.pressKey("\t");
+		await harness.typeText("Astra");
+		await harness.pressKey("\r");
+		await harness.waitForIdle();
+		expect(harness.session.model?.id).toBe("astra-max");
+
+		await harness.pressKey("\x1b[1077;3u");
+		const astraThinkingText = harness.screen().text();
+		expect(astraThinkingText).toContain("xhigh");
+		expect(astraThinkingText).toContain("max");
+		await harness.pressKey("\x1b");
+	});
 });

@@ -276,7 +276,10 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 			harness.tui.setFocus(editor);
 			harness.flushFrame();
 			const hoverRgb = readComposerBorderRgb(harness);
-			expect(unfocusedHoverRgb).toEqual(hoverRgb);
+			/* Единое спокойное состояние рамки инпута вне зависимости от наведения мыши или фокуса */
+			expect(unfocusedIdleRgb).toEqual(focusedIdleRgb);
+			expect(hoverRgb).toEqual(focusedIdleRgb);
+			expect(unfocusedHoverRgb).toEqual(focusedIdleRgb);
 
 			await harness.mouseMove(10, 2);
 
@@ -289,8 +292,8 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 			const pendingTurn = harness.submitInput(`Stream probe ${themeMode}`);
 			await waitForCondition(() => activeStream !== undefined);
 			harness.flushFrame();
-			const workingRowText = harness.screen().rowText(findComposerTopRow(harness) - 1);
-			expect(workingRowText).toContain("✦ ");
+			const workingRowText = harness.screen().rowText(findComposerTopRow(harness));
+			expect(workingRowText).toContain("╭─ ✦ ");
 			expect(workingRowText).toContain("[stop]");
 			expect(workingRowText).not.toContain("esc to interrupt");
 			const streamingRgb = readComposerBorderRgb(harness);
@@ -316,9 +319,9 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 			await harness.submitInput("/mode safe");
 			const safeRgb = readComposerBorderRgb(harness);
 
-			const rgbs = [unfocusedIdleRgb, focusedIdleRgb, hoverRgb, streamingRgb, planRgb, safeRgb];
+			const rgbs = [focusedIdleRgb, streamingRgb, planRgb, safeRgb];
 			const unique = new Set(rgbs.map((c) => c.join(",")));
-			expect(unique.size).toBe(6);
+			expect(unique.size).toBe(4);
 			for (const [r, g, b] of rgbs) {
 				expect(r > g && b > g, `purple border rgb(${r},${g},${b}) in ${themeMode}`).toBe(false);
 			}
@@ -419,19 +422,18 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		harness.tui.setFocus(editor);
 		harness.flushFrame();
 		const focusedIdleRgb = readComposerBorderRgb(harness);
-		expect(focusedIdleRgb).not.toEqual(unfocusedIdleRgb);
+		expect(focusedIdleRgb).toEqual(unfocusedIdleRgb);
 
 		const topRow = findComposerTopRow(harness);
 		await harness.mouseMove(6, topRow + 1);
 		const hoverRgb = readComposerBorderRgb(harness);
-		expect(hoverRgb).not.toEqual(focusedIdleRgb);
-		expect(hoverRgb).not.toEqual(unfocusedIdleRgb);
+		expect(hoverRgb).toEqual(focusedIdleRgb);
 
 		harness.tui.setFocus(null);
 		harness.flushFrame();
-		expect(readComposerBorderRgb(harness)).toEqual(hoverRgb);
+		expect(readComposerBorderRgb(harness)).toEqual(focusedIdleRgb);
 		await harness.mouseMove(1, 1);
-		expect(readComposerBorderRgb(harness)).toEqual(unfocusedIdleRgb);
+		expect(readComposerBorderRgb(harness)).toEqual(focusedIdleRgb);
 		harness.tui.setFocus(editor);
 		harness.flushFrame();
 

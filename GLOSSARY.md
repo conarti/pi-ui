@@ -57,7 +57,7 @@ The transcript verbosity preset (`Balanced` by default, `Compact`, `Grouped`, `D
 _Avoid_: Tool theme, compact mode, vendor style
 
 **Response Metrics**:
-The quiet end-of-turn summary row beneath an assistant reply showing total turn duration, revealing first-token latency and streaming throughput on hover, and opening session usage statistics on click.
+The quiet summary row beneath each assistant step and turn reply showing first-token latency (`ttft`), streaming throughput (`tok/s`), and total turn duration (`Worked for …` on final steps), and opening session usage statistics on click.
 _Avoid_: Stamp footer, step timer, token footer
 
 ### Overlays

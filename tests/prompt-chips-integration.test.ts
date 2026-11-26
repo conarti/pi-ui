@@ -109,37 +109,32 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 
 		await harness.pressKey("\x16");
 		await flushClipboardAction(harness);
-		expect(editor.getText()).toBe("[🖼 Image #1]");
+		expect(editor.getText()).toBe("[🖼 Image #1] ");
 		expect(editor.getText()).not.toContain("/tmp");
 
-		await harness.typeText(" ");
 		await harness.pressKey("\x1b[118;9u");
 		await flushClipboardAction(harness);
-		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2]");
+		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2] ");
 
-		await harness.typeText(" ");
 		await harness.pressKey("\x1b[1084;9u");
 		await flushClipboardAction(harness);
-		await harness.typeText(" ");
 		await harness.pressKey("\x1b[27;9;1084~");
 		await flushClipboardAction(harness);
-		await harness.typeText(" ");
 		await harness.pressKey("\x1b[1084;5u");
 		await flushClipboardAction(harness);
 		expect(editor.getText()).toBe(
-			"[🖼 Image #1] [🖼 Image #2] [🖼 Image #3] [🖼 Image #4] [🖼 Image #5]",
+			"[🖼 Image #1] [🖼 Image #2] [🖼 Image #3] [🖼 Image #4] [🖼 Image #5] ",
 		);
 
 		editor.setText("");
 		await harness.sendInput("\x1b[200~\x1b[201~");
 		await flushClipboardAction(harness);
-		expect(editor.getText()).toBe("[🖼 Image #1]");
+		expect(editor.getText()).toBe("[🖼 Image #1] ");
 
-		await harness.typeText(" ");
 		await harness.sendInput("\x1b[200~");
 		await harness.sendInput("\x1b[201~");
 		await flushClipboardAction(harness);
-		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2]");
+		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2] ");
 
 		harness.setClipboard({
 			image: null,
@@ -148,7 +143,7 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		});
 		await harness.sendInput("\x1b[200~\x1b[201~");
 		await flushClipboardAction(harness);
-		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2]");
+		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2] ");
 
 		editor.setText("");
 		harness.setClipboard({
@@ -158,14 +153,13 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		});
 		await harness.pressKey("\x1b[27;9;118~");
 		await flushClipboardAction(harness);
-		expect(editor.getText()).toBe("[🖼 Image #1]");
+		expect(editor.getText()).toBe("[🖼 Image #1] ");
 		expect(editor.getText()).not.toContain("copied-from-finder.png");
 
 		const escapedPath = pastedPathImg.replace(/ /g, "\\ ");
-		await harness.typeText(" ");
 		await harness.paste(escapedPath, true);
 		await flushClipboardAction(harness);
-		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2]");
+		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2] ");
 
 		const screenText = harness.screen().text();
 		expect(screenText).toContain("[🖼 Image #1] [🖼 Image #2]");
@@ -193,9 +187,8 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		editor.setText("");
 		await harness.pressKey("\x16");
 		await flushClipboardAction(harness);
-		expect(editor.getText()).toBe("[🖼 Image #1]");
+		expect(editor.getText()).toBe("[🖼 Image #1] ");
 
-		await harness.typeText(" ");
 		const fourLineSnippet = 'fn main() {\n  let x = 1;\n  println!("{x}");\n}';
 		await harness.paste(fourLineSnippet, true);
 		expect(editor.getText()).toBe("[🖼 Image #1] [📋 Pasted #2 · 4 lines]");
@@ -336,7 +329,16 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await harness.mouseMove(imgPos!.col + 2, composerBodyRow);
 		expect(harness.screen().text()).toContain("architecture-shot.png");
 
-		await harness.mouseMove(85, composerBodyRow);
+		/* Перевод мыши с чипа через верхнюю рамку Composer внутрь самого попапа не закрывает превью */
+		const composerTop = findComposerTopRow(harness);
+		await harness.mouseMove(imgPos!.col + 2, composerTop);
+		expect(harness.screen().text()).toContain("architecture-shot.png");
+		const removeBtn = harness.screen().findText("[Remove]");
+		expect(removeBtn).toBeDefined();
+		await harness.mouseMove(removeBtn!.col + 2, removeBtn!.row);
+		expect(harness.screen().text()).toContain("architecture-shot.png");
+
+		await harness.mouseMove(85, 1);
 		expect(harness.screen().text()).not.toContain("architecture-shot.png");
 	});
 
@@ -393,7 +395,7 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await harness.typeText("Review ");
 		await harness.pressKey("\x1b[118;9u");
 		await flushClipboardAction(harness);
-		await harness.typeText(" and ");
+		await harness.typeText("and ");
 		const fiveLineLog = [
 			"ERROR 502 Bad Gateway",
 			"upstream: 10.0.4.12:8080",
@@ -604,7 +606,7 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 
 		editor.setText("");
 		await harness.paste(fileUrl, true);
-		expect(editor.getText()).toBe("[🖼 Image #1]");
+		expect(editor.getText()).toBe("[🖼 Image #1] ");
 
 		for (const w of [1, 2, 3, 8, 16, 24, 30]) {
 			await harness.resize(w, 28);
@@ -745,13 +747,12 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 
 		editor.setText("");
 		await harness.paste(bmpPath, true);
-		await harness.typeText(" ");
 		await harness.paste(bmpPath, true);
-		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2]");
+		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2] ");
 
 		await harness.pressKey("\x01");
 		await harness.pressKey("\x1b[3~");
-		expect(editor.getText()).toBe(" [🖼 Image #1]");
+		expect(editor.getText()).toBe(" [🖼 Image #1] ");
 
 		await harness.pressKey("\x05");
 		const bmpChip = harness.screen().findText("[🖼 Image #1]")!;
@@ -968,7 +969,7 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await flushClipboardAction(harness);
 		await harness.pressKey("\x16");
 		await flushClipboardAction(harness);
-		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2]");
+		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2] ");
 		await harness.pressKey("\x17");
 		expect(editor.getText()).toBe("[🖼 Image #1] ");
 		editor.setText("");
@@ -1103,7 +1104,7 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await harness.typeText("Check ");
 		await harness.pressKey("\x16");
 		await flushClipboardAction(harness);
-		await harness.typeText(" log ");
+		await harness.typeText("log ");
 		await harness.paste("TRACE line 1\nTRACE line 2\nTRACE line 3\nTRACE line 4", true);
 		await harness.typeText(" ref ");
 		await harness.pressKey("\x1b[113;3u");

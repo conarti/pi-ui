@@ -504,10 +504,10 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 			expect(saturation < 0.04 || (hue > 198 && hue < 255)).toBe(true);
 		}
 		await harness.mouseMove(10, 1);
-		expect(harness.screen().text()).not.toContain("[Quote · Alt+Q]");
-		await harness.mouseDrag(proseStart.col, proseStart.row, proseStart.col + 28, proseStart.row, { steps: 2 });
-		const reOpened = harness.screen().findText("[Quote · Alt+Q]")!;
-		await harness.mouseClick(reOpened.col + 2, reOpened.row);
+		/* Тултип выделения остаётся видимым при уводе курсора, пока выделение текста не снято */
+		expect(harness.screen().text()).toContain("[Quote · Alt+Q]");
+		const keepOpenBtn = harness.screen().findText("[Quote · Alt+Q]")!;
+		await harness.mouseClick(keepOpenBtn.col + 2, keepOpenBtn.row);
 		expect(getActiveComposerEditor()!.getText()).toContain("[❝ Quote #1");
 	});
 });

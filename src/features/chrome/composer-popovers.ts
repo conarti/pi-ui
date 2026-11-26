@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
 	isKeyRelease,
@@ -148,11 +148,12 @@ function listAvailableModels(ctx: ExtensionContext): Model<Api>[] {
 	return ctx.model ? [ctx.model] : [];
 }
 
-function listAvailableThinkingLevels(ctx: ExtensionContext): ThinkingLevel[] {
-	if (ctx.model && ctx.model.reasoning === false) {
-		return ["off"];
+export function listAvailableThinkingLevels(ctx: ExtensionContext): ThinkingLevel[] {
+	if (!ctx.model) {
+		return [...STANDARD_THINKING_LEVELS];
 	}
-	return [...STANDARD_THINKING_LEVELS];
+	const supported = getSupportedThinkingLevels(ctx.model);
+	return supported.length > 0 ? (supported as ThinkingLevel[]) : ["off"];
 }
 
 export function openComposerPopover(
@@ -275,6 +276,7 @@ export function openComposerPopover(
 		}
 		const editor = getActiveComposerEditor();
 		if (editor) {
+			editor.clearPopoverHoverState();
 			tui.setFocus(editor);
 		}
 		tui.requestRender();
@@ -282,6 +284,9 @@ export function openComposerPopover(
 
 	const switchKind = (next: ComposerPopoverKind, initialSearch?: string): void => {
 		kind = next;
+		if (slot.active) {
+			slot.active.kind = next;
+		}
 		if (next === "model") {
 			searchInput.setValue(initialSearch ?? "");
 		}
@@ -599,8 +604,14 @@ export function openComposerPopover(
 	};
 
 	handle = tui.showOverlay(comp, overlayOptions);
+	getActiveComposerEditor()?.clearPopoverHoverState();
 	slot.active = {
-		kind,
+		get kind() {
+			return kind;
+		},
+		set kind(next: ComposerPopoverKind) {
+			kind = next;
+		},
 		handle,
 		tui,
 		switchKind,

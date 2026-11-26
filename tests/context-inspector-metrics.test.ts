@@ -203,7 +203,7 @@ export default function (pi) {
 		}
 	});
 
-	it("emits zero intermediate rows on toolUse steps, reports full wall-clock duration at x = 4 with right-aligned timestamp at x = width - 2, zero-shift hover reveal, and quiet timestamp fallback when responseMetrics = false", async () => {
+	it("renders per-step TTFT and tok/s on both intermediate toolUse steps and final response rows without requiring hover, excludes tool wait and unstreamed reasoning from speed, and keeps quiet timestamp fallback when responseMetrics = false", async () => {
 		vi.useFakeTimers();
 		const baseTime = new Date(2026, 10, 25, 19, 56, 0).getTime();
 		vi.setSystemTime(baseTime);
@@ -225,7 +225,7 @@ export default function (pi) {
 
 		const turnPromise = harness.submitInput("Read hello.txt and summarize");
 
-		/* Шаг 1: промежуточный toolUse (1.5s) — не должен рисовать строку Worked for */
+		/* Шаг 1: промежуточный toolUse (ttft 0.4s, 60 out tokens за 1.5s -> 40 tok/s, без Worked for) */
 		const stream1 = await queue.nextStream();
 		const tStep1Start = Date.now();
 		stream1.push({
@@ -255,10 +255,11 @@ export default function (pi) {
 		stream1.push({ type: "done", reason: "toolUse", message: msg1 });
 		stream1.end(msg1);
 
-		/* Шаг 2: финальный ответ (ttft 0.5s, decode 2.0s, 100 out tokens -> 50 tok/s, всего 4.0s) */
+		/* Шаг 2: финальный ответ (ttft 0.5s, decode 2.0s, 100 out tokens (20 нестримившихся reasoning + 80 текстовых -> 40 tok/s стрима), всего 4.0s) */
 		const stream2 = await queue.nextStream();
 		const midScreenText = harness.screen().text();
 		expect(midScreenText).not.toContain("Worked for");
+		expect(midScreenText).toContain("ttft 0.4s · 40 tok/s");
 
 		const tStep2Start = Date.now();
 		stream2.push({
@@ -288,7 +289,7 @@ export default function (pi) {
 		await turnPromise;
 		vi.runOnlyPendingTimers();
 
-		/* В истории записаны оба шага (toolUse + stop), но в ленте ровно 1 строка Worked for */
+		/* В истории записаны оба шага (toolUse + stop); промежуточный показывает ttft + tok/s, финальный — Worked for + ttft + tok/s */
 		const recordedMetrics = harness.sessionManager
 			.getEntries()
 			.filter((e) => e.type === "custom" && e.customType === METRICS_ENTRY_TYPE);
@@ -299,14 +300,14 @@ export default function (pi) {
 		const screenAtRest = harness.screen();
 		const workedMatches = screenAtRest.text().match(/Worked for/g) ?? [];
 		expect(workedMatches).toHaveLength(1);
+		expect(screenAtRest.text()).toContain("ttft 0.4s · 40 tok/s");
 
 		const workedHit = screenAtRest.findText("Worked for 4s");
 		expect(workedHit).toBeDefined();
 		expect(workedHit!.col).toBe(4);
 
 		const rowAtRest = screenAtRest.rowText(workedHit!.row);
-		expect(rowAtRest).not.toContain("ttft");
-		expect(rowAtRest).not.toContain("tok/s");
+		expect(rowAtRest).toContain("Worked for 4s · ttft 0.5s · 40 tok/s");
 		expect(rowAtRest.slice(width - 2)).toBe("  ");
 		const expectedTimestamp = "25 Nov, 19:56";
 		expect(rowAtRest.slice(width - 2 - expectedTimestamp.length, width - 2)).toBe(expectedTimestamp);
@@ -321,14 +322,12 @@ export default function (pi) {
 		await harness.mouseMove(workedHit!.col + 3, workedHit!.row);
 		const screenHovered = harness.screen();
 		const hoveredRow = screenHovered.rowText(workedHit!.row);
-		expect(hoveredRow).toContain("Worked for 4s · ttft 0.4s · 50 tok/s");
+		expect(hoveredRow).toContain("Worked for 4s · ttft 0.5s · 40 tok/s");
 		expect(hoveredRow.slice(width - 2)).toBe("  ");
 		expect(hoveredRow.slice(width - 2 - expectedTimestamp.length, width - 2)).toBe(expectedTimestamp);
 		expect(screenHovered.rowText(workedHit!.row + 1)).toBe(rowCountBeforeHover);
 
-		/* Увод указателя убирает детали обратно */
 		await harness.mouseMove(0, 0);
-		expect(harness.screen().rowText(workedHit!.row)).not.toContain("ttft");
 
 		/* Клик по Worked for открывает Context Inspector сразу на вкладке Session usage (без дубликата) */
 		await harness.mouseClick(workedHit!.col + 3, workedHit!.row);
@@ -343,11 +342,13 @@ export default function (pi) {
 		await harness.pressKey("\x1b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 
-		/* При responseMetrics = false (/metrics off) остаётся тихая строка timestamp справа у x = width - 2 */
+		/* При responseMetrics = false (/metrics off) скрываются и промежуточные метрики, и Worked for, остаётся тихий timestamp */
 		await harness.submitInput("/metrics off");
 		const offScreen = harness.screen();
 		expect(offScreen.text()).not.toContain("Worked for 4s");
-		const tsOnlyRow = offScreen.rowText(workedHit!.row);
+		expect(offScreen.text()).not.toContain("ttft 0.4s");
+		const proseAfterOff = offScreen.findText("Summary: hello world.")!;
+		const tsOnlyRow = offScreen.rowText(proseAfterOff.row + 2);
 		expect(tsOnlyRow.slice(width - 2 - expectedTimestamp.length, width - 2)).toBe(expectedTimestamp);
 		expect(tsOnlyRow.slice(0, width - 2 - expectedTimestamp.length).trim()).toBe("");
 		expect(tsOnlyRow.slice(width - 2)).toBe("  ");

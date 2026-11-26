@@ -11,6 +11,7 @@ import {
 	isKeyRelease,
 	matchesKey,
 	type TUI,
+	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { bgRgb, fgRgb, getActiveGlobalTheme, isLightTheme, type RgbTuple } from "../../shared/ansi.ts";
 import {
@@ -449,16 +450,37 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 			: undefined;
 		if (hoveredMatch) {
 			const topRow = resolveComposerTopRow(tui, editor, lastPointer);
+			const chipScreenY =
+				lastPointer?.screenY ?? topRow + Math.max(1, lastPointer?.mouseY ?? 1);
+			const chipW = visibleWidth(hoveredMatch.chip.token);
 			overlayController.show(
 				tui,
 				hoveredMatch.chip,
 				"composer-hover",
-				{ col: hoveredMatch.col, rowAbove: topRow },
+				{
+					col: hoveredMatch.col,
+					rowAbove: topRow,
+					triggerBounds: {
+						xStart: hoveredMatch.col,
+						xEnd: hoveredMatch.col + chipW,
+						y: chipScreenY,
+					},
+				},
 				buildPreviewActions(),
 				() => {
 					if (lastEditor) syncComposerPreview(lastEditor);
+					requestRender();
 				},
 			);
+			return;
+		}
+
+		if (
+			overlayController.source === "composer-hover" &&
+			lastPointer?.screenX !== undefined &&
+			lastPointer?.screenY !== undefined &&
+			overlayController.isPointerInHoverBridge(lastPointer.screenX, lastPointer.screenY)
+		) {
 			return;
 		}
 
@@ -473,6 +495,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 				buildPreviewActions(),
 				() => {
 					if (lastEditor) syncComposerPreview(lastEditor);
+					requestRender();
 				},
 			);
 			return;
@@ -679,7 +702,9 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 		}
 	};
 
-	let markSentPopupOpened: (() => void) | undefined;
+	let markSentPopupOpened:
+		| ((trigger?: { readonly x: number; readonly y: number }) => void)
+		| undefined;
 	let sentPreviewFromHover = false;
 
 	const showSentPillPreview = (chip: SerializedPromptChip, key: string, screenX: number, screenY: number, hover: boolean): void => {
@@ -690,7 +715,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 				requestRender();
 			} else {
 				if (!hover) sentPreviewFromHover = false;
-				markSentPopupOpened?.();
+				markSentPopupOpened?.({ x: screenX, y: screenY });
 			}
 			return;
 		}
@@ -704,10 +729,15 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 				rowAbove: Math.max(0, screenY - 1),
 				rowBelow: screenY + 2,
 				key,
+				triggerBounds: {
+					xStart: screenX,
+					xEnd: screenX + visibleWidth(chip.token),
+					y: screenY,
+				},
 			},
 			buildPreviewActions(true),
 		);
-		markSentPopupOpened?.();
+		markSentPopupOpened?.({ x: screenX, y: screenY });
 		requestRender();
 	};
 
@@ -769,7 +799,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 				id,
 				label: span.token,
 				onClick: chip ? (sx, sy) => showSentPillPreview(chip, key, sx, sy, false) : undefined,
-				onHover: chip?.kind === "image" ? (sx, sy) => showSentPillPreview(chip, key, sx, sy, true) : undefined,
+				onHover: chip ? (sx, sy) => showSentPillPreview(chip, key, sx, sy, true) : undefined,
 			});
 		}
 		formatted += reconstructed.displayText.slice(pos).replace(/\t/g, "  ");

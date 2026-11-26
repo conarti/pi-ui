@@ -514,6 +514,9 @@ export class PromptChipOverlayController {
 	private options: OverlayOptions | undefined;
 	private visible = false;
 	private popupHovered = false;
+	private enteredPopup = false;
+	private popupRect: { col: number; row: number; width: number; height: number } | undefined;
+	private triggerBounds: { xStart: number; xEnd: number; y: number } | undefined;
 	private activeSource: PreviewTriggerSource | undefined;
 	private activeChipKey: string | undefined;
 	private activeTui: TUI | undefined;
@@ -535,6 +538,26 @@ export class PromptChipOverlayController {
 		return this.popupHovered;
 	}
 
+	isPointerInHoverBridge(screenX: number, screenY: number): boolean {
+		if (!this.isShowing || !this.popupRect) return false;
+		const { col, row, width, height } = this.popupRect;
+		if (screenX >= col && screenX < col + width && screenY >= row && screenY < row + height) {
+			return true;
+		}
+		if (this.enteredPopup || !this.triggerBounds) return false;
+		const minX = Math.min(this.triggerBounds.xStart, col) - 1;
+		const maxX = Math.max(this.triggerBounds.xEnd, col + width);
+		if (screenX < minX || screenX > maxX) return false;
+		const popupBottom = row + height - 1;
+		if (popupBottom < this.triggerBounds.y) {
+			return screenY > popupBottom && screenY < this.triggerBounds.y;
+		}
+		if (row > this.triggerBounds.y) {
+			return screenY > this.triggerBounds.y && screenY < row;
+		}
+		return false;
+	}
+
 	get source(): PreviewTriggerSource | undefined {
 		return this.activeSource;
 	}
@@ -547,7 +570,13 @@ export class PromptChipOverlayController {
 		tui: TUI | undefined,
 		chip: SerializedPromptChip,
 		source: PreviewTriggerSource,
-		anchor: { col: number; rowAbove: number; rowBelow?: number; key?: string },
+		anchor: {
+			col: number;
+			rowAbove: number;
+			rowBelow?: number;
+			key?: string;
+			triggerBounds?: { xStart: number; xEnd: number; y: number };
+		},
 		actions?: PreviewPopupActions,
 		onPopupLeave?: () => void,
 	): void {
@@ -569,7 +598,9 @@ export class PromptChipOverlayController {
 		}
 		this.popup.onHoverChange = (hovered) => {
 			this.popupHovered = hovered;
-			if (!hovered) {
+			if (hovered) {
+				this.enteredPopup = true;
+			} else {
 				onPopupLeave?.();
 			}
 		};
@@ -588,7 +619,10 @@ export class PromptChipOverlayController {
 				: 0;
 
 		const chipKey = anchor.key ?? `${source}:${chip.id}:${chip.token}`;
-		if (this.activeChipKey !== chipKey) this.popup.chip = undefined;
+		if (this.activeChipKey !== chipKey) {
+			this.popup.chip = undefined;
+			this.enteredPopup = false;
+		}
 		this.popup.chip = chip;
 		this.popup.setContext(source, actions ?? {}, allowedThumbHeight);
 
@@ -604,6 +638,8 @@ export class PromptChipOverlayController {
 		this.visible = true;
 		this.activeSource = source;
 		this.activeChipKey = chipKey;
+		this.popupRect = { col: clampedCol, row: clampedRow, width, height };
+		this.triggerBounds = anchor.triggerBounds;
 
 		if (!this.options) {
 			this.options = {
@@ -638,6 +674,9 @@ export class PromptChipOverlayController {
 		}
 		this.visible = false;
 		this.popupHovered = false;
+		this.enteredPopup = false;
+		this.popupRect = undefined;
+		this.triggerBounds = undefined;
 		this.activeSource = undefined;
 		this.activeChipKey = undefined;
 		this.activeRenderer = undefined;

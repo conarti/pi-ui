@@ -24,6 +24,7 @@ import {
 	type ExploreAction,
 	type Segment,
 } from "./exploration-tail.ts";
+import { LEGACY_STAMP_ENTRY_TYPE, METRICS_ENTRY_TYPE } from "../context-inspector/telemetry.ts";
 import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { getActiveHostRuntime, type HostRuntimeHandle } from "../../shared/host-runtime.ts";
 import { hookMethod } from "../../shared/runtime-hooks.ts";
@@ -384,6 +385,18 @@ function isFoldable(child: unknown): boolean {
 	return isUnexpandedTextlessAssistant(child) !== undefined || isKind(child, Text) || isKind(child, Spacer);
 }
 
+/* Промежуточные метрики шага toolUse складываются внутрь свёрнутой группы, а хвостовая остаётся под группой. */
+function isIntermediateStepMetricsEntry(child: unknown): boolean {
+	if (!child || typeof child !== "object") return false;
+	const entry = (child as { entry?: { type?: unknown; customType?: unknown; data?: unknown } }).entry;
+	if (!entry || entry.type !== "custom") return false;
+	if (entry.customType !== METRICS_ENTRY_TYPE && entry.customType !== LEGACY_STAMP_ENTRY_TYPE) {
+		return false;
+	}
+	const data = entry.data as { stopReason?: unknown } | undefined;
+	return Boolean(data && typeof data === "object" && data.stopReason === "toolUse");
+}
+
 export function groupChildren(
 	children: readonly unknown[],
 	makeGroup: (rows: ToolRowLike[], members: unknown[]) => Component,
@@ -428,7 +441,7 @@ export function groupChildren(
 			leadingThinking.push(child);
 			continue;
 		}
-		if (rows.length > 0 && isFoldable(child)) {
+		if (rows.length > 0 && (isFoldable(child) || isIntermediateStepMetricsEntry(child))) {
 			pending.push(child);
 			continue;
 		}

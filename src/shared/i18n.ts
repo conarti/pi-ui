@@ -174,6 +174,7 @@ export const EN_MESSAGES = {
 	"palette.item.responseMetricsToggle": "Response Metrics: {action}",
 	"palette.item.copyOnSelectToggle": "Copy on Select: {action}",
 	"palette.item.timestampsCycle": "Timestamps: {current} (cycle)",
+	"palette.item.outlineTimestampsToggle": "Outline Timestamps: {action}",
 	"palette.item.midTurnEnterCycle": "Mid-turn Enter: {current} (toggle)",
 	"palette.item.aiWorkingStatusToggle": "AI Working Status: {action}",
 	"palette.item.modelSelect": "Select model ({model})",

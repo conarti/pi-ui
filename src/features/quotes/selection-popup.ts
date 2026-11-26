@@ -125,8 +125,10 @@ export class QuoteSelectionPopup implements Component {
 		if (event.type === "move") {
 			const nextAction = this.hitAction(event.x, event.y);
 			claimHover(this, () => {
-				this.onDismiss?.();
-				this.requestRender();
+				if (this.hoveredAction !== null) {
+					this.hoveredAction = null;
+					this.requestRender();
+				}
 			});
 			if (nextAction !== this.hoveredAction) {
 				this.hoveredAction = nextAction;

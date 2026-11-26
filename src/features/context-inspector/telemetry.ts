@@ -5,7 +5,8 @@ export { formatTranscriptTimestamp as formatCompletionTimestamp };
 export const METRICS_ENTRY_TYPE = "response-metrics";
 export const LEGACY_STAMP_ENTRY_TYPE = "pi-stamp";
 
-const MIN_STREAM_DECODE_MS = 100;
+const MIN_STREAM_DECODE_MS = 250;
+const MIN_EFFECTIVE_DURATION_MS = 100;
 const MIN_STREAM_OUTPUT_TOKENS = 2;
 
 export interface ResponseMetricsData {
@@ -14,6 +15,10 @@ export interface ResponseMetricsData {
 	readonly completedAt: number;
 	readonly firstContentAt?: number;
 	readonly firstTextAt?: number;
+	readonly lastContentAt?: number;
+	readonly toolExecutionMs?: number;
+	readonly streamedThinkingChars?: number;
+	readonly streamDeltaCount?: number;
 	readonly timeSinceUserMs?: number;
 	readonly outputTokens?: number;
 	readonly reasoningTokens?: number;
@@ -125,7 +130,13 @@ export function computeStepMetrics(data: {
 	completedAt: number;
 	firstContentAt?: number;
 	firstTextAt?: number;
+	lastContentAt?: number;
+	toolExecutionMs?: number;
+	streamedThinkingChars?: number;
+	streamDeltaCount?: number;
 	outputTokens?: number;
+	reasoningTokens?: number;
+	stopReason?: string;
 }): ComputedStepMetrics | undefined {
 	if (
 		!isValidMs(data.timestamp) ||
@@ -134,14 +145,19 @@ export function computeStepMetrics(data: {
 	) {
 		return undefined;
 	}
-	const totalMs = data.completedAt - data.timestamp;
+	const rawTotalMs = data.completedAt - data.timestamp;
+	const toolWaitMs = isValidMs(data.toolExecutionMs) ? Math.min(rawTotalMs, data.toolExecutionMs) : 0;
+	const totalMs = Math.max(0, rawTotalMs - toolWaitMs);
+
 	const firstContentAt = isValidMs(data.firstContentAt) ? data.firstContentAt : undefined;
 	const hasFirstContent =
 		firstContentAt !== undefined &&
 		firstContentAt >= data.timestamp &&
 		firstContentAt <= data.completedAt;
 	const ttftMs = hasFirstContent ? firstContentAt - data.timestamp : undefined;
-	const decodeMs = hasFirstContent ? data.completedAt - firstContentAt : undefined;
+	const decodeMs = hasFirstContent
+		? Math.max(0, data.completedAt - firstContentAt - toolWaitMs)
+		: undefined;
 
 	const firstTextAt = isValidMs(data.firstTextAt) ? data.firstTextAt : undefined;
 	const hasFirstText =
@@ -151,14 +167,43 @@ export function computeStepMetrics(data: {
 	const firstTextMs = hasFirstText ? firstTextAt - data.timestamp : undefined;
 
 	const outputTokens = isPositiveCount(data.outputTokens) ? data.outputTokens : undefined;
-	const hasEnoughOutput =
-		outputTokens !== undefined && outputTokens >= MIN_STREAM_OUTPUT_TOKENS;
+	const reasoningTokens = isPositiveCount(data.reasoningTokens) ? data.reasoningTokens : 0;
+
+	/* Если провайдер не стримил цепочку мыслей (0 символов или короткая сводка в конце),
+	 * токены мышления генерировались до firstContentAt и не должны раздувать скорость пост-стрима. */
+	const unstreamedReasoning =
+		reasoningTokens > 0 &&
+		((data.streamedThinkingChars !== undefined &&
+			data.streamedThinkingChars < reasoningTokens * 1.5) ||
+			(data.streamedThinkingChars === undefined &&
+				hasFirstText &&
+				hasFirstContent &&
+				firstTextAt === firstContentAt));
+
+	const streamedTokens =
+		outputTokens !== undefined
+			? unstreamedReasoning
+				? Math.max(0, outputTokens - reasoningTokens)
+				: outputTokens
+			: undefined;
+
+	const isBufferedToolBurst =
+		data.stopReason === "toolUse" &&
+		data.streamDeltaCount !== undefined &&
+		data.streamDeltaCount <= 2;
+
+	const hasEnoughStreamOutput =
+		!isBufferedToolBurst &&
+		streamedTokens !== undefined &&
+		streamedTokens >= MIN_STREAM_OUTPUT_TOKENS;
 	const streamTps =
-		hasEnoughOutput && decodeMs !== undefined && decodeMs >= MIN_STREAM_DECODE_MS
-			? outputTokens / (decodeMs / 1000)
+		hasEnoughStreamOutput && decodeMs !== undefined && decodeMs >= MIN_STREAM_DECODE_MS
+			? streamedTokens / (decodeMs / 1000)
 			: undefined;
 	const effectiveTps =
-		hasEnoughOutput && totalMs >= MIN_STREAM_DECODE_MS
+		outputTokens !== undefined &&
+		outputTokens >= MIN_STREAM_OUTPUT_TOKENS &&
+		totalMs >= MIN_EFFECTIVE_DURATION_MS
 			? outputTokens / (totalMs / 1000)
 			: undefined;
 
@@ -204,6 +249,16 @@ export function normalizeResponseMetricsEntry(raw: unknown): ResponseMetricsData
 		completedAt: raw.completedAt,
 		...(isValidMs(raw.firstContentAt) ? { firstContentAt: raw.firstContentAt } : {}),
 		...(isValidMs(raw.firstTextAt) ? { firstTextAt: raw.firstTextAt } : {}),
+		...(isValidMs(raw.lastContentAt) ? { lastContentAt: raw.lastContentAt } : {}),
+		...(isValidMs(raw.toolExecutionMs) && raw.toolExecutionMs > 0
+			? { toolExecutionMs: raw.toolExecutionMs }
+			: {}),
+		...(isNonNegativeCount(raw.streamedThinkingChars)
+			? { streamedThinkingChars: raw.streamedThinkingChars }
+			: {}),
+		...(isNonNegativeCount(raw.streamDeltaCount)
+			? { streamDeltaCount: raw.streamDeltaCount }
+			: {}),
 		...(isValidMs(raw.timeSinceUserMs) ? { timeSinceUserMs: raw.timeSinceUserMs } : {}),
 		...(isPositiveCount(raw.outputTokens) ? { outputTokens: raw.outputTokens } : {}),
 		...(isPositiveCount(raw.reasoningTokens) ? { reasoningTokens: raw.reasoningTokens } : {}),
@@ -393,7 +448,7 @@ export function aggregateSessionTelemetry(
 	for (const entry of usageEntries) {
 		if (!isRecord(entry)) continue;
 		const msg = entry.type === "message" && isRecord(entry.message) ? entry.message : undefined;
-		const usage = msg?.role === "assistant" || msg?.role === "toolResult"
+		const usage = msg?.role === "assistant"
 			? msg.usage
 			: entry.type === "usage" || entry.type === "compaction" || entry.type === "branch_summary"
 				? entry.usage

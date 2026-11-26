@@ -192,7 +192,20 @@ export class OutlinePreviewPopup implements Component {
 		const paintCardRow = (s: string) =>
 			paintThemeSurfaceRow(th, s, safeWidth, palette.popupSurfaceBg);
 
-		const out: string[] = [paintCardRow(edge(`╭${"─".repeat(inner)}╮`))];
+		const trimmedTime = this.time.trim();
+		let topBorder = edge(`╭${"─".repeat(inner)}╮`);
+		if (trimmedTime && inner >= 6) {
+			const maxTimeW = Math.max(1, inner - 3);
+			const clippedTime = truncateToWidth(trimmedTime, maxTimeW, "…");
+			const timeW = visibleWidth(clippedTime);
+			if (timeW > 0 && timeW + 3 <= inner) {
+				const leftDashes = Math.max(1, inner - timeW - 3);
+				const styledTime = themeFgRgb(th, palette.codeMetaFg, clippedTime);
+				topBorder = `${edge(`╭${"─".repeat(leftDashes)}`)} ${styledTime} ${edge("─╮")}`;
+			}
+		}
+
+		const out: string[] = [paintCardRow(topBorder)];
 		for (const line of lines) {
 			out.push(paintCardRow(`${edge("│")} ${th.fg("text", fit(line))} ${edge("│")}`));
 		}

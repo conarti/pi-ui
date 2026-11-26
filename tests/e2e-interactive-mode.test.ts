@@ -463,7 +463,7 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		await flushUiAsync(harness);
 
 		expect(editor.getText()).toBe(
-			"[❝ Quote #1 · 2 lines] [❝ Quote #2 · 1 line] [📋 Pasted #3 · 4 lines] [🖼 Image #4]",
+			"[❝ Quote #1 · 2 lines] [❝ Quote #2 · 1 line] [📋 Pasted #3 · 4 lines] [🖼 Image #4] ",
 		);
 
 		const draftPastePos = harness.screen().findText("[📋 Pasted #3 · 4 lines]");

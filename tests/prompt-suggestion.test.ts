@@ -577,6 +577,8 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		await waitForCondition(() => harness!.screen().text().includes("[🖼 Image #1]"));
 		expect(harness.screen().text()).not.toContain("Обнови снапшоты тестов");
 
+		/* Первое нажатие Backspace удаляет автоматически подставленный пробел, второе — сам чип картинки */
+		await harness.pressKey("\x7f");
 		await harness.pressKey("\x7f");
 		expect(harness.screen().text()).toContain("Обнови снапшоты тестов");
 

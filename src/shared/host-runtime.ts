@@ -472,6 +472,20 @@ function installViewportChromeHooks(): void {
 
 	hookMethod(
 		altProto,
+		"createMouseEvent",
+		"viewport.preserveSuperMouseModifier",
+		(self, args, original) => {
+			const ev = original.apply(self, args) as Record<string, unknown> | undefined;
+			const button = Number(args[1] ?? 0);
+			if (ev && typeof ev === "object" && (button & 128) !== 0) {
+				ev.super = true;
+			}
+			return ev;
+		},
+	);
+
+	hookMethod(
+		altProto,
 		"handleMouseEvent",
 		"viewport.hoverSweep",
 		(self, args, original) => {
@@ -744,14 +758,16 @@ export function installViewportScrollDismissHooks(
 	installPrimaryScrollDismissHooks(namespace, isActive, onDismiss);
 }
 
-/** Подключает общий жизненный цикл Hover Popup, открытого кликом по строке транскрипта. */
+/** Подключает общий жизненный цикл Hover Popup, открытого кликом или наведением по строке транскрипта. */
 export function installClickedHoverPopupDismissHooks(
 	namespace: string,
 	getPopup: () => Component | undefined,
 	onDismiss: () => void,
-): () => void {
+): (trigger?: { readonly x: number; readonly y: number }) => void {
 	installPrimaryScrollDismissHooks(namespace, () => Boolean(getPopup()), onDismiss);
 	let opened = 0;
+	let triggerPoint: { x: number; y: number } | undefined;
+	let enteredPopup = false;
 	hookMethod(TuiAltScreen.prototype, "handleMouseEvent", `${namespace}.pointerDismiss`, (self, args, original) => {
 		const popup = getPopup();
 		const raw = args[0] as { button: number; x: number; y: number; release: boolean };
@@ -764,17 +780,43 @@ export function installClickedHoverPopupDismissHooks(
 			renderedOverlayLayouts?: readonly { entry: { component?: Component }; row: number; col: number; width: number; height: number }[];
 		}).renderedOverlayLayouts;
 		const rect = layouts?.find((layout) => layout.entry.component === popup);
-		const inside = rect && raw.x >= rect.col && raw.x < rect.col + rect.width &&
-			raw.y >= rect.row && raw.y < rect.row + rect.height;
+		const inside = Boolean(
+			rect &&
+				raw.x >= rect.col &&
+				raw.x < rect.col + rect.width &&
+				raw.y >= rect.row &&
+				raw.y < rect.row + rect.height,
+		);
+		if (inside) {
+			enteredPopup = true;
+		}
 		const before = opened;
 		const result = original.apply(self, args);
 		if (!inside && opened === before && getPopup() === popup) {
-			onDismiss();
-			self.requestRender?.();
+			const inCorridorToPopup = Boolean(
+				move &&
+					!enteredPopup &&
+					rect &&
+					triggerPoint &&
+					raw.x >= Math.min(triggerPoint.x - 4, rect.col) - 1 &&
+					raw.x <= Math.max(triggerPoint.x + 12, rect.col + rect.width) &&
+					raw.y >= Math.min(triggerPoint.y, rect.row) &&
+					raw.y <= Math.max(triggerPoint.y, rect.row + rect.height - 1),
+			);
+			if (!inCorridorToPopup) {
+				onDismiss();
+				self.requestRender?.();
+			}
 		}
 		return result;
 	});
-	return () => { opened += 1; };
+	return (trigger) => {
+		opened += 1;
+		if (trigger) {
+			triggerPoint = { x: trigger.x, y: trigger.y };
+		}
+		enteredPopup = false;
+	};
 }
 
 export function installPrimaryScrollDismissHooks(namespace: string, isActive: () => boolean, onDismiss: () => void): void {

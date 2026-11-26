@@ -1,4 +1,6 @@
+import { pathToFileURL } from "node:url";
 import {
+	getCapabilities,
 	Markdown,
 	sliceByColumn,
 	stripTerminalSequences,
@@ -35,7 +37,7 @@ import {
 } from "../../shared/runtime-hooks.ts";
 import { markSelectionChrome, markSelectionCodeRow } from "../../shared/selection-copy.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
-import { toggleLinkTargetPopup } from "./link-target-popup.ts";
+import { openInspectableLinkTarget, toggleLinkTargetPopup } from "./link-target-popup.ts";
 
 const LINK_OSC8_PREFIX = "\x1b]8;;conarti-link:";
 const LINK_OSC8_CLOSE = "\x1b]8;;\x07";
@@ -276,6 +278,16 @@ function tagFilePaths(line: string, targets: InspectableLinkTarget[], cwd: strin
 	return out + sliceByColumn(line, col, visibleWidth(line) - col, true);
 }
 
+function resolveNativeOsc8Href(target: InspectableLinkTarget | undefined): string | undefined {
+	if (!target || !getCapabilities().hyperlinks) return undefined;
+	if (target.kind === "url") return target.url;
+	try {
+		return pathToFileURL(target.resolvedPath).href;
+	} catch {
+		return undefined;
+	}
+}
+
 function extractLineLinkHits(
 	ansiLine: string,
 	rowOffset: number,
@@ -287,7 +299,7 @@ function extractLineLinkHits(
 	let cleanedLine = "";
 	let col = 0;
 	let i = 0;
-	let activeSynthetic: { idx: number; startCol: number } | undefined;
+	let activeSynthetic: { idx: number; startCol: number; emittedOsc8: boolean } | undefined;
 	let activeOsc8: { href: string; startCol: number; label: string } | undefined;
 
 	if (ansiLine.includes("\x1b]8;")) {
@@ -310,7 +322,12 @@ function extractLineLinkHits(
 
 			const synthOpen = /^\x1b\]8;;conarti-link:(\d+)(?:\x07|\x1b\\)/.exec(ansiLine.slice(i));
 			if (synthOpen) {
-				activeSynthetic = { idx: Number.parseInt(synthOpen[1]!, 10), startCol: col };
+				const idx = Number.parseInt(synthOpen[1]!, 10);
+				const osc8Href = resolveNativeOsc8Href(pendingLinks[idx]);
+				if (osc8Href) {
+					cleanedLine += `\x1b]8;;${osc8Href}\x07`;
+				}
+				activeSynthetic = { idx, startCol: col, emittedOsc8: Boolean(osc8Href) };
 				i += synthOpen[0].length;
 				continue;
 			}
@@ -324,9 +341,12 @@ function extractLineLinkHits(
 							rowOffset,
 							xStart: activeSynthetic.startCol,
 							xEnd: col,
-							fromOsc8: false,
+							fromOsc8: activeSynthetic.emittedOsc8,
 							target,
 						});
+					}
+					if (activeSynthetic.emittedOsc8) {
+						cleanedLine += LINK_OSC8_CLOSE;
 					}
 					activeSynthetic = undefined;
 					i += osc8Close[0].length;
@@ -1028,6 +1048,11 @@ export function installMarkdownCardsAndHeadings(): void {
 					(lh) => event.y === lh.y && event.x >= lh.xStart && event.x < lh.xEnd,
 				);
 				if (matchedLink) {
+					const extEvent = event as TuiMouseEvent & { super?: boolean; meta?: boolean };
+					if (event.alt || event.ctrl || extEvent.super || extEvent.meta) {
+						openInspectableLinkTarget(matchedLink.target);
+						return { handled: true, render: true };
+					}
 					toggleLinkTargetPopup(matchedLink.target, event.screenX, event.screenY);
 					return { handled: true, render: true };
 				}

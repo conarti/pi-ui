@@ -1,3 +1,4 @@
+import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import {
 	blueFgRgbPrefix,
 	clampHueOutsideForbiddenBands,
@@ -302,7 +303,7 @@ export function computeGlimmerPeriodMs(
 	const count =
 		typeof textOrSpan === "number"
 			? textOrSpan
-			: [...glimmerSegmenter.segment(textOrSpan)].length;
+			: [...glimmerSegmenter.segment(stripTerminalSequences(textOrSpan))].length;
 	const startIdx = options?.startIndex ?? 0;
 	const totalSpan = Math.max(count, options?.totalSpanChars ?? startIdx + count);
 	return resolveGlimmerTiming(totalSpan, options).periodMs;
@@ -369,14 +370,15 @@ export function paintGlimmerSweepText(
 	text: string,
 	options?: GlimmerSweepOptions,
 ): string {
-	if (!text) return "";
+	const plain = stripTerminalSequences(text);
+	if (!plain) return "";
 	const theme = options?.theme ?? getActiveGlobalTheme();
 	const light = options?.light !== undefined ? options.light : isLightTheme(theme);
 	const elapsed = Number.isFinite(options?.elapsedMs)
 		? options!.elapsedMs!
 		: getAnimationElapsedMs();
 
-	const segments = [...glimmerSegmenter.segment(text)].map((s) => s.segment);
+	const segments = [...glimmerSegmenter.segment(plain)].map((s) => s.segment);
 	const startIdx = options?.startIndex ?? 0;
 	const totalSpan = Math.max(segments.length, options?.totalSpanChars ?? startIdx + segments.length);
 	const stops = resolveGlimmerStops(light, options);

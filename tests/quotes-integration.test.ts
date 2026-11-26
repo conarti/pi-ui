@@ -165,13 +165,12 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 
 		await harness.pressKey("\x16");
 		await flushAsyncQuote(harness);
-		expect(editor.getText()).toBe("[🖼 Image #1]");
+		expect(editor.getText()).toBe("[🖼 Image #1] ");
 
 		harness.setClipboard({
 			image: null,
 			text: "Original quote A\nOriginal quote B",
 		});
-		await harness.typeText(" ");
 		await harness.pressKey("\x1b[113;3u");
 		await flushAsyncQuote(harness);
 
@@ -444,7 +443,7 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		await flushAsyncQuote(harness);
 
 		harness.setClipboard({ image: null, text: null });
-		await harness.typeText(" code ");
+		await harness.typeText("code ");
 		await harness.paste("const a = 1;\nconst b = 2;\nconst c = 3;\nconst d = 4;", true);
 
 		harness.setClipboard({

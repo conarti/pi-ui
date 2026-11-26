@@ -310,6 +310,30 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 			},
 		},
 		{
+			id: "toggle-outline-timestamps",
+			group: t("palette.group.settings"),
+			icon: "🕒",
+			label: t("palette.item.outlineTimestampsToggle", {
+				action: userCfg.outlineTimestamps
+					? t("palette.action.disable")
+					: t("palette.action.enable"),
+			}),
+			hint: "/outline timestamps",
+			keywords: "outline rail timestamps date time prompts menu",
+			run: () => {
+				const next = !loadPiUiUserConfig().outlineTimestamps;
+				updatePiUiUserConfig({ outlineTimestamps: next });
+				requestRender();
+				ctx.ui.notify(
+					t("config.updated", {
+						setting: "Outline Timestamps",
+						value: next ? t("state.on") : t("state.off"),
+					}),
+					"info",
+				);
+			},
+		},
+		{
 			id: "toggle-mid-turn-enter",
 			group: t("palette.group.settings"),
 			icon: "↵",

@@ -8,7 +8,9 @@ import {
 } from "../../shared/host-runtime.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import { t } from "../../shared/i18n.ts";
+import { loadPiUiUserConfig, updatePiUiUserConfig } from "../../shared/pi-ui-config.ts";
 import { extractSkillInvocations } from "../../shared/skill-tags.ts";
+import { formatTranscriptTimestamp } from "../../shared/transcript-timestamp.ts";
 import type { IndexedTurn, TranscriptTurnIndex } from "../../shared/turn-index.ts";
 import { reconstructTurnPromptText } from "../prompt-chips/registry.ts";
 import {
@@ -96,15 +98,22 @@ export function createOutlineRailSlot(
 		const rawPreview = reconstructed || turn.prompt;
 		const previewSource = extractSkillInvocations(rawPreview, { cwd: ctx.cwd }).previewText;
 		const bodyLines = wrapPreviewLines(previewSource, maxText);
+		const cfg = loadPiUiUserConfig();
+		const formattedTime =
+			cfg.outlineTimestamps && cfg.timestamps !== "off"
+				? formatTranscriptTimestamp(turn.timestamp, cfg.timestamps)
+				: "";
+		const minTimeW = formattedTime ? visibleWidth(formattedTime) + 4 : 0;
 		const contentW = Math.max(
 			Math.min(10, maxText),
+			minTimeW,
 			...bodyLines.map(visibleWidth),
 		);
 		const cardW = Math.min(maxCardW, contentW + 4);
 		const cardH = (bodyLines.length || 1) + 2;
 
 		const maxRow = Math.max(0, Math.min(termRows - cardH, viewportRows - cardH));
-		popup.time = "";
+		popup.time = formattedTime;
 		popup.preview = previewSource;
 		popupOptions.width = cardW;
 		popupOptions.col = Math.max(1, termCols - RAIL_WIDTH - cardW - 1);
@@ -174,6 +183,29 @@ export function registerOutlineCommands(pi: ExtensionAPI, requestRender: () => v
 
 	pi.registerCommand("outline", {
 		description: t("outline.command"),
-		handler: async (_args, ctx) => toggle(ctx),
+		handler: async (args, ctx) => {
+			const parts = args.trim().toLowerCase().split(/\s+/u).filter(Boolean);
+			if (parts[0] === "timestamps" || parts[0] === "time") {
+				const sub = parts[1];
+				const cur = loadPiUiUserConfig().outlineTimestamps;
+				const next =
+					sub === "on" || sub === "true"
+						? true
+						: sub === "off" || sub === "false"
+							? false
+							: !cur;
+				updatePiUiUserConfig({ outlineTimestamps: next });
+				requestRender();
+				ctx.ui.notify(
+					t("config.updated", {
+						setting: "Outline Timestamps",
+						value: next ? t("state.on") : t("state.off"),
+					}),
+					"info",
+				);
+				return;
+			}
+			toggle(ctx);
+		},
 	});
 }

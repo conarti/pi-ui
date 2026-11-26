@@ -481,7 +481,7 @@ export function renderWorkingStatusRow(
 	const leftPlain = options.customText?.trim()
 		? stripTerminalSequences(rawStep)
 		: `${POLARIS_STAR} ${rawStep}`;
-	const clippedLeft = truncateToWidth(leftPlain, leftBudget, "…");
+	const clippedLeft = stripTerminalSequences(truncateToWidth(leftPlain, leftBudget, "…"));
 	const leftStyled = options.customText?.trim()
 		? truncateToWidth(options.customText.trim(), leftBudget, "…")
 		: paintGlimmerSweepText(clippedLeft, {
@@ -517,6 +517,69 @@ export function renderWorkingStatusRow(
 	return {
 		line: padTail > 0 ? `${line}${" ".repeat(padTail)}` : line,
 		stopHit,
+	};
+}
+
+/**
+ * Форматирует компактный сегмент статуса `Working` для верхней рамки Composer (`╭─ ✦ Weaving… · 3.2s [stop] ─╮`),
+ * возвращая стилизованный текст и локальное смещение кнопки `[stop]` внутри сегмента.
+ */
+export function renderInlineWorkingStatusBorder(
+	maxWidth: number,
+	options: RenderWorkingRowOptions = {},
+): { readonly text: string; readonly stopOffset?: number; readonly stopWidth?: number } {
+	if (maxWidth <= 2) return { text: "" };
+	const theme = options.theme ?? getActiveGlobalTheme();
+	const light = isLightTheme(theme);
+	const animMs = options.animElapsedMs ?? getAnimationElapsedMs();
+	const snap = options.snapshot ?? getWorkingStatusController().snapshot(options.now);
+
+	const stopLabel = t("working.stop");
+	const stopW = visibleWidth(stopLabel);
+	const elapsedPlain = snap.elapsedText;
+	const stopStyled = options.stopHovered
+		? light
+			? fgRgb(220, 38, 38, stopLabel)
+			: fgRgb(248, 113, 113, stopLabel)
+		: light
+			? fgRgb(100, 116, 139, stopLabel)
+			: fgRgb(118, 134, 158, stopLabel);
+	const elapsedStyled = light
+		? fgRgb(124, 138, 160, elapsedPlain)
+		: fgRgb(104, 118, 142, elapsedPlain);
+	const sepStyled = theme.fg("dim", " · ");
+
+	const suffixPlainW = 3 + visibleWidth(elapsedPlain) + 1 + stopW;
+	const includeSuffix = maxWidth >= suffixPlainW + 14;
+	const leftBudget = includeSuffix ? Math.max(4, maxWidth - suffixPlainW) : maxWidth;
+
+	const rawStep = options.customText?.trim() || snap.label || WORKING_VERBS[0]!;
+	const leftPlain = options.customText?.trim()
+		? stripTerminalSequences(rawStep)
+		: `${POLARIS_STAR} ${rawStep}`;
+	const clippedLeft = stripTerminalSequences(truncateToWidth(leftPlain, leftBudget, "…"));
+	const leftStyled = options.customText?.trim()
+		? truncateToWidth(options.customText.trim(), leftBudget, "…")
+		: paintGlimmerSweepText(clippedLeft, {
+				theme,
+				light,
+				elapsedMs: animMs,
+				charsPerSecond: 17,
+				leadPad: 7,
+				trailPad: 13,
+			});
+	const leftW = visibleWidth(leftStyled);
+	if (leftW === 0) return { text: "" };
+
+	if (!includeSuffix) {
+		return { text: leftStyled };
+	}
+
+	const stopOffset = leftW + 3 + visibleWidth(elapsedPlain) + 1;
+	return {
+		text: `${leftStyled}${sepStyled}${elapsedStyled} ${stopStyled}`,
+		stopOffset,
+		stopWidth: stopW,
 	};
 }
 

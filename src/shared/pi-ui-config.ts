@@ -28,6 +28,7 @@ export interface PiUiUserConfig {
 	readonly toolDensity: ToolDensityPreset;
 	readonly responseMetrics: boolean;
 	readonly timestamps: TimestampDisplayMode;
+	readonly outlineTimestamps: boolean;
 	readonly copyOnSelect: boolean;
 	readonly showShortcutsBar: boolean;
 	readonly midTurnEnter: MidTurnEnterBehavior;
@@ -40,6 +41,7 @@ export const DEFAULT_PI_UI_USER_CONFIG: PiUiUserConfig = {
 	toolDensity: "balanced",
 	responseMetrics: true,
 	timestamps: "datetime",
+	outlineTimestamps: true,
 	copyOnSelect: false,
 	showShortcutsBar: true,
 	midTurnEnter: "queue",
@@ -108,6 +110,10 @@ export function parsePiUiUserConfig(raw: unknown): PiUiUserConfig {
 		timestamps:
 			parseChoice(raw.timestamps, TIMESTAMP_DISPLAY_MODES) ??
 			DEFAULT_PI_UI_USER_CONFIG.timestamps,
+		outlineTimestamps:
+			typeof raw.outlineTimestamps === "boolean"
+				? raw.outlineTimestamps
+				: DEFAULT_PI_UI_USER_CONFIG.outlineTimestamps,
 		copyOnSelect:
 			typeof raw.copyOnSelect === "boolean"
 				? raw.copyOnSelect
@@ -227,6 +233,9 @@ export function updatePiUiUserConfig(patch: Partial<PiUiUserConfig>): PiUiUserCo
 	if (patch.timestamps !== undefined) {
 		const valid = parseChoice(patch.timestamps, TIMESTAMP_DISPLAY_MODES);
 		if (valid) nextPatch.timestamps = valid;
+	}
+	if (patch.outlineTimestamps !== undefined) {
+		nextPatch.outlineTimestamps = Boolean(patch.outlineTimestamps);
 	}
 	if (patch.copyOnSelect !== undefined) {
 		nextPatch.copyOnSelect = Boolean(patch.copyOnSelect);

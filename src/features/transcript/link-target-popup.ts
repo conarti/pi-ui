@@ -177,17 +177,22 @@ class LinkTargetPopup implements Component {
 
 const LINK_POPUP_SLOT_KEY = Symbol.for("conarti.pi-ui.link-target-popup.v1");
 
+export function openInspectableLinkTarget(target: InspectableLinkTarget): void {
+	hideLinkTargetPopup();
+	const opener = resolveActiveExternalOpener();
+	if (target.kind === "url") {
+		void opener.openUrl(target.url);
+	} else {
+		void opener.openPath(target.resolvedPath, { line: target.line, column: target.column });
+	}
+}
+
 function createLinkPopupController() {
 	return createClickedHoverPopup("linkTarget.popup", (dismiss) => {
 		const popup = new LinkTargetPopup(() => getActiveGlobalTheme(getActiveHostRuntime()?.theme()));
 		popup.onOpen = (target) => {
 			dismiss();
-			const opener = resolveActiveExternalOpener();
-			if (target.kind === "url") {
-				void opener.openUrl(target.url);
-			} else {
-				void opener.openPath(target.resolvedPath, { line: target.line, column: target.column });
-			}
+			openInspectableLinkTarget(target);
 		};
 		popup.onCopy = (target) => {
 			copyToClipboard(target.copyText);

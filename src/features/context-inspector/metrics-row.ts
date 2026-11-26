@@ -19,6 +19,7 @@ import {
 	formatCompletionTimestamp,
 	formatMetricsDuration,
 	formatMetricsRate,
+	isPositiveCount,
 	isValidMs,
 	type ResponseMetricsData,
 } from "./telemetry.ts";
@@ -41,13 +42,22 @@ export class ResponseMetricsRowComponent implements Component {
 		this.leftHitStart = -1;
 		this.leftHitEnd = -1;
 
-		if (width < 12 || this.data.stopReason === "toolUse") {
+		if (width < 12) {
 			return [];
 		}
 
 		const config = loadPiUiUserConfig();
+		const isToolStep = this.data.stopReason === "toolUse";
+		if (isToolStep) {
+			if (!config.responseMetrics || !isPositiveCount(this.data.outputTokens)) {
+				return [];
+			}
+		}
+
 		const showMetrics = config.responseMetrics;
-		const formattedTime = formatCompletionTimestamp(this.data.completedAt, config.timestamps);
+		const formattedTime = isToolStep
+			? ""
+			: formatCompletionTimestamp(this.data.completedAt, config.timestamps);
 
 		if (!showMetrics && !formattedTime) {
 			return [];
@@ -77,51 +87,61 @@ export class ResponseMetricsRowComponent implements Component {
 		let leftRenderedWidth = 0;
 
 		if (showMetrics && computed && availableLeftWidth > 0) {
-			const elapsedMs = isValidMs(this.data.timeSinceUserMs)
-				? this.data.timeSinceUserMs
-				: computed.totalMs;
-			const baseText = t("metrics.workedFor", { duration: formatMetricsDuration(elapsedMs) });
+			const parts: string[] = [];
+			let primaryText = "";
 
-			const hoverExtras: string[] = [];
-			if (this.hovered) {
-				const ttft = this.getTurnTtft() ?? computed.ttftMs;
-				if (ttft !== undefined) {
-					hoverExtras.push(
-						t("metrics.ttftPart", { duration: formatMetricsDuration(ttft) }),
-					);
-				}
-				const rate = computed.streamTps ?? computed.effectiveTps;
-				if (rate !== undefined) {
-					hoverExtras.push(t("metrics.ratePart", { rate: formatMetricsRate(rate) }));
-				}
+			if (!isToolStep) {
+				const elapsedMs = isValidMs(this.data.timeSinceUserMs)
+					? this.data.timeSinceUserMs
+					: computed.totalMs;
+				primaryText = t("metrics.workedFor", { duration: formatMetricsDuration(elapsedMs) });
+				parts.push(primaryText);
 			}
 
-			const fullLeftPlain =
-				hoverExtras.length > 0 ? `${baseText} · ${hoverExtras.join(" · ")}` : baseText;
+			const stepTtft = computed.ttftMs ?? (!isToolStep ? this.getTurnTtft() : undefined);
+			if (stepTtft !== undefined) {
+				parts.push(t("metrics.ttftPart", { duration: formatMetricsDuration(stepTtft) }));
+			}
+
+			const rate = computed.streamTps ?? computed.effectiveTps;
+			if (rate !== undefined) {
+				parts.push(t("metrics.ratePart", { rate: formatMetricsRate(rate) }));
+			}
+
+			if (parts.length === 0 && !formattedTime) {
+				return [];
+			}
+
+			const fullLeftPlain = parts.join(" · ");
 			const clippedLeft = truncateToWidth(fullLeftPlain, availableLeftWidth, "…");
 			leftRenderedWidth = visibleWidth(clippedLeft);
 
-			if (this.hovered) {
-				const baseClipped = truncateToWidth(baseText, availableLeftWidth, "…");
-				const baseW = visibleWidth(baseClipped);
-				const hoverAccent = light ? fgRgb(37, 99, 235, baseClipped) : fgRgb(192, 202, 245, baseClipped);
-				if (clippedLeft.length > baseClipped.length && availableLeftWidth > baseW) {
-					const suffixPlain = clippedLeft.slice(baseClipped.length);
-					const suffixStyled = light
-						? fgRgb(100, 116, 139, suffixPlain)
-						: fgRgb(126, 142, 168, suffixPlain);
-					leftStyled = `${hoverAccent}${suffixStyled}`;
+			if (leftRenderedWidth > 0) {
+				if (this.hovered) {
+					const leadPlain = primaryText || parts[0] || clippedLeft;
+					const leadClipped = truncateToWidth(leadPlain, availableLeftWidth, "…");
+					const leadW = visibleWidth(leadClipped);
+					const hoverAccent = light
+						? fgRgb(37, 99, 235, leadClipped)
+						: fgRgb(192, 202, 245, leadClipped);
+					if (clippedLeft.length > leadClipped.length && availableLeftWidth > leadW) {
+						const suffixPlain = clippedLeft.slice(leadClipped.length);
+						const suffixStyled = light
+							? fgRgb(100, 116, 139, suffixPlain)
+							: fgRgb(126, 142, 168, suffixPlain);
+						leftStyled = `${hoverAccent}${suffixStyled}`;
+					} else {
+						leftStyled = hoverAccent;
+					}
 				} else {
-					leftStyled = hoverAccent;
+					leftStyled = light
+						? fgRgb(120, 134, 156, clippedLeft)
+						: fgRgb(104, 118, 142, clippedLeft);
 				}
-			} else {
-				leftStyled = light
-					? fgRgb(120, 134, 156, clippedLeft)
-					: fgRgb(104, 118, 142, clippedLeft);
-			}
 
-			this.leftHitStart = leftStart;
-			this.leftHitEnd = leftStart + Math.max(0, leftRenderedWidth - 1);
+				this.leftHitStart = leftStart;
+				this.leftHitEnd = leftStart + Math.max(0, leftRenderedWidth - 1);
+			}
 		}
 
 		const gapWidth = Math.max(0, width - leftStart - leftRenderedWidth - timeWidth - rightPad);
@@ -132,7 +152,10 @@ export class ResponseMetricsRowComponent implements Component {
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-		if (this.data.stopReason === "toolUse" || !loadPiUiUserConfig().responseMetrics) {
+		if (!loadPiUiUserConfig().responseMetrics) {
+			return undefined;
+		}
+		if (this.data.stopReason === "toolUse" && !isPositiveCount(this.data.outputTokens)) {
 			return undefined;
 		}
 

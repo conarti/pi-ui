@@ -647,4 +647,102 @@ describe("Link [text](url) and file path:line [Open] [Copy] Hover Popups", () =>
 		await harness.mouseClick(openBtn!.col + 2, openBtn!.row);
 		expect(openedUrls).toEqual(["https://pi.dev/changelog"]);
 	});
+
+	it("opens links and path:line targets directly on Cmd+Click / Ctrl+Click without opening popup, and displays toggleable timestamps in Outline Rail preview", async () => {
+		const openedUrls: string[] = [];
+		const openedPaths: Array<{ filePath: string; line?: number }> = [];
+		setCapabilities({ images: null, trueColor: true, hyperlinks: true });
+
+		const t1 = new Date(2026, 10, 26, 16, 27, 0).getTime();
+		const t2 = new Date(2026, 10, 26, 16, 30, 0).getTime();
+
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 100,
+			height: 28,
+			externalOpener: {
+				async openUrl(url) {
+					openedUrls.push(url);
+					return { ok: true };
+				},
+				async openPath(filePath, options) {
+					openedPaths.push({ filePath, line: options?.line });
+					return { ok: true };
+				},
+			},
+			initialEntries: [
+				{
+					type: "message",
+					id: "u-rail-1",
+					parentId: null,
+					timestamp: new Date(t1).toISOString(),
+					message: { role: "user", content: "First prompt in history", timestamp: t1 },
+				} as SessionEntry,
+				{
+					type: "message",
+					id: "a-rail-1",
+					parentId: "u-rail-1",
+					timestamp: new Date(t1 + 1000).toISOString(),
+					message: fauxAssistantMessage("First answer"),
+				} as SessionEntry,
+				{
+					type: "message",
+					id: "u-rail-2",
+					parentId: "a-rail-1",
+					timestamp: new Date(t2).toISOString(),
+					message: { role: "user", content: "Second prompt with link check", timestamp: t2 },
+				} as SessionEntry,
+			],
+			responses: [
+				fauxAssistantMessage([
+					fauxText(
+						"Check [PR #49](https://github.com/conarti/pi-ui/pull/49) and `src/shared/i18n.ts:18`.",
+					),
+				]),
+			],
+		});
+
+		await harness.submitInput("Show link and path");
+		const screen = harness.screen();
+
+		/* Проверяем наличие реальных OSC 8 гиперссылок (URL и локальный путь) в выводе терминала */
+		const rawRendered = harness.renderFrame().join("\n");
+		expect(rawRendered).toContain("\x1b]8;;https://github.com/conarti/pi-ui/pull/49");
+		expect(rawRendered).toContain("\x1b]8;;file://");
+
+		/* Cmd+Click (SGR Meta bit 8) по ссылке сразу открывает URL без попапа [Open] */
+		const linkHit = screen.findText("PR #49")!;
+		const sgrCol = linkHit.col + 3;
+		const sgrRow = linkHit.row + 1;
+		await harness.sendInput(`\x1b[<8;${sgrCol};${sgrRow}M`);
+		await harness.sendInput(`\x1b[<8;${sgrCol};${sgrRow}m`);
+		expect(openedUrls).toEqual(["https://github.com/conarti/pi-ui/pull/49"]);
+		expect(harness.screen().text()).not.toContain("[Open]");
+
+		/* Ctrl+Click (SGR Ctrl bit 16) по пути файла сразу открывает путь без попапа */
+		const pathHit = harness.screen().findText("src/shared/i18n.ts:18")!;
+		const pathCol = pathHit.col + 4;
+		const pathRow = pathHit.row + 1;
+		await harness.sendInput(`\x1b[<16;${pathCol};${pathRow}M`);
+		await harness.sendInput(`\x1b[<16;${pathCol};${pathRow}m`);
+		expect(openedPaths).toHaveLength(1);
+		expect(openedPaths[0]!.filePath).toMatch(/src\/shared\/i18n\.ts$/);
+		expect(openedPaths[0]!.line).toBe(18);
+
+		/* Превью правого меню промптов (Outline Rail) показывает дату и время в верхней рамке и умеет отключать их */
+		const rail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
+		const geo = rail.geometry!;
+		await harness.mouseMove(99, 3 + geo.ticksY);
+		const previewBodyBefore = harness.screen().findText("│ First prompt in history")!;
+		expect(previewBodyBefore).toBeDefined();
+		expect(harness.screen().rowText(previewBodyBefore.row - 1)).toContain("26 Nov, 16:27");
+
+		await harness.mouseMove(10, 10);
+		await harness.submitInput("/outline timestamps off");
+		const geoAfter = (getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent).geometry!;
+		await harness.mouseMove(99, 3 + geoAfter.ticksY);
+		const previewBodyAfter = harness.screen().findText("│ First prompt in history")!;
+		expect(previewBodyAfter).toBeDefined();
+		expect(harness.screen().rowText(previewBodyAfter.row - 1)).not.toContain("26 Nov, 16:27");
+	});
 });
