@@ -1,5 +1,5 @@
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences } from "@earendil-works/pi-tui";
+import { getImageDimensions, stripTerminalSequences } from "@earendil-works/pi-tui";
 import { analyzeShell, unwrapCommandWords, type ShellDialect } from "../../shared/shell-analysis.ts";
 import { normalizeLineEndings } from "./core.ts";
 import type { ToolArgs } from "./types.ts";
@@ -360,11 +360,47 @@ export function splitReadFooter(text: string): { body: string; footer?: string }
 	return match ? { body: text.slice(0, match.index), footer: match[1] } : { body: text };
 }
 
+/** Проверяет наличие хотя бы одного блока инлайн-изображения в результате инструмента. */
+export function hasImageContent(
+	result: { content?: ReadonlyArray<unknown> } | undefined,
+): boolean {
+	if (!Array.isArray(result?.content)) return false;
+	return result.content.some((item) => {
+		if (!item || typeof item !== "object") return false;
+		const block = item as { type?: unknown; data?: unknown; mimeType?: unknown };
+		return (
+			block.type === "image" &&
+			typeof block.data === "string" &&
+			block.data.length > 0 &&
+			typeof block.mimeType === "string" &&
+			block.mimeType.length > 0
+		);
+	});
+}
+
+/** Краткая сводка по изображениям в результате инструмента (MIME-тип и размеры в пикселях). */
+export function formatImageResultSummary(
+	result: AgentToolResult<unknown> | undefined,
+): string | undefined {
+	if (!result || !Array.isArray(result.content)) return undefined;
+	const images = result.content.filter(
+		(item): item is { type: "image"; data: string; mimeType: string } =>
+			item?.type === "image" &&
+			typeof (item as { data?: unknown }).data === "string" &&
+			typeof (item as { mimeType?: unknown }).mimeType === "string",
+	);
+	if (images.length === 0) return undefined;
+	const first = images[0]!;
+	const dims = getImageDimensions(first.data, first.mimeType);
+	const dimPart = dims ? ` · ${dims.widthPx}×${dims.heightPx}` : "";
+	const countPrefix = images.length > 1 ? `${images.length} images · ` : "";
+	return `${countPrefix}${first.mimeType}${dimPart}`;
+}
+
 /** Whether a read result is plain file text that can be shown as numbered code. */
 export function isReadTextResult(result: AgentToolResult<unknown>): boolean {
 	const details = result.details as ResultDetails | undefined;
-	return !details?.truncation?.firstLineExceedsLimit
-		&& !result.content.some((item) => item.type === "image");
+	return !details?.truncation?.firstLineExceedsLimit && !hasImageContent(result);
 }
 
 function stripGeneratedFooter(name: string, text: string, details: ResultDetails | undefined): string {
@@ -383,6 +419,9 @@ export function formatResultLineSummary(
 	result: AgentToolResult<unknown>,
 	output?: string,
 ): string | undefined {
+	if (hasImageContent(result)) {
+		return formatImageResultSummary(result);
+	}
 	const details = result.details as ResultDetails | undefined;
 	const text = name === "edit"
 		? getEditChanges(result)

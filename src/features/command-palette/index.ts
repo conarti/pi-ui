@@ -35,6 +35,7 @@ import {
 	TOOL_DENSITY_PRESETS,
 	updatePiUiUserConfig,
 } from "../../shared/pi-ui-config.ts";
+import { notifyLiveToolDensityChange } from "../tool-calls/command.ts";
 import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
 import { getSessionWorkflow, MODE_META } from "../../shared/session-workflow.ts";
 import { requestRender, runAppAction } from "../../shared/ui-action-bridge.ts";
@@ -184,6 +185,7 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 				const next =
 					TOOL_DENSITY_PRESETS[(TOOL_DENSITY_PRESETS.indexOf(cur) + 1) % TOOL_DENSITY_PRESETS.length]!;
 				updatePiUiUserConfig({ toolDensity: next });
+				notifyLiveToolDensityChange(next);
 				requestRender();
 				ctx.ui.notify(t("config.updated", { setting: "Tool Density", value: next }), "info");
 			},
