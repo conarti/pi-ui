@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -12,6 +12,9 @@ import { hasBlockingModalOverlay } from "../src/shared/modal-card.ts";
 import {
 	createInteractiveHarness,
 	fauxAssistantMessage,
+	fauxText,
+	fauxThinking,
+	fauxToolCall,
 	makeAssistantEntry,
 	makeUserEntry,
 	type InteractiveHarness,
@@ -352,6 +355,84 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 			expect(hasRail()).toBe(true);
 
 			expect(readdirSync(tempCwd)).toEqual([]);
+		} finally {
+			rmSync(tempCwd, { recursive: true, force: true });
+		}
+	});
+
+	it("never hides the lower prompt under Sticky Prompt when earlier turns contain grouped tool calls", async () => {
+		const tempCwd = mkdtempSync(join(tmpdir(), "pi-ui-sticky-grouped-"));
+		try {
+			writeFileSync(join(tempCwd, "a.txt"), "alpha\n", "utf8");
+			writeFileSync(join(tempCwd, "b.txt"), "beta\n", "utf8");
+			writeFileSync(join(tempCwd, "c.txt"), "gamma\n", "utf8");
+
+			harness = await createInteractiveHarness({
+				theme: "dark",
+				width: 110,
+				height: 36,
+				cwd: tempCwd,
+				responses: [
+					fauxAssistantMessage(
+						[fauxThinking("Inspecting files"), fauxToolCall("read", { path: "a.txt", toolSummary: "Read a" })],
+						{ stopReason: "toolUse" },
+					),
+					fauxAssistantMessage(
+						[fauxThinking("Inspecting b"), fauxToolCall("read", { path: "b.txt", toolSummary: "Read b" })],
+						{ stopReason: "toolUse" },
+					),
+					fauxAssistantMessage(
+						[fauxThinking("Inspecting c"), fauxToolCall("read", { path: "c.txt", toolSummary: "Read c" })],
+						{ stopReason: "toolUse" },
+					),
+					fauxAssistantMessage([fauxText("Finished reading all three files.")]),
+					fauxAssistantMessage([fauxText(buildResponseText("second-reply", 28))]),
+				],
+			});
+
+			await harness.submitInput("Upper prompt alpha\nsecond line of upper prompt");
+			await harness.submitInput("Lower prompt beta");
+
+			const scroll = getActiveHostRuntime()!.scroll!;
+			const contentHeight = (scroll as unknown as { contentHeight?: number }).contentHeight ?? 0;
+
+			/* Находим реальную строку Lower prompt beta при scrollTop = 0 */
+			scroll.scrollTo(0, { disableFollow: true });
+			harness.flushFrame();
+			const atZero = harness.screen();
+			const lowerAtZero = atZero.findText("Lower prompt beta");
+			expect(lowerAtZero).toBeDefined();
+			const realLowerDocRow = lowerAtZero!.row - 3;
+
+			const assertLowerPromptVisibleAcrossHandoff = (lowerRow: number, totalHeight: number) => {
+				for (
+					let top = Math.max(1, lowerRow - 5);
+					top <= Math.min(Math.max(1, totalHeight - scroll.viewportHeight), lowerRow + 3);
+					top += 1
+				) {
+					scroll.scrollTo(top, { disableFollow: true });
+					harness!.flushFrame();
+					expect(harness!.screen().text()).toContain("Lower prompt beta");
+				}
+			};
+
+			/* В свёрнутом состоянии группы инструментов нижний промпт ни на одном шаге не перекрывается верхним Sticky Prompt */
+			assertLowerPromptVisibleAcrossHandoff(realLowerDocRow, contentHeight);
+
+			/* Раскрываем свёрнутую группу инструментов кликом и убеждаемся, что кэш координат обновился и нижний промпт по-прежнему не пропадает */
+			scroll.scrollTo(0, { disableFollow: true });
+			harness.flushFrame();
+			const groupHit =
+				harness.screen().findText("Explored") ??
+				harness.screen().findText("3 files");
+			expect(groupHit).toBeDefined();
+			await harness.mouseClick(groupHit!.col + 2, groupHit!.row);
+
+			const expandedHeight = (scroll as unknown as { contentHeight?: number }).contentHeight ?? 0;
+			expect(expandedHeight).toBeGreaterThan(contentHeight);
+			const lowerExpanded = harness.screen().findText("Lower prompt beta");
+			expect(lowerExpanded).toBeDefined();
+			assertLowerPromptVisibleAcrossHandoff(lowerExpanded!.row - 3, expandedHeight);
 		} finally {
 			rmSync(tempCwd, { recursive: true, force: true });
 		}

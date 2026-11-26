@@ -24,6 +24,12 @@ import {
 import { registerTransientHoverDismisser, unwrapHostTui } from "../../shared/host-runtime.ts";
 import { t } from "../../shared/i18n.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
+import {
+	hasMarkdownFormatting,
+	measurePopupLineNaturalWidth,
+	paintPopupMarkdownCell,
+	renderPopupMarkdownLines,
+} from "../../shared/popup-markdown.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import type { SerializedPromptChip } from "./registry.ts";
 
@@ -49,8 +55,8 @@ export interface PreviewPopupActions {
 
 export interface PreviewContentSpec {
 	readonly title: string;
-	readonly lines: Array<{ text: string; muted?: boolean }>;
-	readonly allLines: Array<{ text: string; muted?: boolean }>;
+	readonly lines: Array<{ text: string; muted?: boolean; markdown?: boolean }>;
+	readonly allLines: Array<{ text: string; muted?: boolean; markdown?: boolean }>;
 	readonly scrollable: boolean;
 }
 
@@ -78,7 +84,7 @@ function wrapPlainLines(
 
 export function buildChipPreviewSpec(
 	chip: SerializedPromptChip,
-	options?: { readonly wrapWidth?: number; readonly fullText?: string },
+	options?: { readonly wrapWidth?: number; readonly fullText?: string; readonly theme?: Theme },
 ): PreviewContentSpec {
 	if (chip.kind === "image") {
 		const metaParts: string[] = [];
@@ -109,10 +115,18 @@ export function buildChipPreviewSpec(
 	const rawLines = sourceText.replace(/\t/g, "  ").split("\n");
 	const wrapW = options?.wrapWidth;
 
+	const mdTheme = options?.theme;
+	const useMarkdown = Boolean(wrapW && mdTheme && hasMarkdownFormatting(sourceText));
 	if (chip.kind === "paste") {
-		const allLines: Array<{ text: string; muted?: boolean }> = wrapW
-			? wrapPlainLines(rawLines, wrapW)
-			: rawLines.map((line) => ({ text: line.length > 0 ? line : " " }));
+		const allLines: Array<{ text: string; muted?: boolean; markdown?: boolean }> =
+			useMarkdown && wrapW && mdTheme
+				? renderPopupMarkdownLines(sourceText, wrapW, mdTheme).map((line) => ({
+						text: line,
+						markdown: true,
+					}))
+				: wrapW
+					? wrapPlainLines(rawLines, wrapW)
+					: rawLines.map((line) => ({ text: line.length > 0 ? line : " " }));
 		const shown = allLines.slice(0, MAX_PREVIEW_BODY_ROWS);
 		const remaining = Math.max(0, allLines.length - shown.length);
 		if (remaining > 0) {
@@ -133,9 +147,15 @@ export function buildChipPreviewSpec(
 		};
 	}
 
-	const allLines: Array<{ text: string; muted?: boolean }> = wrapW
-		? wrapPlainLines(rawLines, wrapW, "│ ")
-		: rawLines.map((line) => ({ text: line.length > 0 ? `│ ${line}` : "│" }));
+	const allLines: Array<{ text: string; muted?: boolean; markdown?: boolean }> =
+		useMarkdown && wrapW && mdTheme
+			? renderPopupMarkdownLines(sourceText, wrapW, mdTheme, { quoteRail: true }).map((line) => ({
+					text: line,
+					markdown: true,
+				}))
+			: wrapW
+				? wrapPlainLines(rawLines, wrapW, "│ ")
+				: rawLines.map((line) => ({ text: line.length > 0 ? `│ ${line}` : "│" }));
 	const shown = allLines.slice(0, MAX_PREVIEW_BODY_ROWS);
 	const remaining = Math.max(0, allLines.length - shown.length);
 	if (remaining > 0) {
@@ -301,6 +321,7 @@ export class PromptChipPreviewPopup implements Component {
 			const spec = buildChipPreviewSpec(this.currentChip, {
 				wrapWidth: this.lastWrapWidth,
 				fullText,
+				theme: this.getTheme(),
 			});
 			if (spec.scrollable) {
 				const maxScroll = Math.max(0, spec.allLines.length - MAX_PREVIEW_BODY_ROWS);
@@ -347,9 +368,15 @@ export class PromptChipPreviewPopup implements Component {
 
 	computeDimensions(termCols: number): { width: number; height: number } {
 		if (!this.currentChip) return { width: 24, height: 3 };
+		const theme = this.getTheme();
 		const fullText = this.currentActions.resolveFullText?.(this.currentChip);
 		const maxAllowed = Math.max(24, Math.min(MAX_PREVIEW_WIDTH, termCols - 6));
-		const rawSpec = buildChipPreviewSpec(this.currentChip, { fullText });
+		const maxTextW = Math.max(8, maxAllowed - 4);
+		const measuredSpec = buildChipPreviewSpec(this.currentChip, {
+			wrapWidth: maxTextW,
+			fullText,
+			theme,
+		});
 		const actions = this.resolveActionItems();
 		const actionsWidth =
 			actions.length > 0
@@ -361,19 +388,25 @@ export class PromptChipPreviewPopup implements Component {
 				: 0;
 
 		const naturalInner = Math.max(
-			visibleWidth(rawSpec.title) + 4,
+			visibleWidth(measuredSpec.title) + 4,
 			actionsWidth + 2,
 			thumbMinWidth,
-			...rawSpec.allLines.map((l) => visibleWidth(l.text) + 2),
+			...measuredSpec.allLines.map(
+				(l) => (l.markdown ? measurePopupLineNaturalWidth(l.text) : visibleWidth(l.text)) + 2,
+			),
 		);
 		const width = Math.max(24, Math.min(maxAllowed, naturalInner + 2));
 		const textWidth = Math.max(8, width - 4);
 		this.lastWrapWidth = textWidth;
 
-		const wrappedSpec = buildChipPreviewSpec(this.currentChip, {
-			wrapWidth: textWidth,
-			fullText,
-		});
+		const wrappedSpec =
+			textWidth === maxTextW
+				? measuredSpec
+				: buildChipPreviewSpec(this.currentChip, {
+						wrapWidth: textWidth,
+						fullText,
+						theme,
+					});
 		const thumbLines = this.resolveThumbnailLines(textWidth);
 		const bodyRows = wrappedSpec.scrollable
 			? MAX_PREVIEW_BODY_ROWS + 1
@@ -405,11 +438,12 @@ export class PromptChipPreviewPopup implements Component {
 		const spec = buildChipPreviewSpec(this.currentChip, {
 			wrapWidth: textWidth,
 			fullText,
+			theme,
 		});
 		const thumbLines = this.resolveThumbnailLines(textWidth);
 		const b = (s: string) => fgRgb(borderRgb, s);
 
-		let renderRows: Array<{ text: string; muted?: boolean }>;
+		let renderRows: Array<{ text: string; muted?: boolean; markdown?: boolean }>;
 		if (spec.scrollable) {
 			const maxScroll = Math.max(0, spec.allLines.length - MAX_PREVIEW_BODY_ROWS);
 			this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll));
@@ -466,7 +500,11 @@ export class PromptChipPreviewPopup implements Component {
 					? truncateToWidth(row.text, textWidth, "…")
 					: truncateToWidth(row.text, textWidth, "");
 			const pad = " ".repeat(Math.max(0, textWidth - visibleWidth(clipped)));
-			const colored = fgRgb(row.muted ? mutedRgb : textRgb, `${clipped}${pad}`);
+			const colored = row.muted
+				? fgRgb(mutedRgb, `${clipped}${pad}`)
+				: row.markdown
+					? paintPopupMarkdownCell(`${clipped}${pad}`, textRgb, theme)
+					: fgRgb(textRgb, `${clipped}${pad}`);
 			out.push(paintThemeSurfaceRow(theme, `${b("│")} ${colored} ${b("│")}`, safeWidth, popupBg));
 		}
 

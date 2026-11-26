@@ -5,7 +5,6 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
 	truncateToWidth,
 	visibleWidth,
-	wrapTextWithAnsi,
 	type Component,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
@@ -23,6 +22,11 @@ import {
 import { createClickedHoverPopup } from "./clicked-hover-popup.ts";
 import { getActiveHostRuntime } from "./host-runtime.ts";
 import { t } from "./i18n.ts";
+import {
+	measurePopupLineNaturalWidth,
+	paintPopupMarkdownCell,
+	renderPopupMarkdownLines,
+} from "./popup-markdown.ts";
 import { claimHover } from "./runtime-hooks.ts";
 
 export interface ParsedSkillInvocation {
@@ -202,13 +206,14 @@ class SkillPreviewPopup implements Component {
 	invalidate(): void {}
 
 	private buildWrappedRows(textWidth: number, maxBodyRows: number): {
-		rows: Array<{ text: string; muted?: boolean }>;
+		rows: Array<{ text: string; muted?: boolean; markdown?: boolean }>;
 		maxScroll: number;
 	} {
 		const skill = this.skill;
 		if (!skill) return { rows: [], maxScroll: 0 };
+		const theme = this.getTheme();
 
-		const headerRows: Array<{ text: string; muted?: boolean }> = [];
+		const headerRows: Array<{ text: string; muted?: boolean; markdown?: boolean }> = [];
 		const displayPath = skill.shortLocation ?? skill.location;
 		if (displayPath) {
 			headerRows.push({ text: displayPath, muted: true });
@@ -216,17 +221,13 @@ class SkillPreviewPopup implements Component {
 		}
 
 		const resolvedBody = resolveSkillBodyText(skill);
-		const bodyWrapped: Array<{ text: string; muted?: boolean }> = [];
+		const bodyWrapped: Array<{ text: string; muted?: boolean; markdown?: boolean }> = [];
 		if (resolvedBody) {
-			for (const rawLine of resolvedBody.replace(/\t/g, "  ").split(/\r?\n/)) {
-				if (!rawLine) {
-					bodyWrapped.push({ text: "" });
-					continue;
-				}
-				const chunks = wrapTextWithAnsi(rawLine, Math.max(8, textWidth));
-				for (const chunk of chunks.length > 0 ? chunks : [""]) {
-					bodyWrapped.push({ text: chunk });
-				}
+			const mdLines = renderPopupMarkdownLines(resolvedBody, Math.max(8, textWidth), theme, {
+				stripYamlFrontmatter: true,
+			});
+			for (const mdLine of mdLines) {
+				bodyWrapped.push({ text: mdLine, markdown: true });
 			}
 		} else {
 			bodyWrapped.push({ text: t("transcript.skill.empty"), muted: true });
@@ -257,12 +258,12 @@ class SkillPreviewPopup implements Component {
 	}
 
 	computeDimensions(termCols: number, termRows: number): { width: number; height: number } {
-		const maxWidth = Math.max(24, Math.min(76, termCols - 6));
+		const maxWidth = Math.max(24, Math.min(84, termCols - 6));
 		const maxBodyRows = Math.max(5, Math.min(14, termRows - 8));
 		const { rows } = this.buildWrappedRows(Math.max(12, maxWidth - 4), maxBodyRows);
 		const contentW = Math.max(
 			visibleWidth(` ✦ /${this.skill?.name ?? "skill"} ${CLOSE_BUTTON_LABEL} `),
-			...rows.map((r) => visibleWidth(r.text)),
+			...rows.map((r) => (r.markdown ? measurePopupLineNaturalWidth(r.text) : visibleWidth(r.text))),
 		);
 		const width = Math.max(24, Math.min(maxWidth, contentW + 4));
 		const finalRows = this.buildWrappedRows(Math.max(12, width - 4), maxBodyRows).rows;
@@ -339,12 +340,15 @@ class SkillPreviewPopup implements Component {
 			),
 		];
 
+		const textRgb: [number, number, number] = palette.isLight ? [15, 23, 42] : [220, 232, 248];
 		for (const row of rows) {
 			const clipped = truncateToWidth(row.text, textWidth, "…");
 			const pad = " ".repeat(Math.max(0, textWidth - visibleWidth(clipped)));
 			const styled = row.muted
 				? themeFgRgb(theme, palette.codeMetaFg, `${clipped}${pad}`)
-				: theme.fg("text", `${clipped}${pad}`);
+				: row.markdown
+					? paintPopupMarkdownCell(`${clipped}${pad}`, textRgb, theme)
+					: theme.fg("text", `${clipped}${pad}`);
 			out.push(
 				paintThemeSurfaceRow(
 					theme,

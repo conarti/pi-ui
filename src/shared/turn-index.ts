@@ -138,6 +138,27 @@ function appendBranchTurns(
 	return turns;
 }
 
+interface ContainerChildLinesLayout {
+	readonly width: number;
+	readonly children: readonly Component[];
+	readonly parts: readonly (readonly string[])[];
+	readonly lines: readonly string[];
+}
+
+function getContainerChildLines(node: Container): ContainerChildLinesLayout | undefined {
+	const layout = (node as unknown as { childLines?: ContainerChildLinesLayout }).childLines;
+	if (
+		layout &&
+		typeof layout.width === "number" &&
+		Array.isArray(layout.children) &&
+		Array.isArray(layout.parts) &&
+		Array.isArray(layout.lines)
+	) {
+		return layout;
+	}
+	return undefined;
+}
+
 function isWalkableContainer(node: Component): node is Container {
 	return (
 		node instanceof Container &&
@@ -153,10 +174,23 @@ function isStandaloneSkillTurnComponent(node: Component): node is SkillInvocatio
 	return Boolean(sb?.name && !sb.userMessage);
 }
 
+function countLayoutUserComponents(layout: ContainerChildLinesLayout): number {
+	let count = 0;
+	for (const child of layout.children) {
+		if (child instanceof UserMessageComponent || isStandaloneSkillTurnComponent(child)) {
+			count += 1;
+		} else if (isWalkableContainer(child)) {
+			const nested = getContainerChildLines(child);
+			count += nested ? countLayoutUserComponents(nested) : countMountedUserComponents(child);
+		}
+	}
+	return count;
+}
+
 /**
- * Walks the transcript container hierarchy structurally to compute exact top-row offsets
- * and rendered heights for each mounted `UserMessageComponent` without full-document
- * renders or ANSI string matching.
+ * Walks the rendered `Container.childLines` layout (including `chatContainer`'s folded
+ * `ToolGroupComponent` children) so `Turn.start` / `Turn.end` match `ScrollView` row-for-row
+ * without extra `render()` passes when the frame layout is already fresh.
  */
 export function collectStructuralUserMetrics(doc: Component, width: number): MountedUserMetric[] {
 	const metrics: MountedUserMetric[] = [];
@@ -179,8 +213,38 @@ export function collectStructuralUserMetrics(doc: Component, width: number): Mou
 			return;
 		}
 		if (isWalkableContainer(node)) {
-			for (const child of node.children) {
-				visit(child);
+			const expectedUsers = countMountedUserComponents(node);
+			let layout = getContainerChildLines(node);
+			if (
+				!layout ||
+				layout.width !== width ||
+				countLayoutUserComponents(layout) !== expectedUsers
+			) {
+				const rendered = node.render(width);
+				layout = getContainerChildLines(node);
+				if (!layout || layout.width !== width) {
+					cursor += rendered.length;
+					return;
+				}
+			}
+			for (let idx = 0; idx < layout.children.length; idx += 1) {
+				const child = layout.children[idx]!;
+				const partHeight = layout.parts[idx]?.length ?? 0;
+				if (child instanceof UserMessageComponent || isStandaloneSkillTurnComponent(child)) {
+					if (partHeight > 0) {
+						metrics.push({
+							component: child,
+							start: cursor,
+							end: cursor + partHeight,
+							height: partHeight,
+						});
+						cursor += partHeight;
+					}
+				} else if (isWalkableContainer(child)) {
+					visit(child);
+				} else {
+					cursor += partHeight;
+				}
 			}
 			return;
 		}
@@ -245,6 +309,7 @@ export class TranscriptTurnIndex {
 	private branchVersion = 0;
 
 	private cacheDoc: Component | undefined;
+	private cacheDocLayout: unknown = undefined;
 	private cacheBranchVersion = -1;
 	private cacheWidth = -1;
 	private cacheContentHeight = -1;
@@ -260,6 +325,7 @@ export class TranscriptTurnIndex {
 
 	invalidate(): void {
 		this.cacheDoc = undefined;
+		this.cacheDocLayout = undefined;
 		this.cacheBranchVersion = -1;
 		this.cacheWidth = -1;
 		this.cacheContentHeight = -1;
@@ -308,10 +374,13 @@ export class TranscriptTurnIndex {
 		const contentWidth = this.getContentWidth(viewportWidth);
 		const contentHeight = (this.shell.scroll as unknown as { contentHeight?: number }).contentHeight ?? 0;
 		const mountedCount = countMountedUserComponents(doc);
+		const docLayout = doc instanceof Container ? getContainerChildLines(doc) : undefined;
 		const zeroHeightChildCount = contentHeight === 0 && doc instanceof Container ? doc.children.length : -1;
 
 		if (
 			doc === this.cacheDoc &&
+			docLayout !== undefined &&
+			docLayout === this.cacheDocLayout &&
 			this.branchVersion === this.cacheBranchVersion &&
 			contentWidth === this.cacheWidth &&
 			contentHeight === this.cacheContentHeight &&
@@ -421,6 +490,7 @@ export class TranscriptTurnIndex {
 		}
 
 		this.cacheDoc = doc;
+		this.cacheDocLayout = doc instanceof Container ? getContainerChildLines(doc) : undefined;
 		this.cacheBranchVersion = this.branchVersion;
 		this.cacheWidth = contentWidth;
 		this.cacheContentHeight = contentHeight;

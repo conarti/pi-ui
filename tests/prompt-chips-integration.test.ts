@@ -1178,4 +1178,91 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await harness.reload();
 		await checkRailPreviews();
 	});
+
+	it("renders formatted Markdown (GFM tables, headings, lists, and inline code) inside Paste, Quote, and Skill preview popups", async () => {
+		const tmpCwd = mkdtempSync(join(tmpdir(), "pi-ui-popup-md-"));
+		try {
+			const skillDir = join(tmpCwd, ".agents", "skills", "md-demo");
+			mkdirSync(skillDir, { recursive: true });
+			writeFileSync(
+				join(skillDir, "SKILL.md"),
+				[
+					"---",
+					"name: md-demo",
+					"description: Demo skill with Markdown",
+					"---",
+					"# Skill Heading",
+					"",
+					"| Metric | Budget |",
+					"|---|---|",
+					"| Latency | 12ms |",
+					"",
+					"- **Bold rule** with `inline_helper()`",
+				].join("\n"),
+				"utf8",
+			);
+
+			harness = await createInteractiveHarness({
+				theme: "dark",
+				cwd: tmpCwd,
+				additionalSkillPaths: [skillDir],
+				width: 110,
+				height: 30,
+				clipboard: {
+					image: null,
+					text: "**Quoted bold** with `quoted_fn()`\nand second line",
+				},
+				responses: [fauxAssistantMessage("Markdown popups verified.")],
+			});
+
+			const mdTablePaste = [
+				"| Model | Calls | Stream tok/s |",
+				"|---|---:|---:|",
+				"| gpt-6.2-astra | 299 | 52.6 |",
+				"| gemini-4-carbon | 504 | 84.5 |",
+			].join("\n");
+
+			await harness.typeText("/skill:md-demo ");
+			await harness.paste(mdTablePaste, true);
+
+			/* Сразу после вставки каретка стоит у чипа Paste: попап рисует GFM-таблицу с рамками вместо сырого |---| */
+			const pastePopupText = harness.screen().text();
+			expect(pastePopupText).toContain("Pasted #1 · 4 lines");
+			expect(pastePopupText).toContain("gpt-6.2-astra");
+			expect(pastePopupText).toContain("84.5");
+			expect(pastePopupText).toContain("┼");
+			expect(pastePopupText).not.toContain("|---|");
+
+			/* Добавляем цитату с Markdown через Alt+Q и проверяем рендер **bold** и `code` без сырых звёздочек */
+			await harness.typeText(" ");
+			await harness.pressKey("\x1b[113;3u");
+			await flushClipboardAction(harness);
+			const quotePopupText = harness.screen().text();
+			expect(quotePopupText).toContain("Quote #2 · 2 lines");
+			expect(quotePopupText).toContain("Quoted bold");
+			expect(quotePopupText).toContain("quoted_fn()");
+			expect(quotePopupText).not.toContain("**Quoted bold**");
+
+			/* Отправляем промпт со скиллом и открываем попап /md-demo: frontmatter скрыт, а заголовок и таблица отформатированы */
+			await harness.submitDraft();
+			const sentScreen = harness.screen();
+			const skillPill = sentScreen.findText("/md-demo");
+			expect(skillPill).toBeDefined();
+			await harness.mouseClick(skillPill!.col + 2, skillPill!.row);
+
+			const skillPopupText = harness.screen().text();
+			expect(skillPopupText).toContain("✦ /md-demo");
+			expect(skillPopupText).toContain("Skill Heading");
+			expect(skillPopupText).toContain("Latency");
+			expect(skillPopupText).toContain("12ms");
+			expect(skillPopupText).toContain("Bold rule");
+			expect(skillPopupText).toContain("inline_helper()");
+			expect(skillPopupText).not.toContain("description: Demo skill with Markdown");
+			expect(skillPopupText).not.toContain("# Skill Heading");
+			expect(skillPopupText).not.toContain("|---|");
+			expect(skillPopupText).not.toContain("**Bold rule**");
+		} finally {
+			rmSync(tmpCwd, { recursive: true, force: true });
+		}
+	});
 });
