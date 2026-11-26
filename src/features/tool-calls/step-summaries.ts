@@ -1,7 +1,9 @@
 import { homedir } from "node:os";
 import { basename, isAbsolute, relative } from "node:path";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { t } from "../../shared/i18n.ts";
+import { hookMethod } from "../../shared/runtime-hooks.ts";
 import { normalizeLineEndings, type RowStatus } from "./core.ts";
 import type { ToolArgs } from "./types.ts";
 
@@ -21,6 +23,7 @@ export interface SessionSummarySource {
 }
 
 const managerSummaryCache = new WeakMap<object, CachedSummaryIndex>();
+const hostSummaryCache = new WeakMap<SessionManager, { sessionId: string; byCallId: Map<string, string> }>();
 const arraySummaryCache = new WeakMap<readonly unknown[], CachedSummaryIndex>();
 const liveSummaryOverrides = new WeakMap<object, { sessionId?: string; entries: Map<string, string> }>();
 
@@ -77,16 +80,46 @@ function scanEntriesIntoMap(
 		if (!raw || typeof raw !== "object") continue;
 		const entry = raw as { type?: unknown; customType?: unknown; data?: unknown };
 		if (entry.type !== "custom" || entry.customType !== AGY_TOOL_SUMMARIES_ENTRY_TYPE) continue;
-		if (!entry.data || typeof entry.data !== "object") continue;
-		const summaries = (entry.data as { summaries?: unknown }).summaries;
-		if (!summaries || typeof summaries !== "object" || Array.isArray(summaries)) continue;
-		for (const [callId, value] of Object.entries(summaries as Record<string, unknown>)) {
-			const cleaned = cleanStepSummaryText(value);
-			if (callId && cleaned) {
-				target.set(callId, cleaned);
-			}
-		}
+		indexSummaryData(entry.data, target);
 	}
+}
+
+function indexSummaryData(data: unknown, target: Map<string, string>): void {
+	if (!data || typeof data !== "object") return;
+	const summaries = (data as { summaries?: unknown }).summaries;
+	if (!summaries || typeof summaries !== "object" || Array.isArray(summaries)) return;
+	for (const [callId, value] of Object.entries(summaries)) {
+		const cleaned = cleanStepSummaryText(value);
+		if (callId && cleaned) target.set(callId, cleaned);
+	}
+}
+
+let hostHooksInstalled = false;
+function getHostSummaryIndex(manager: SessionManager): Map<string, string> {
+	if (!hostHooksInstalled) {
+		hostHooksInstalled = true;
+		/* У SessionManager нет API для чтения хвоста; обновляем индекс только после успешной записи. */
+		hookMethod(SessionManager.prototype, "appendCustomEntry", "toolCalls.indexSummaryAppend", (self, args, original) => {
+			const result = original.apply(self, args);
+			const host = self as SessionManager;
+			const cached = hostSummaryCache.get(host);
+			if (args[0] === AGY_TOOL_SUMMARIES_ENTRY_TYPE && cached?.sessionId === host.getSessionId()) {
+				indexSummaryData(args[1], cached.byCallId);
+			}
+			return result;
+		});
+		hookMethod(SessionManager.prototype, "setSessionFile", "toolCalls.resetSummaryIndex", (self, args, original) => {
+			hostSummaryCache.delete(self as SessionManager);
+			return original.apply(self, args);
+		});
+	}
+	const sessionId = manager.getSessionId();
+	const cached = hostSummaryCache.get(manager);
+	if (cached?.sessionId === sessionId) return cached.byCallId;
+	const byCallId = new Map<string, string>();
+	scanEntriesIntoMap(manager.getEntries(), 0, byCallId);
+	hostSummaryCache.set(manager, { sessionId, byCallId });
+	return byCallId;
 }
 
 /**
@@ -121,8 +154,10 @@ export function resolveExternalToolSummary(
 		return cached.byCallId.get(toolCallId) ?? live;
 	}
 
-	/* SessionManager.getEntries() возвращает новую копию массива, поэтому кешируем по самому менеджеру
-	   и сверяем getEntryCount(), не копируя записи сессии между кадрами. */
+	if (sessionSource instanceof SessionManager) {
+		return getHostSummaryIndex(sessionSource).get(toolCallId) ?? live;
+	}
+
 	const manager = sessionSource as SessionSummarySource;
 	const count = typeof manager.getEntryCount === "function" ? manager.getEntryCount() : undefined;
 	let cached = managerSummaryCache.get(manager);

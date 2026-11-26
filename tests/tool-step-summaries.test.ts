@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_CONFIG } from "../src/features/tool-calls/config.ts";
 import { formatAllGroupedSummary } from "../src/features/tool-calls/density.ts";
 import { TOOL_DENSITIES } from "../src/features/tool-calls/types.ts";
@@ -80,6 +81,18 @@ describe("Tool Calls: O(1) step-summary index and semantic fallbacks (pure seam)
 			data: { summaries: { "arr-2": "Run typecheck" } },
 		});
 		expect(resolveExternalToolSummary("arr-2", {}, plainEntries)).toBe("Run typecheck");
+	});
+
+	it("indexes new real SessionManager summaries without asking the host to copy its history", () => {
+		const manager = SessionManager.inMemory(process.cwd());
+		manager.appendCustomEntry(AGY_TOOL_SUMMARIES_ENTRY_TYPE, { summaries: { first: "First summary" } });
+		expect(resolveExternalToolSummary("first", {}, manager)).toBe("First summary");
+		const copyHistory = vi.spyOn(manager, "getEntries");
+		manager.appendCustomEntry("unrelated", {});
+		expect(resolveExternalToolSummary("first", {}, manager)).toBe("First summary");
+		manager.appendCustomEntry(AGY_TOOL_SUMMARIES_ENTRY_TYPE, { summaries: { second: "Second summary" } });
+		expect(resolveExternalToolSummary("second", {}, manager)).toBe("Second summary");
+		expect(copyHistory).not.toHaveBeenCalled();
 	});
 
 	it("prioritizes inline toolSummary and toolAction fields and remembers live overrides", () => {

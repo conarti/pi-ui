@@ -11,6 +11,7 @@ import {
 } from "@earendil-works/pi-tui";
 import {
 	getAnimationElapsedMs,
+	paintGlimmerSweepText,
 	sampleBreathingWaveRgb,
 } from "../../shared/animation-scheduler.ts";
 import { getActiveGlobalTheme, isLightTheme, type RgbTuple } from "../../shared/ansi.ts";
@@ -334,8 +335,7 @@ export interface DensityPalette {
 	readonly theme: Theme;
 	readonly light: boolean;
 	readonly key: string;
-	diamond(status: RowStatus, expanded: boolean): string;
-	title(text: string, status: RowStatus, expanded: boolean): string;
+	heading(text: string, status: RowStatus, expanded: boolean, target?: string): string;
 	target(text: string, expanded: boolean): string;
 	dim(text: string): string;
 	body(text: string): string;
@@ -357,45 +357,33 @@ export function densityPalette(fallbackTheme: Theme): DensityPalette {
 	const colorMode = theme.getColorMode?.() ?? "truecolor";
 	const key = `${light ? "light" : "dark"}:${colorMode}:${(theme as { name?: string })?.name ?? ""}:${theme.getFgAnsi?.("text") ?? ""}`;
 
+	const paintTarget = (text: string, expanded: boolean): string => paintDensityRgb(
+		theme,
+		light ? (expanded ? [29, 78, 216] : [56, 78, 108]) : (expanded ? [145, 195, 248] : [148, 168, 196]),
+		text,
+	);
 	return {
 		theme,
 		light,
 		key,
-		diamond(status: RowStatus, expanded: boolean): string {
+		target: paintTarget,
+		heading(text: string, status: RowStatus, expanded: boolean, target?: string): string {
 			if (status === "running") {
-				return paintDensityWaveGlyph(theme, light, 0, TOOL_DIAMOND);
+				const heading = `${TOOL_DIAMOND} ${text}${target ? ` ${target}` : ""}`;
+				return theme.bold(paintGlimmerSweepText(heading, { theme, light }));
 			}
-			if (status === "error") {
-				return theme.fg("error", TOOL_DIAMOND);
-			}
-			if (expanded && status === "success") {
-				return paintDensityRgb(theme, light ? [37, 99, 235] : [97, 175, 239], TOOL_DIAMOND);
-			}
-			return paintDensityRgb(theme, light ? [112, 128, 152] : [92, 110, 136], TOOL_DIAMOND);
-		},
-		title(text: string, status: RowStatus, expanded: boolean): string {
-			if (status === "error") {
-				return theme.fg("error", expanded ? theme.bold(text) : text);
-			}
-			if (status === "running" || expanded) {
-				const painted = paintDensityRgb(theme, light ? [24, 48, 82] : [172, 194, 222], text);
-				return theme.bold(painted);
-			}
-			return paintDensityRgb(theme, light ? [68, 86, 112] : [136, 154, 178], text);
-		},
-		target(text: string, expanded: boolean): string {
-			if (!text) return "";
-			return paintDensityRgb(
-				theme,
-				light
-					? expanded
-						? [29, 78, 216]
-						: [56, 78, 108]
-					: expanded
-						? [145, 195, 248]
-						: [148, 168, 196],
-				text,
-			);
+			const icon = status === "error"
+				? theme.fg("error", TOOL_DIAMOND)
+				: expanded && status === "success"
+					? paintDensityRgb(theme, light ? [37, 99, 235] : [97, 175, 239], TOOL_DIAMOND)
+					: paintDensityRgb(theme, light ? [112, 128, 152] : [92, 110, 136], TOOL_DIAMOND);
+			const title = status === "error"
+				? theme.fg("error", expanded ? theme.bold(text) : text)
+				: expanded
+					? theme.bold(paintDensityRgb(theme, light ? [24, 48, 82] : [172, 194, 222], text))
+					: paintDensityRgb(theme, light ? [68, 86, 112] : [136, 154, 178], text);
+			const detail = target ? ` ${paintTarget(target, expanded)}` : "";
+			return `${icon} ${title}${detail}`;
 		},
 		dim(text: string): string {
 			return paintDensityRgb(theme, light ? [124, 140, 164] : [84, 100, 124], text);
@@ -655,12 +643,9 @@ export function renderDensityCall(options: {
 		(width, pal) => {
 			const status = getStatus();
 			const expanded = state.expanded === true;
-			const diamond = pal.diamond(status, expanded);
 			const { verb, target } = resolveHeader(status, expanded);
-			const styledVerb = pal.title(verb, status, expanded);
-			const styledTarget = target ? ` ${pal.target(target, expanded)}` : "";
 			const meta = formatParentheticalMeta(pal, status, state, name, getNestedSummary?.());
-			const head = ` ${diamond} ${styledVerb}${styledTarget}${meta}`;
+			const head = ` ${pal.heading(verb, status, expanded, target)}${meta}`;
 			const lines =
 				expanded && visibleWidth(head) > width
 					? wrapTextWithAnsi(head, Math.max(1, width - 3)).map((chunk, idx) =>

@@ -722,8 +722,7 @@ export class ToolGroupController {
 					: "success";
 
 		const groupedInfo = formatAllGroupedSummary(rows, this.canRun);
-		const diamond = pal.diamond(status, expanded);
-		const styledSummary = pal.title(groupedInfo.summary, status, expanded);
+		const heading = pal.heading(groupedInfo.summary, status, expanded);
 		const foldedThoughts =
 			this.runtime.config.density === "compact"
 				? members.filter((member) => isThinkingOnly(member)).length
@@ -780,7 +779,7 @@ export class ToolGroupController {
 		}
 
 		const margin = " ".repeat(computeOuterCanvasMargin(width) + 2);
-		const title = fit(`${margin}${diamond} ${styledSummary}${diffBadge}${meta}`);
+		const title = fit(`${margin}${heading}${diffBadge}${meta}`);
 		return ["", !expanded && getActiveHostRuntime()?.isFullscreen ? markSelectionChrome(title) : title];
 	}
 }

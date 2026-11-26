@@ -51,6 +51,7 @@ import {
 	classifyTextPaste,
 	findPromptChipSpans,
 	getActivePromptChipRegistry,
+	isImageContent,
 	PROMPT_CHIPS_CUSTOM_ENTRY_TYPE,
 	PromptChipRegistry,
 	serializePromptChip,
@@ -349,10 +350,14 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 	const resolveEditorTui = (editor?: PiUiComposerEditor): TUI | undefined =>
 		editor?.getTui() ?? getActiveHostRuntime()?.tui;
 
-	const resolveChipImageSource = (chip: SerializedPromptChip): PreviewImageSource | undefined => {
+	const resolveChipImageSource = (chip: SerializedPromptChip, sent = false): PreviewImageSource | undefined => {
 		if (chip.kind !== "image") return undefined;
 		const registry = getActivePromptChipRegistry();
-		const entry = registry.getChipById(chip.id);
+		if (sent) {
+			const image = registry.getSubmittedImage(chip);
+			if (image) return { base64Data: image.data, mimeType: image.mimeType };
+		}
+		const entry = sent ? undefined : registry.getChipById(chip.id);
 		if (entry?.kind === "image" && entry.base64Data) {
 			return {
 				base64Data: entry.base64Data,
@@ -406,9 +411,9 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 		requestRender();
 	};
 
-	const buildPreviewActions = (): PreviewPopupActions => ({
-		resolveImageData: resolveChipImageSource,
-		resolveFullText: resolveChipFullText,
+	const buildPreviewActions = (sent = false): PreviewPopupActions => ({
+		resolveImageData: (chip) => resolveChipImageSource(chip, sent),
+		resolveFullText: sent ? (chip) => chip.kind === "image" ? undefined : chip.previewText : resolveChipFullText,
 		onCopy: (_chip, fullText) => {
 			copyToClipboard(fullText);
 			requestRender();
@@ -677,10 +682,9 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 	let markSentPopupOpened: (() => void) | undefined;
 	let sentPreviewFromHover = false;
 
-	const showSentPillPreview = (chip: SerializedPromptChip, screenX: number, screenY: number, hover: boolean): void => {
+	const showSentPillPreview = (chip: SerializedPromptChip, key: string, screenX: number, screenY: number, hover: boolean): void => {
 		const tui = resolveEditorTui(lastEditor);
-		const expectedKey = `sent-pill:${chip.id}:${chip.token}`;
-		if (overlayController.source === "sent-pill" && overlayController.chipKey === expectedKey) {
+		if (overlayController.source === "sent-pill" && overlayController.chipKey === key) {
 			if (!hover && !sentPreviewFromHover) {
 				overlayController.hide(["sent-pill"]);
 				requestRender();
@@ -699,8 +703,9 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 				col: Math.max(1, screenX - 2),
 				rowAbove: Math.max(0, screenY - 1),
 				rowBelow: screenY + 2,
+				key,
 			},
-			buildPreviewActions(),
+			buildPreviewActions(true),
 		);
 		markSentPopupOpened?.();
 		requestRender();
@@ -758,11 +763,13 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 			});
 			pos = span.end;
 
+			const id = `${context.surface}-${chip?.id ?? `${span.kind}-${span.number}`}-${idx}`;
+			const key = `sent-pill:${context.messageId ?? context.timestamp ?? rawText}:${id}`;
 			pills.push({
-				id: `${context.surface}-${chip?.id ?? `${span.kind}-${span.number}`}-${idx}`,
+				id,
 				label: span.token,
-				onClick: chip ? (sx, sy) => showSentPillPreview(chip, sx, sy, false) : undefined,
-				onHover: chip?.kind === "image" ? (sx, sy) => showSentPillPreview(chip, sx, sy, true) : undefined,
+				onClick: chip ? (sx, sy) => showSentPillPreview(chip, key, sx, sy, false) : undefined,
+				onHover: chip?.kind === "image" ? (sx, sy) => showSentPillPreview(chip, key, sx, sy, true) : undefined,
 			});
 		}
 		formatted += reconstructed.displayText.slice(pos).replace(/\t/g, "  ");
@@ -829,7 +836,10 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 		if (event?.message?.role === "user") {
 			const text = extractUserMessageTextContent(event.message);
 			if (text) {
-				getActivePromptChipRegistry().bindSubmittedMessageTimestamp(text, event.message.timestamp);
+				const content = event.message.content;
+				getActivePromptChipRegistry().bindSubmittedMessageTimestamp(
+					text, event.message.timestamp, Array.isArray(content) ? content.filter(isImageContent) : undefined,
+				);
 			}
 		}
 	});

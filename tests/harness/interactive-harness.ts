@@ -55,7 +55,7 @@ import {
 	type AgentSession,
 	type AgentSessionRuntime,
 	type CreateAgentSessionRuntimeFactory,
-	type ExtensionFactory,
+	type InlineExtension,
 	type FileEntry,
 	type InteractiveModeOptions,
 	type SessionEntry,
@@ -379,7 +379,7 @@ export interface InteractiveHarnessOptions {
 	flags?: Record<string, boolean | string>;
 	loadDefaultExtension?: boolean;
 	additionalExtensionPaths?: string[];
-	extensionFactories?: ExtensionFactory[];
+	extensionFactories?: InlineExtension[];
 	additionalThemePaths?: string[];
 	models?: FauxModelDefinition[];
 	responses?: FauxResponseStep[];

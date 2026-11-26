@@ -107,9 +107,7 @@ describe("User Prompt timestamps and in-place Copy hover swap", () => {
 			],
 		});
 
-		const scroll = getActiveHostRuntime()!.scroll!;
-		scroll.scrollTo(0, { disableFollow: true });
-
+		await harness.mouseWheel("up", 12, 12, 30);
 		const idleScreen = harness.screen();
 		const promptHit = idleScreen.findText("› Refactor the parser module");
 		expect(promptHit).toBeDefined();
@@ -209,8 +207,7 @@ describe("Skill Chip absorption, SKILL.md Hover Popup, Outline Rail preview, and
 		});
 
 		const scroll = getActiveHostRuntime()!.scroll!;
-		scroll.scrollTo(0, { disableFollow: true });
-
+		await harness.mouseWheel("up", 12, 12, 30);
 		const screen = harness.screen();
 		expect(screen.text()).not.toContain("[skill]");
 		expect(screen.text()).not.toContain("<skill");
@@ -247,7 +244,7 @@ describe("Skill Chip absorption, SKILL.md Hover Popup, Outline Rail preview, and
 		expect(harness.screen().text()).not.toContain("SKILL.md");
 
 		/* В Sticky Prompt также отображается кликабельный /tdd и открывает SKILL.md попап */
-		scroll.scrollTo(12, { disableFollow: true });
+		await harness.mouseWheel("down", 12, 12, 4);
 		const stickyScreen = harness.screen();
 		expect(stickyScreen.rowText(4)).toContain("/tdd");
 		expect(stickyScreen.rowText(4)).toContain("Build the markdown serializer");
@@ -266,7 +263,7 @@ describe("Skill Chip absorption, SKILL.md Hover Popup, Outline Rail preview, and
 		expect(harness.screen().text()).toContain("/tdd · Build the markdown serializer");
 
 		/* Карточка без текста после <skill> рендерится как User Prompt с /grilling и копируется как /skill:grilling */
-		scroll.scrollToEnd();
+		await harness.mouseWheel("down", 12, 12, 30);
 		const endScreen = harness.screen();
 		expect(endScreen.text()).not.toContain("[skill]");
 		const grillHit = endScreen.findText("/grilling");
@@ -351,17 +348,14 @@ describe("Post-stream Markdown code, table, and blockquote copy actions", () => 
 		await pendingSubmit;
 		await harness.waitForIdle();
 
-		const scroll = getActiveHostRuntime()!.scroll!;
-		scroll.scrollTo(0, { disableFollow: true });
+		await harness.mouseWheel("up", 12, 12, 30);
 		const settled = harness.screen();
 
-		/* 1. На обычной прозе нет устаревшего бейджа Copy в строке 0 при наведении */
 		const proseHit = settled.findText("Plain assistant prose");
 		expect(proseHit).toBeDefined();
 		await harness.mouseMove(proseHit!.col + 4, proseHit!.row);
 		expect(harness.screen().rowText(proseHit!.row)).not.toContain("Copy");
 
-		/* 2. Языковой код-блок показывает нижнюю панель codeFooterBg с ts · [Copy] и без ▎ */
 		const tsLineHit = settled.findText("const beta = 2;");
 		expect(tsLineHit).toBeDefined();
 		expect(settled.rowText(tsLineHit!.row)).not.toContain("▎");
@@ -374,7 +368,6 @@ describe("Post-stream Markdown code, table, and blockquote copy actions", () => 
 		);
 		expect(harness.screen().rowText(tsFooterRow)).toContain("✓ Copied");
 
-		/* 3. Короткий 1-2 строчный блок без языка не имеет нижней панели и показывает [Copy] только по hover */
 		const shortHit = settled.findText("short-one-liner");
 		expect(shortHit).toBeDefined();
 		expect(settled.rowText(shortHit!.row)).not.toContain("[Copy]");
@@ -386,14 +379,12 @@ describe("Post-stream Markdown code, table, and blockquote copy actions", () => 
 		await harness.mouseClick(shortCopyCol + 2, shortHit!.row);
 		expect(await getActiveHostRuntime()!.clipboard.readText?.()).toBe("short-one-liner");
 
-		/* 4. 3-строчный блок без языка имеет нижнюю панель [Copy] */
 		const untagged3Hit = settled.findText("untagged-3");
 		expect(untagged3Hit).toBeDefined();
 		const untaggedFooterRow = untagged3Hit!.row + 1;
 		expect(settled.rowText(untaggedFooterRow)).toContain("[Copy]");
 		expect(settled.rowText(untaggedFooterRow)).not.toContain("·");
 
-		/* 5. Таблица показывает [Copy TSV]  [Copy CSV]  [Copy MD] и копирует валидные форматы */
 		const tableBarHit = settled.findText("[Copy TSV]");
 		expect(tableBarHit).toBeDefined();
 		const tableRowText = settled.rowText(tableBarHit!.row);
@@ -413,7 +404,6 @@ describe("Post-stream Markdown code, table, and blockquote copy actions", () => 
 			'| Key | Value |\n| --- | --- |\n| a | "x", y |',
 		);
 
-		/* 6. Верхнеуровневая цитата показывает [Copy] и копирует Markdown без ведущих > */
 		const quoteHit = settled.findText("Heads up");
 		expect(quoteHit).toBeDefined();
 		const quoteCopyRow = quoteHit!.row + 1;
@@ -503,7 +493,6 @@ describe("Link [text](url) and file path:line [Open] [Copy] Hover Popups", () =>
 		await harness.submitInput("Where are the docs and source?");
 		const screen = harness.screen();
 
-		/* 1. Клик по скрытой ссылке [Pi TUI guide](https://pi.dev/docs/tui) открывает попап, а не запускает браузер напрямую */
 		const linkHit = screen.findText("Pi TUI guide");
 		expect(linkHit).toBeDefined();
 		await harness.mouseClick(linkHit!.col + 3, linkHit!.row);
@@ -528,7 +517,6 @@ describe("Link [text](url) and file path:line [Open] [Copy] Hover Popups", () =>
 		expect(openedUrls).toEqual(["https://pi.dev/docs/tui"]);
 		expect(harness.screen().text()).not.toContain("[Open]");
 
-		/* 2. Клик по локальному пути src/shared/i18n.ts:42:5 открывает попап с [Open] и [Copy] */
 		const pathHit = harness.screen().findText("src/shared/i18n.ts:42:5");
 		expect(pathHit).toBeDefined();
 		await harness.mouseClick(pathHit!.col + 4, pathHit!.row);
@@ -558,6 +546,18 @@ describe("Link [text](url) and file path:line [Open] [Copy] Hover Popups", () =>
 		expect(harness.screen().text()).toContain("[Open]");
 		await harness.pressKey("\x1b");
 		expect(harness.screen().text()).not.toContain("[Open]");
+	});
+
+	it("opens an existing bare filename on a line without path punctuation", async () => {
+		harness = await createInteractiveHarness({ responses: [fauxAssistantMessage("Inspect the Makefile")] });
+		writeFileSync(join(harness.cwd, "Makefile"), "all:\n");
+		await harness.submitInput("Which file should I inspect?");
+		const file = harness.screen().findText("Makefile")!;
+		await harness.mouseClick(file.col + 2, file.row);
+		const open = harness.screen().findText("[Open]")!;
+		expect(open).toBeDefined();
+		await harness.mouseClick(open.col + 1, open.row);
+		expect(harness.openedExternals).toEqual([{ kind: "path", path: join(harness.cwd, "Makefile") }]);
 	});
 
 	it("copies and opens the complete file target from either wrapped fragment", async () => {

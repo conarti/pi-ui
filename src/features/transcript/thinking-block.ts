@@ -22,7 +22,9 @@ import {
 import { fgRgb, getActiveGlobalTheme, isLightTheme } from "../../shared/ansi.ts";
 import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { t } from "../../shared/i18n.ts";
+import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
 import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
+import { markSelectionChrome } from "../../shared/selection-copy.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
 
 const MAX_THOUGHTS_WIDTH = 120;
@@ -650,7 +652,8 @@ export class ThinkingBlock implements Component {
 				maxRowWidth,
 				"…",
 			);
-			return [padFullWidth(line)];
+			const row = padFullWidth(line);
+			return [getActiveHostRuntime()?.isFullscreen ? markSelectionChrome(row) : row];
 		}
 
 		const openSpine = light ? fgRgb(148, 163, 184, "│") : fgRgb(76, 92, 118, "│");

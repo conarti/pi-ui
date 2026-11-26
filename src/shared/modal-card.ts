@@ -23,7 +23,7 @@ import {
 	type RgbTuple,
 	type ThemeSurfacePalette,
 } from "./ansi.ts";
-import { matchesLayoutChord } from "./keyboard-layout.ts";
+import { createBracketedPasteTracker, matchesLayoutChord } from "./keyboard-layout.ts";
 import { claimHover } from "./runtime-hooks.ts";
 
 export { getThemeSurfacePalette, type PillVariant, type RgbTuple, type ThemeSurfacePalette };
@@ -124,6 +124,7 @@ export interface SingleLineInput {
 	clear(): void;
 	isCursorAtStart(): boolean;
 	isCursorAtEnd(): boolean;
+	handlePaste(data: string): SingleLineInputResult | undefined;
 	handleInput(data: string): SingleLineInputResult;
 	handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined;
 	render(opts: {
@@ -178,6 +179,42 @@ export function createSingleLineInput(initialValue = ""): SingleLineInput {
 		setCursorPos(snap.cursor);
 	};
 
+	const pasteTracker = createBracketedPasteTracker();
+	let pendingPasteStart = "";
+	const forwardInput = (data: string): SingleLineInputResult => {
+		const before = captureSnapshot();
+		input.handleInput(data);
+		const changed = input.getValue() !== before.value;
+		if (changed) {
+			undoStack.push(before);
+			if (undoStack.length > 100) undoStack.shift();
+			redoStack.length = 0;
+		}
+		return { changed, handled: changed || getCursorPos() !== before.cursor };
+	};
+	const handlePaste = (data: string): SingleLineInputResult | undefined => {
+		const hadPendingStart = pendingPasteStart.length > 0;
+		if (hadPendingStart) {
+			data = pendingPasteStart + data;
+			pendingPasteStart = "";
+			pasteTracker.reset();
+		}
+		if (data === "\x1b" && !pasteTracker.isInPaste) return undefined;
+		const segments = pasteTracker.split(data);
+		const trailing = segments.at(-1)?.trailingStartPrefixLength ?? 0;
+		if (!trailing && !hadPendingStart && !segments.some((segment) => segment.inPaste)) return undefined;
+
+		/* Хостовый Input буферизует тело вставки, но ожидает начальный маркер одним фрагментом. */
+		let changed = false;
+		for (const segment of segments) {
+			const prefix = trailing ? segment.trailingStartPrefixLength : 0;
+			const text = prefix ? segment.text.slice(0, -prefix) : segment.text;
+			if (text) changed = forwardInput(text).changed || changed;
+			if (prefix) pendingPasteStart = segment.text.slice(-prefix);
+		}
+		return { handled: true, changed };
+	};
+
 	return {
 		getValue() {
 			return input.getValue();
@@ -200,70 +237,55 @@ export function createSingleLineInput(initialValue = ""): SingleLineInput {
 		isCursorAtEnd() {
 			return getCursorPos() >= input.getValue().length;
 		},
+		handlePaste,
 		handleInput(data: string): SingleLineInputResult {
-			if (!data || isKeyRelease(data)) {
+			if (
+				!data || isKeyRelease(data) ||
+				matchesKey(data, "enter") ||
+				matchesKey(data, "return") ||
+				matchesKey(data, "escape") ||
+				matchesKey(data, "up") ||
+				matchesKey(data, "down") ||
+				matchesKey(data, "tab") ||
+				matchesKey(data, "shift+tab") ||
+				matchesKey(data, "pageUp") ||
+				matchesKey(data, "pageDown")
+			) {
 				return { handled: false, changed: false };
 			}
-			const isPaste = data.includes("\x1b[200~");
-			if (!isPaste) {
-				if (
-					matchesKey(data, "enter") ||
-					matchesKey(data, "return") ||
-					matchesKey(data, "escape") ||
-					matchesKey(data, "up") ||
-					matchesKey(data, "down") ||
-					matchesKey(data, "tab") ||
-					matchesKey(data, "shift+tab") ||
-					matchesKey(data, "pageUp") ||
-					matchesKey(data, "pageDown")
-				) {
-					return { handled: false, changed: false };
-				}
 
-				if (matchesLayoutChord(data, "ctrl+shift+z") || matchesLayoutChord(data, "ctrl+y")) {
-					const next = redoStack.pop();
-					if (!next) return { handled: true, changed: false };
+			if (matchesLayoutChord(data, "ctrl+shift+z") || matchesLayoutChord(data, "ctrl+y")) {
+				const next = redoStack.pop();
+				if (!next) return { handled: true, changed: false };
+				undoStack.push(captureSnapshot());
+				const before = input.getValue();
+				restoreSnapshot(next);
+				return { handled: true, changed: input.getValue() !== before };
+			}
+
+			if (matchesLayoutChord(data, "ctrl+z")) {
+				const prev = undoStack.pop();
+				if (!prev) return { handled: true, changed: false };
+				redoStack.push(captureSnapshot());
+				const before = input.getValue();
+				restoreSnapshot(prev);
+				return { handled: true, changed: input.getValue() !== before };
+			}
+
+			if (matchesKey(data, "ctrl+u")) {
+				const before = input.getValue();
+				if (before.length > 0) {
 					undoStack.push(captureSnapshot());
-					const before = input.getValue();
-					restoreSnapshot(next);
-					return { handled: true, changed: input.getValue() !== before };
+					redoStack.length = 0;
+					input.setValue("");
+					setCursorPos(0);
 				}
-
-				if (matchesLayoutChord(data, "ctrl+z")) {
-					const prev = undoStack.pop();
-					if (!prev) return { handled: true, changed: false };
-					redoStack.push(captureSnapshot());
-					const before = input.getValue();
-					restoreSnapshot(prev);
-					return { handled: true, changed: input.getValue() !== before };
-				}
-
-				if (matchesKey(data, "ctrl+u")) {
-					const before = input.getValue();
-					if (before.length > 0) {
-						undoStack.push(captureSnapshot());
-						redoStack.length = 0;
-						input.setValue("");
-						setCursorPos(0);
-					}
-					return { handled: true, changed: before.length > 0, cleared: true };
-				}
+				return { handled: true, changed: before.length > 0, cleared: true };
 			}
 
-			const beforeSnap = captureSnapshot();
-			input.handleInput(data);
-			const afterValue = input.getValue();
-			const afterCursor = getCursorPos();
-			const changed = afterValue !== beforeSnap.value;
-			if (changed) {
-				undoStack.push(beforeSnap);
-				if (undoStack.length > 100) undoStack.shift();
-				redoStack.length = 0;
-				return { handled: true, changed: true };
-			}
-			const cursorMoved = afterCursor !== beforeSnap.cursor;
+			const result = forwardInput(data);
+			if (result.handled) return result;
 			const isEditKey =
-				isPaste ||
 				matchesKey(data, "backspace") ||
 				matchesKey(data, "delete") ||
 				matchesKey(data, "left") ||
@@ -278,7 +300,7 @@ export function createSingleLineInput(initialValue = ""): SingleLineInput {
 				matchesKey(data, "alt+right") ||
 				matchesKey(data, "alt+b") ||
 				matchesKey(data, "alt+f");
-			return { handled: cursorMoved || isEditKey, changed: false };
+			return { handled: isEditKey, changed: false };
 		},
 		handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 			return input.handleMouse(event);
@@ -477,7 +499,7 @@ export function createModalCard(): ModalCardController {
 			}
 
 			out.push(`${bColor("╰")}${bColor("─".repeat(Math.max(0, safeWidth - 2)))}${bColor("╯")}`);
-			return out.map((row) => paintThemeSurfaceRow(theme, row, safeWidth, palette.popupSurfaceBg));
+			return out.map((row) => paintThemeSurfaceRow(theme, row, safeWidth, palette.popupSurfaceBg, true));
 		},
 		handleMouse(event: TuiMouseEvent): ModalCardMouseOutcome {
 			const findHit = (x: number, y: number): HitBox | undefined => {

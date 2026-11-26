@@ -76,6 +76,25 @@ export function matchesExtensionSourcePath(ext: unknown, pathRegex: RegExp): boo
 	return candidates.some((candidate) => typeof candidate === "string" && pathRegex.test(candidate));
 }
 
+type SupersededWidgetPredicate = (ext: unknown, key: string) => boolean;
+const SUPERSEDED_WIDGET_PREDICATES_KEY = Symbol.for("conarti.pi-ui.superseded-widget-predicates.v1");
+
+function getWidgetPredicates(): Map<string, SupersededWidgetPredicate> {
+	const globals = globalThis as Record<symbol, Map<string, SupersededWidgetPredicate> | undefined>;
+	return globals[SUPERSEDED_WIDGET_PREDICATES_KEY] ??= new Map();
+}
+
+export function registerSupersededWidgetPredicate(id: string, predicate: SupersededWidgetPredicate): void {
+	getWidgetPredicates().set(id, predicate);
+}
+
+export function isSupersededWidget(ext: unknown, key: string): boolean {
+	for (const predicate of getWidgetPredicates().values()) {
+		if (predicate(ext, key)) return true;
+	}
+	return false;
+}
+
 export function isSupersededExtension(ext: unknown): boolean {
 	if (!ext || typeof ext !== "object") return false;
 	for (const predicate of getPredicatesMap().values()) {

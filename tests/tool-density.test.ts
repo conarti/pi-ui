@@ -420,9 +420,16 @@ describe("Tool Density: real InteractiveMode integration", () => {
 			expect(preText).toContain("▎ Running…");
 			expect(vi.getTimerCount()).toBe(1);
 
+			const title = harness.screen().findText("✦ Running")!;
+			const titleColors = () => Array.from({ length: 7 }, (_, i) =>
+				harness!.screen().cellAt(title.row, title.col + 2 + i)?.fg,
+			);
+			const beforeTitle = titleColors();
+			expect(new Set(beforeTitle.map((color) => JSON.stringify(color))).size).toBeGreaterThan(1);
 			const preBarRgb0 = findRowGlyphRgb(harness, "Running…", "▎");
 			vi.advanceTimersByTime(33 * 6);
 			harness.flushFrame();
+			expect(titleColors()).not.toEqual(beforeTitle);
 			const preBarRgb1 = findRowGlyphRgb(harness, "Running…", "▎");
 			expect(preBarRgb0).toBeDefined();
 			expect(preBarRgb1).toBeDefined();

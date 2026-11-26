@@ -202,9 +202,7 @@ export function findFilePathSpansInLine(
 	plainLine: string,
 	options?: LinkTargetResolveOptions,
 ): FilePathSpan[] {
-	if (!plainLine || (!plainLine.includes("/") && !plainLine.includes(".") && !plainLine.includes(":"))) {
-		return [];
-	}
+	if (!plainLine) return [];
 
 	const spans: FilePathSpan[] = [];
 	CANDIDATE_TOKEN_RE.lastIndex = 0;

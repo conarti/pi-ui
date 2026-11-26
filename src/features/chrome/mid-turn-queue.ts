@@ -464,6 +464,16 @@ export function installMidTurnQueueUi(getTheme: () => Theme): void {
 		},
 	);
 
+	hookMethod(modeProto, "handleDequeue", "midTurnQueue.editTopItem", (self, args, original) => {
+		if (!getActiveHostRuntime()) return original.apply(self, args);
+		captureMode(self);
+		const top = getActiveQueuedEntries()[0];
+		if (!top) return original.apply(self, args);
+		void editQueuedMidTurnItem(top.kind, top.index).catch((error: unknown) => {
+			getActiveHostRuntime()?.ctx.ui.notify(t("composer.queue.restoreFailed", { error: String(error) }), "error");
+		});
+	});
+
 	hookMethod(
 		modeProto,
 		"updatePendingMessagesDisplay",

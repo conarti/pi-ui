@@ -367,7 +367,7 @@ function buildSessionUsageLines(
 		const modelCol = Math.max(14, Math.min(28, innerWidth - 36));
 		lines.push(
 			dim(
-				`${padRight("Model + Effort", modelCol)}  ${padLeft("Calls", 5)}  ${padLeft("TTFT", 7)}  ${padLeft("tok/s", 9)}  ${padLeft("API", 7)}`,
+				`${padRight(t("context.usage.byModel"), modelCol)}  ${padLeft(t("context.usage.column.calls"), 5)}  ${padLeft(t("context.usage.column.ttft"), 7)}  ${padLeft(t("context.usage.column.rate"), 9)}  ${padLeft(t("context.usage.column.api"), 7)}`,
 			),
 		);
 		for (const group of telemetry.modelGroups) {
@@ -387,7 +387,7 @@ function buildSessionUsageLines(
 		const turnModelCol = Math.max(12, Math.min(24, innerWidth - 34));
 		lines.push(
 			dim(
-				`${padRight("Turn", 5)}  ${padRight("Model", turnModelCol)}  ${padLeft("TTFT", 7)}  ${padLeft("tok/s", 9)}  ${padLeft("Dur", 7)}`,
+				`${padRight(t("context.usage.column.turn"), 5)}  ${padRight(t("context.usage.column.model"), turnModelCol)}  ${padLeft(t("context.usage.column.ttft"), 7)}  ${padLeft(t("context.usage.column.rate"), 9)}  ${padLeft(t("context.usage.column.duration"), 7)}`,
 			),
 		);
 		for (const turn of telemetry.turnSummaries) {

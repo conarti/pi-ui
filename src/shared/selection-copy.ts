@@ -51,13 +51,6 @@ export function markSelectionCodeRow(line: string, contentWidth: number, gapBefo
 	return `\x1b]9999;pi-ui-copy;code;${contentWidth};${gapBefore ?? -1}\x07${line}`;
 }
 
-const COLLAPSED_THINKING_RE =
-	/^(?:[✦◆❙┃•]\s*(?:›\s*)?)?(?:Thought(?:\s+for\s+\S+(?:\s+\S+)?)?|Thinking…)(?:\s+›)?$/u;
-const RESPONSE_METRICS_RE =
-	/^Worked for\s+\S+(?:\s+\S+)?(?:\s+·.*)?(?:\s+\d{1,2}\s+[A-Z][a-z]{2}(?:\s+\d{4})?,\s*\d{2}:\d{2}|\s+\d{2}:\d{2})?$/u;
-const COPY_ACTION_ROW_RE =
-	/^(?:(?:[a-z0-9_+#.-]+\s+)?(?:·\s*)?(?:\[?Copy\]?|✓\s*Copied)|\[Copy TSV\]\s+\[Copy CSV\]\s+\[Copy MD\])$/i;
-const BOX_HORIZONTAL_BORDER_RE = /^[╭╰├┌└][─┬┴┼]+[╮╯┤┐┘]$/u;
 const USER_CARD_TRAILING_TIME_RE =
 	/\s{2,}(\d{1,2}\s+[A-Z][a-z]{2}(?:\s+\d{4})?,\s*\d{2}:\d{2}|\d{2}:\d{2}|Copy|✓\s*Copied)$/u;
 const STRUCTURAL_LINE_START_RE = /^(?:#{1,6}\s|(?:[-*+•]|\d+[.)])\s|[│|┌├└─┬┼┴]|[-─═_*]{3,}$)/u;
@@ -98,16 +91,6 @@ function detectRowSurfaceKind(fullLine: string, theme?: Theme): SurfaceKind {
 		if (rgbMatches(bgRgb, rendered, 0)) return kind;
 	}
 	return "plain";
-}
-
-export function isCollapsedChromeRow(plainTrimmed: string): boolean {
-	if (!plainTrimmed) return false;
-	return (
-		COLLAPSED_THINKING_RE.test(plainTrimmed) ||
-		RESPONSE_METRICS_RE.test(plainTrimmed) ||
-		COPY_ACTION_ROW_RE.test(plainTrimmed) ||
-		BOX_HORIZONTAL_BORDER_RE.test(plainTrimmed)
-	);
 }
 
 function wrapInlineCodeSegment(rawCode: string): string {
@@ -360,15 +343,7 @@ export function extractCleanSelectionText(
 			continue;
 		}
 
-		if (isMultiLineSelection) {
-			if (surface === "code-header") continue;
-			if (surface === "plain" && isCollapsedChromeRow(fullPlainTrimmed)) {
-				continue;
-			}
-			if (surface === "user-card" && (plainTrimmed === "Copy" || plainTrimmed === "✓ Copied")) {
-				continue;
-			}
-		}
+		if (isMultiLineSelection && surface === "code-header") continue;
 
 		const contentW = entry.contentWidth ?? Math.max(40, visibleWidth(entry.fullLine));
 

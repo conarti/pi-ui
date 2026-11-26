@@ -90,14 +90,14 @@ export function buildChipPreviewSpec(
 		metaParts.push(chip.mimeType);
 
 		const lines: Array<{ text: string; muted?: boolean }> = [
-			{ text: `File: ${chip.fileName}` },
-			{ text: `Size: ${metaParts.join(" · ")}`, muted: true },
+			{ text: t("chips.popup.file", { name: chip.fileName }) },
+			{ text: t("chips.popup.size", { size: metaParts.join(" · ") }), muted: true },
 		];
 		if (chip.filePath) {
-			lines.push({ text: `Path: ${chip.filePath}`, muted: true });
+			lines.push({ text: t("chips.popup.path", { path: chip.filePath }), muted: true });
 		}
 		return {
-			title: `🖼 Image #${chip.number}`,
+			title: t("chips.popup.image", { number: chip.number }),
 			lines,
 			allLines: lines,
 			scrollable: false,
@@ -116,16 +116,16 @@ export function buildChipPreviewSpec(
 		const remaining = Math.max(0, allLines.length - shown.length);
 		if (remaining > 0) {
 			shown.push({
-				text: `… (+${remaining} more ${remaining === 1 ? "line" : "lines"})`,
+				text: t(remaining === 1 ? "chips.popup.moreLine" : "chips.popup.moreLines", { count: remaining }),
 				muted: true,
 			});
 		}
-		const unitLabel =
-			chip.metric === "chars"
-				? `${chip.charCount} ${chip.charCount === 1 ? "char" : "chars"}`
-				: `${chip.lineCount} ${chip.lineCount === 1 ? "line" : "lines"}`;
+		const count = chip.metric === "chars" ? chip.charCount : chip.lineCount;
+		const title = chip.metric === "chars"
+			? t(count === 1 ? "chips.popup.pasteChar" : "chips.popup.pasteChars", { number: chip.number, count })
+			: t(count === 1 ? "chips.popup.pasteLine" : "chips.popup.pasteLines", { number: chip.number, count });
 		return {
-			title: `📋 Pasted #${chip.number} · ${unitLabel}`,
+			title,
 			lines: shown.length > 0 ? shown : [{ text: " " }],
 			allLines: allLines.length > 0 ? allLines : [{ text: " " }],
 			scrollable: allLines.length > MAX_PREVIEW_BODY_ROWS,
@@ -139,13 +139,14 @@ export function buildChipPreviewSpec(
 	const remaining = Math.max(0, allLines.length - shown.length);
 	if (remaining > 0) {
 		shown.push({
-			text: `… (+${remaining} more ${remaining === 1 ? "line" : "lines"})`,
+			text: t(remaining === 1 ? "chips.popup.moreLine" : "chips.popup.moreLines", { count: remaining }),
 			muted: true,
 		});
 	}
-	const unit = chip.lineCount === 1 ? "line" : "lines";
 	return {
-		title: `❝ Quote #${chip.number} · ${chip.lineCount} ${unit}`,
+		title: t(chip.lineCount === 1 ? "chips.popup.quoteLine" : "chips.popup.quoteLines", {
+			number: chip.number, count: chip.lineCount,
+		}),
 		lines: shown.length > 0 ? shown : [{ text: " " }],
 		allLines: allLines.length > 0 ? allLines : [{ text: " " }],
 		scrollable: allLines.length > MAX_PREVIEW_BODY_ROWS,
@@ -546,7 +547,7 @@ export class PromptChipOverlayController {
 		tui: TUI | undefined,
 		chip: SerializedPromptChip,
 		source: PreviewTriggerSource,
-		anchor: { col: number; rowAbove: number; rowBelow?: number },
+		anchor: { col: number; rowAbove: number; rowBelow?: number; key?: string },
 		actions?: PreviewPopupActions,
 		onPopupLeave?: () => void,
 	): void {
@@ -586,6 +587,8 @@ export class PromptChipOverlayController {
 				? Math.max(0, Math.min(THUMB_MAX_HEIGHT_CELLS, bestSpace - nonThumbEstimate))
 				: 0;
 
+		const chipKey = anchor.key ?? `${source}:${chip.id}:${chip.token}`;
+		if (this.activeChipKey !== chipKey) this.popup.chip = undefined;
 		this.popup.chip = chip;
 		this.popup.setContext(source, actions ?? {}, allowedThumbHeight);
 
@@ -600,7 +603,7 @@ export class PromptChipOverlayController {
 
 		this.visible = true;
 		this.activeSource = source;
-		this.activeChipKey = `${source}:${chip.id}:${chip.token}`;
+		this.activeChipKey = chipKey;
 
 		if (!this.options) {
 			this.options = {

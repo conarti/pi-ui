@@ -270,7 +270,6 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 
 			const editor = getActiveComposerEditor()!;
 
-			/* 1. Активный стрим: Esc закрывает поповер и никогда не прерывает ход; Ctrl+C прерывает */
 			let activeStream: ReturnType<typeof createAssistantMessageEventStream> | undefined;
 			let activeSignal: AbortSignal | undefined;
 			harness.setStreamSimple((_m, _ctx, opts) => {
@@ -322,7 +321,6 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 			expect(harness.session.isStreaming).toBe(false);
 			harness.setStreamSimple(undefined);
 
-			/* 2. Непустой черновик с Prompt Chip: Esc показывает Esc again to clear, Esc×2 очищает, Ctrl+Z восстанавливает с чипом, Ctrl+Shift+Z/Ctrl+Y повторяет */
 			await harness.typeText("Inspect ");
 			await harness.paste("line 1\nline 2\nline 3\nline 4", true);
 			expect(editor.getText()).toContain("[📋 Pasted #1 · 4 lines]");
@@ -354,7 +352,6 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 			expect(killSpy).not.toHaveBeenCalled();
 			expect(harness.screen().rowText(findComposerTopRow(harness) + 1)).toContain("Ask or describe");
 
-			/* 3. Пустой черновик: Esc×2 открывает /tree */
 			await harness.pressKey("\x1b");
 			await harness.pressKey("\x1b");
 			expect(harness.screen().text()).toMatch(/Session Tree|Tree|Start long turn/i);
@@ -461,8 +458,10 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 			expect.objectContaining({ content: [{ type: "text", text: "Steer item with image" }, queuedImage] }),
 		]);
 		expect(harness.session.getFollowUpMessages()).toEqual(["Queued item alpha"]);
-		const imageHit = harness.screen().findText("Steer item with image")!;
-		await harness.mouseClick(harness.screen().rowText(imageHit.row).indexOf("[Edit · Alt+↑]") + 2, imageHit.row);
+		await harness.pressKey("\x1b[1;3A");
+		await harness.flush();
+		expect(harness.session.getSteeringMessages()).toEqual([]);
+		expect(harness.session.getFollowUpMessages()).toEqual(["Queued item alpha"]);
 		expect(harness.screen().findText("Steer item with image [🖼 Image #1]")).toBeDefined();
 		await harness.pressKey("\x1b\r");
 		expect(harness.session.agent.peekQueuedMessages()).toEqual([
@@ -868,12 +867,10 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 			],
 		});
 
-		/* 1. Блочный курсор на пустом Composer инвертирует первую графему плейсхолдера */
 		const composerScreen = harness.screen();
 		const placeholderHit = composerScreen.findText("Ask or describe")!;
 		expect(composerScreen.cellAt(placeholderHit.row, placeholderHit.col)?.inverse).toBe(true);
 
-		/* 2. Command Palette (Modal Card filter) — хостовый Input, инверсия первой графемы, ←/→ и Ctrl+Z/Ctrl+Shift+Z */
 		await harness.pressKey("\x0b");
 		const palScreen = harness.screen();
 		const searchHit = palScreen.findText("Search")!;
@@ -888,7 +885,6 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 		expect(harness.screen().text()).toContain("abXc");
 		await harness.pressKey("\x1b");
 
-		/* 3. Bottom-docked ask_user_question: Esc park -> прокрутка транскрипта -> Tab return + полное управление мышью */
 		const askTurn1 = harness.submitInput("Start mouse questionnaire");
 		await waitForCondition(() => harness!.screen().text().includes("Choose a storage engine"));
 

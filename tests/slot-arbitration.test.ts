@@ -158,7 +158,6 @@ describe("Dynamic capability-based Slot Arbitration (ADR-0007)", () => {
 			});
 		};
 
-		/* 1. Загрузка после @conarti/pi-ui: появляется Modal Card "Slot Arbitration" */
 		harness = await createInteractiveHarness({
 			agentDir,
 			width: 110,
@@ -172,13 +171,23 @@ describe("Dynamic capability-based Slot Arbitration (ADR-0007)", () => {
 		expect(modalText).toContain("Footer");
 		expect(modalText).toContain("@conarti/pi-ui");
 
-		/* Переключаем владельца footer на сторонний плагин клавишей → и применяем Enter */
+		await harness.pressKey("\x1b");
+		await harness.typeText("hello");
+		await harness.pressKey("\x1b[D");
+		await harness.pressKey("\x1b[D");
+		await harness.pressKey("\x0b");
+		await harness.typeText("Slot Arbitration");
+		await harness.pressKey("\r");
+		await flushDeferredUi(harness);
+		expect(harness.screen().text()).toContain("Footer (footer)");
 		await harness.pressKey("\x1b[C");
 		await harness.flush();
 		await harness.pressKey("\r");
 		await flushDeferredUi(harness);
 
+		await harness.typeText("!");
 		const afterApply = harness.screen().text();
+		expect(afterApply).toContain("hel!lo");
 		expect(afterApply).not.toContain("Slot Arbitration");
 		expect(afterApply).toContain("THIRD_PARTY_FOOTER_ACTIVE");
 
@@ -197,7 +206,6 @@ describe("Dynamic capability-based Slot Arbitration (ADR-0007)", () => {
 		await harness.dispose();
 		harness = undefined;
 
-		/* 2. Повторный запуск в обратном порядке загрузки (сторонний плагин ДО @conarti/pi-ui) не показывает модалку */
 		harness = await createInteractiveHarness({
 			agentDir,
 			width: 110,
@@ -210,6 +218,27 @@ describe("Dynamic capability-based Slot Arbitration (ADR-0007)", () => {
 		const relaunchScreen = harness.screen().text();
 		expect(relaunchScreen).not.toContain("Slot Arbitration");
 		expect(relaunchScreen).toContain("THIRD_PARTY_FOOTER_ACTIVE");
+	});
+
+	it.each(["hidden SDK registration", "embed-working-status filename"])("arbitrates an unrelated footer with %s", async (source) => {
+		const path = join(allocateTempDir("pi-ui-similar-name-"), "embed-working-status.ts");
+		writeFileSync(path, `export default function(pi) {
+	pi.on("session_start", (_event, ctx) => ctx.ui.setFooter(() => ({ invalidate() {}, render: () => ["CUSTOM_FOOTER"] })));
+}`);
+		const factory: ExtensionFactory = (pi) => {
+			pi.on("session_start", (_event, ctx) => {
+				ctx.ui.setFooter(() => new Text("CUSTOM_FOOTER"));
+			});
+		};
+		harness = await createInteractiveHarness(source === "hidden SDK registration"
+			? { extensionFactories: [{ name: "quiet-status", hidden: true, factory }] }
+			: { additionalExtensionPaths: [path] });
+		await flushDeferredUi(harness);
+		expect(harness.screen().text()).toContain("Footer (footer)");
+		await harness.pressKey("\x1b[C");
+		await harness.pressKey("\r");
+		await flushDeferredUi(harness);
+		expect(harness.screen().text()).toContain("CUSTOM_FOOTER");
 	});
 
 	it("keeps a saved owner when same-named local extension paths change order", async () => {
@@ -859,7 +888,8 @@ describe("Dynamic capability-based Slot Arbitration (ADR-0007)", () => {
 		/* Живое обратное переключение на @conarti/pi-ui через /slots */
 		await harness.submitInput("/slots messageRenderer:pi-ui-custom-notice @conarti/pi-ui");
 		await flushDeferredUi(harness);
-		await harness.submitInput("/show-notices");
+		expect(harness.screen().findText("TP_CUSTOM_NOTICE")).toBeUndefined();
 		expect(harness.screen().findText("PI_UI_CUSTOM_NOTICE")).toBeDefined();
+		expect(harness.screen().findText("TP_ADDITIVE_NOTICE")).toBeDefined();
 	});
 });
