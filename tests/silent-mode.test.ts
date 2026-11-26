@@ -68,7 +68,7 @@ describe("/silent mode transcript filtering (real InteractiveMode)", () => {
 		harness = await createInteractiveHarness({
 			theme: "dark",
 			width: 110,
-			height: 38,
+			height: 44,
 			thinkingLevel: "medium",
 			extensionFactories: [
 				(pi) => {

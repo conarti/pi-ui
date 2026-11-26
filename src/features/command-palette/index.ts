@@ -39,7 +39,10 @@ import { notifyLiveToolDensityChange } from "../tool-calls/command.ts";
 import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
 import { getSessionWorkflow, MODE_META } from "../../shared/session-workflow.ts";
 import { requestRender, runAppAction } from "../../shared/ui-action-bridge.ts";
-import { showContextInspector } from "../context-inspector/index.ts";
+import {
+	invalidateResponseMetricsRows,
+	showContextInspector,
+} from "../context-inspector/index.ts";
 import { getOutlineSettings } from "../outline-rail/index.ts";
 import { setSessionMode } from "../plan-studio/index.ts";
 import { showPlanStudio } from "../plan-studio/studio-overlay.ts";
@@ -245,7 +248,7 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 			run: () => {
 				const next = !loadPiUiUserConfig().responseMetrics;
 				updatePiUiUserConfig({ responseMetrics: next });
-				requestRender();
+				invalidateResponseMetricsRows();
 				ctx.ui.notify(
 					t("config.updated", {
 						setting: "Response Metrics",
@@ -291,7 +294,7 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 						(TIMESTAMP_DISPLAY_MODES.indexOf(cur) + 1) % TIMESTAMP_DISPLAY_MODES.length
 					]!;
 				updatePiUiUserConfig({ timestamps: next });
-				requestRender();
+				invalidateResponseMetricsRows();
 				ctx.ui.notify(t("config.updated", { setting: "Timestamps", value: next }), "info");
 			},
 		},

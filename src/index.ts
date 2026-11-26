@@ -14,7 +14,7 @@ import { disposeShortcutsBar, mountShortcutsBar } from "./features/chrome/shortc
 import { registerComposerWorkingAnimation } from "./features/chrome/working-indicator.ts";
 import { createPinnedSessionHeaderSlot, mountSessionHeader } from "./features/chrome/header.ts";
 import { registerCommandPaletteFeature } from "./features/command-palette/index.ts";
-import { showContextInspector } from "./features/context-inspector/index.ts";
+import { registerContextInspectorFeature } from "./features/context-inspector/index.ts";
 import { createOutlineRailSlot, registerOutlineCommands } from "./features/outline-rail/index.ts";
 import {
 	applyModeTools,
@@ -173,8 +173,9 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 	/* 4. Режим планирования с построчными комментариями и защита вызовов тулов */
 	registerPlanStudioFeature(pi);
 
-	/* 5. Command Palette (Ctrl+K / /palette), конфиг-команды и фоновые Prompt Suggestion */
+	/* 5. Command Palette (Ctrl+K / /palette), телеметрия + Context Inspector, конфиг-команды и Prompt Suggestion */
 	registerCommandPaletteFeature(pi);
+	registerContextInspectorFeature(pi);
 	registerUnifiedConfigCommands(pi);
 	registerPromptSuggestionFeature(pi);
 
@@ -200,13 +201,6 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 			const wf = getSessionWorkflow();
 			if (wf.hasPlan()) await showPlanStudio(pi, ctx);
 			else setSessionMode(pi, ctx, wf.mode === "plan" ? "always-approve" : "plan");
-		},
-	});
-
-	pi.registerCommand("context", {
-		description: t("context.command"),
-		handler: async (_args, ctx) => {
-			await showContextInspector(pi, ctx);
 		},
 	});
 

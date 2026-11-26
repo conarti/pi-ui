@@ -921,7 +921,7 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		harness = await createInteractiveHarness({
 			theme: "dark",
 			width: 100,
-			height: 30,
+			height: 34,
 			thinkingLevel: "medium",
 			streamSimple: (_m, _c, opts) => queue.handler(opts),
 		});
