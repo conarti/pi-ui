@@ -1,5 +1,6 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
+	sliceByColumn,
 	stripTerminalSequences,
 	truncateToWidth,
 	TuiAltScreen,
@@ -17,6 +18,8 @@ import {
 	getThemeSurfacePalette,
 	isLightTheme,
 	paintThemeSurfaceRow,
+	themeBgRgb,
+	themeFgRgb,
 	type RgbTuple,
 } from "../../shared/ansi.ts";
 import {
@@ -30,23 +33,60 @@ import {
 	registerTransientHoverDismisser,
 	unwrapHostTui,
 } from "../../shared/host-runtime.ts";
-import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import { t } from "../../shared/i18n.ts";
-import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
+import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
+import { loadPiUiUserConfig } from "../../shared/pi-ui-config.ts";
 import {
-	computeSelectionQuotePopupAnchor,
-	normalizeQuoteText,
-} from "./quote-model.ts";
+	claimHover,
+	copyToClipboard,
+	hookMethod,
+} from "../../shared/runtime-hooks.ts";
+import {
+	extractCleanSelectionText,
+	type SelectedTranscriptLine,
+} from "../../shared/selection-copy.ts";
+import { computeSelectionQuotePopupAnchor } from "./quote-model.ts";
 
 export const QUOTE_SELECTION_POPUP_LABEL = t("quotes.selectionPopup.label");
-export const QUOTE_SELECTION_POPUP_WIDTH = visibleWidth(QUOTE_SELECTION_POPUP_LABEL);
+export const QUOTE_SELECTION_POPUP_WIDTH = visibleWidth(` ${QUOTE_SELECTION_POPUP_LABEL} `);
 export const QUOTE_SELECTION_POPUP_HEIGHT = 1;
+
+type SelectionPopupAction = "copy" | "quote";
+
+interface ActionZone {
+	readonly action: SelectionPopupAction;
+	readonly xStart: number;
+	readonly xEnd: number;
+}
+
+function getManualCopyLabel(): string {
+	return `[${t("quotes.selectionPopup.copy")}]`;
+}
+
+function getQuoteActionLabel(): string {
+	return `[${t("quotes.selectionPopup.quoteAction")}]`;
+}
+
+function getAutoCopiedPrefix(): string {
+	return `${t("quotes.selectionPopup.copied")} · `;
+}
+
+export function computeSelectionPopupWidth(copyOnSelectMode: boolean): number {
+	const quoteLabel = getQuoteActionLabel();
+	if (copyOnSelectMode) {
+		return visibleWidth(` ${getAutoCopiedPrefix()}${quoteLabel} `);
+	}
+	return visibleWidth(` ${getManualCopyLabel()}  ${quoteLabel} `);
+}
 
 export class QuoteSelectionPopup implements Component {
 	selectedTextSnapshot = "";
-	hovered = false;
-	private pressed = false;
+	copyOnSelectMode = false;
+	hoveredAction: SelectionPopupAction | null = null;
+	private pressedAction: SelectionPopupAction | null = null;
 	private triggeredInGesture = false;
+	private zones: readonly ActionZone[] = [];
+	onCopy?: (selectedText: string) => void;
 	onActivate?: (selectedText: string) => void;
 	onDismiss?: () => void;
 
@@ -58,28 +98,48 @@ export class QuoteSelectionPopup implements Component {
 	invalidate(): void {}
 
 	resetGesture(): void {
-		this.hovered = false;
-		this.pressed = false;
+		this.hoveredAction = null;
+		this.pressedAction = null;
 		this.triggeredInGesture = false;
+	}
+
+	private hitAction(x: number, y: number): SelectionPopupAction | null {
+		if (y !== 0) return null;
+		for (const zone of this.zones) {
+			if (x >= zone.xStart && x < zone.xEnd) {
+				return zone.action;
+			}
+		}
+		return null;
+	}
+
+	private triggerAction(action: SelectionPopupAction): void {
+		if (action === "copy") {
+			this.onCopy?.(this.selectedTextSnapshot);
+		} else {
+			this.onActivate?.(this.selectedTextSnapshot);
+		}
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		if (event.type === "move") {
+			const nextAction = this.hitAction(event.x, event.y);
 			claimHover(this, () => {
-				if (this.hovered) {
-					this.hovered = false;
+				if (this.hoveredAction !== null) {
+					this.hoveredAction = null;
 					this.requestRender();
 				}
 			});
-			if (!this.hovered) {
-				this.hovered = true;
+			if (nextAction !== this.hoveredAction) {
+				this.hoveredAction = nextAction;
 				return { handled: true, render: true };
 			}
 			return { handled: true, render: false };
 		}
 
 		if (event.type === "press" && event.button === "left") {
-			this.pressed = true;
+			const hit = this.hitAction(event.x, event.y);
+			this.pressedAction = hit ?? (this.copyOnSelectMode ? "quote" : null);
 			this.triggeredInGesture = false;
 			return { handled: true, render: false };
 		}
@@ -90,11 +150,12 @@ export class QuoteSelectionPopup implements Component {
 				event.x < event.width &&
 				event.y >= 0 &&
 				event.y < event.height;
-			const wasPressed = this.pressed;
-			this.pressed = false;
+			const wasPressed = this.pressedAction;
+			this.pressedAction = null;
 			if (wasPressed && inBounds && !this.triggeredInGesture) {
+				const releaseHit = this.hitAction(event.x, event.y) ?? wasPressed;
 				this.triggeredInGesture = true;
-				this.onActivate?.(this.selectedTextSnapshot);
+				this.triggerAction(releaseHit);
 				return { handled: true, render: true };
 			}
 			if (wasPressed && !inBounds) {
@@ -105,10 +166,11 @@ export class QuoteSelectionPopup implements Component {
 		}
 
 		if (event.type === "click" && event.button === "left") {
-			this.pressed = false;
-			if (!this.triggeredInGesture) {
+			const hit = this.hitAction(event.x, event.y) ?? this.pressedAction;
+			this.pressedAction = null;
+			if (hit && !this.triggeredInGesture) {
 				this.triggeredInGesture = true;
-				this.onActivate?.(this.selectedTextSnapshot);
+				this.triggerAction(hit);
 			}
 			return { handled: true, render: true };
 		}
@@ -120,38 +182,63 @@ export class QuoteSelectionPopup implements Component {
 		const theme = this.getTheme();
 		const light = isLightTheme(theme);
 		const palette = getThemeSurfacePalette(theme);
-		const safeWidth = Math.max(4, Math.min(QUOTE_SELECTION_POPUP_WIDTH, width));
+		const targetWidth = computeSelectionPopupWidth(this.copyOnSelectMode);
+		const safeWidth = Math.max(4, Math.min(targetWidth, width));
+		const bg: RgbTuple = palette.popupSurfaceBg;
 
-		const bg: RgbTuple = this.hovered
-			? palette.selectedRowBg
-			: palette.popupSurfaceBg;
-		const borderRgb: RgbTuple = light
-			? this.hovered
-				? [37, 99, 235]
-				: [59, 130, 246]
-			: this.hovered
-				? [125, 207, 255]
-				: [92, 138, 198];
-		const quoteRgb: RgbTuple = light
-			? this.hovered
-				? [30, 64, 175]
-				: [29, 78, 216]
-			: this.hovered
-				? [156, 222, 255]
-				: [125, 207, 255];
-		const textRgb: RgbTuple = light
-			? [15, 23, 42]
-			: this.hovered
-				? [240, 248, 255]
-				: [226, 236, 248];
+		const quoteLabel = getQuoteActionLabel();
+		const copyLabel = getManualCopyLabel();
+		const copiedPrefix = getAutoCopiedPrefix();
 
-		if (safeWidth < QUOTE_SELECTION_POPUP_WIDTH) {
-			const clipped = truncateToWidth(QUOTE_SELECTION_POPUP_LABEL, safeWidth, "…");
-			return [paintThemeSurfaceRow(theme, fgRgb(textRgb, clipped), safeWidth, bg)];
+		const paintButton = (label: string, hovered: boolean): string => {
+			if (hovered) {
+				return themeBgRgb(
+					theme,
+					palette.selectedRowBg,
+					themeFgRgb(theme, light ? palette.accent : palette.accentBright, label),
+				);
+			}
+			return themeFgRgb(theme, light ? [15, 23, 42] : [226, 236, 248], label);
+		};
+
+		if (this.copyOnSelectMode) {
+			const plain = ` ${copiedPrefix}${quoteLabel} `;
+			if (safeWidth < visibleWidth(plain)) {
+				this.zones = [{ action: "quote", xStart: 0, xEnd: safeWidth }];
+				const clipped = truncateToWidth(plain.trim(), safeWidth, "…");
+				return [paintThemeSurfaceRow(theme, fgRgb(light ? [15, 23, 42] : [226, 236, 248], clipped), safeWidth, bg)];
+			}
+			const prefixW = visibleWidth(copiedPrefix);
+			const quoteW = visibleWidth(quoteLabel);
+			this.zones = [{ action: "quote", xStart: 1 + prefixW, xEnd: 1 + prefixW + quoteW }];
+			const styledCopied = `${themeFgRgb(theme, palette.success, t("quotes.selectionPopup.copied"))}${theme.fg("dim", " · ")}`;
+			const styledQuote = paintButton(quoteLabel, this.hoveredAction === "quote");
+			return [paintThemeSurfaceRow(theme, ` ${styledCopied}${styledQuote} `, safeWidth, bg)];
 		}
 
-		const styled = `${fgRgb(borderRgb, "╭")} ${fgRgb(quoteRgb, "❝")} ${fgRgb(textRgb, t("quotes.selectionPopup.word"))} ${fgRgb(borderRgb, "╮")}`;
-		return [paintThemeSurfaceRow(theme, styled, safeWidth, bg)];
+		const plain = ` ${copyLabel}  ${quoteLabel} `;
+		if (safeWidth < visibleWidth(plain)) {
+			const clipped = truncateToWidth(plain.trim(), safeWidth, "…");
+			const copyW = Math.min(safeWidth, visibleWidth(copyLabel));
+			this.zones = [
+				{ action: "copy", xStart: 0, xEnd: copyW },
+				{ action: "quote", xStart: copyW, xEnd: safeWidth },
+			];
+			return [paintThemeSurfaceRow(theme, fgRgb(light ? [15, 23, 42] : [226, 236, 248], clipped), safeWidth, bg)];
+		}
+
+		const copyW = visibleWidth(copyLabel);
+		const quoteW = visibleWidth(quoteLabel);
+		const copyStart = 1;
+		const quoteStart = copyStart + copyW + 2;
+		this.zones = [
+			{ action: "copy", xStart: copyStart, xEnd: copyStart + copyW },
+			{ action: "quote", xStart: quoteStart, xEnd: quoteStart + quoteW },
+		];
+
+		const styledCopy = paintButton(copyLabel, this.hoveredAction === "copy");
+		const styledQuote = paintButton(quoteLabel, this.hoveredAction === "quote");
+		return [paintThemeSurfaceRow(theme, ` ${styledCopy}  ${styledQuote} `, safeWidth, bg)];
 	}
 }
 
@@ -164,6 +251,7 @@ export interface SelectionPopupAnchorContext {
 	readonly viewportBottom: number;
 	readonly stickyBottom?: number;
 	readonly rightReservedCols?: number;
+	readonly copyOnSelect?: boolean;
 }
 
 export class SelectionQuoteOverlayController {
@@ -178,6 +266,7 @@ export class SelectionQuoteOverlayController {
 	constructor(
 		private readonly getTheme: () => Theme,
 		private readonly onQuoteConfirmed: (selectedText: string, tui: TUI) => void,
+		private readonly onCopyConfirmed?: (selectedText: string, tui: TUI) => void,
 	) {}
 
 	get isShowing(): boolean {
@@ -210,7 +299,7 @@ export class SelectionQuoteOverlayController {
 		selectedText: string,
 		anchorCtx: SelectionPopupAnchorContext,
 	): void {
-		const cleaned = normalizeQuoteText(selectedText);
+		const cleaned = selectedText.trim();
 		if (!tui || !cleaned || hasBlockingModalOverlay(tui)) {
 			this.hide();
 			return;
@@ -225,6 +314,13 @@ export class SelectionQuoteOverlayController {
 
 		if (!this.popup) {
 			this.popup = new QuoteSelectionPopup(this.getTheme, () => this.activeTui?.requestRender());
+			this.popup.onCopy = (text) => {
+				const targetTui = this.activeTui;
+				this.hide();
+				if (targetTui && text) {
+					this.onCopyConfirmed?.(text, targetTui);
+				}
+			};
 			this.popup.onActivate = (text) => {
 				const targetTui = this.activeTui;
 				this.hide();
@@ -237,11 +333,13 @@ export class SelectionQuoteOverlayController {
 			};
 		}
 
+		const copyOnSelectMode = Boolean(anchorCtx.copyOnSelect);
 		this.popup.resetGesture();
+		this.popup.copyOnSelectMode = copyOnSelectMode;
 		this.popup.selectedTextSnapshot = cleaned;
 
 		const termCols = Math.max(8, tui.terminal?.columns ?? 80);
-		const width = Math.min(QUOTE_SELECTION_POPUP_WIDTH, termCols);
+		const width = Math.min(computeSelectionPopupWidth(copyOnSelectMode), termCols);
 		const height = QUOTE_SELECTION_POPUP_HEIGHT;
 
 		const { col, row } = computeSelectionQuotePopupAnchor({
@@ -348,18 +446,23 @@ function pointToScreenCoords(
 	return { col: point.col, row: point.row };
 }
 
-/* TuiBase.hasOverlay учитывает nonCapturing Hover Popup, поэтому локально подменяем проверку на блокирующие модалки */
-function withNonCapturingOverlaysTransparent<T>(self: any, fn: () => T): T {
+/**
+ * Временно делает `nonCapturing`-попапы невидимыми для `this.hasOverlay()` внутри
+ * методов выделения и скроллбара `TuiAltScreen`, чтобы открытый Hover Popup не
+ * ломал выделение текста и автоскролл транскрипта.
+ */
+function withNonCapturingOverlaysTransparent<T>(self: any, run: () => T): T {
 	const hadOwn = Object.prototype.hasOwnProperty.call(self, "hasOverlay");
 	const prevDesc = hadOwn ? Object.getOwnPropertyDescriptor(self, "hasOverlay") : undefined;
 	Object.defineProperty(self, "hasOverlay", {
 		configurable: true,
+		writable: true,
 		value: () => hasBlockingModalOverlay(self),
 	});
 	try {
-		return fn();
+		return run();
 	} finally {
-		if (hadOwn && prevDesc) {
+		if (prevDesc) {
 			Object.defineProperty(self, "hasOverlay", prevDesc);
 		} else {
 			delete self.hasOverlay;
@@ -382,10 +485,75 @@ export function installSelectionQuoteRuntimeHooks(
 	if (altProto) {
 		hookMethod(
 			altProto,
+			"getActiveSelectionText",
+			"quotes.cleanSelectionText",
+			(self, args, original) => {
+				const runtime = getActiveHostRuntime();
+				if (!runtime || !runtime.isFullscreen || !isSameHostTui(runtime.tui, self)) {
+					return original.apply(self, args);
+				}
+				const selection = self.getSelectionBounds?.() as
+					| { start?: SelectionPointLike; end?: SelectionPointLike }
+					| undefined;
+				if (!selection?.start || !selection.end || !runtime.scroll) {
+					return original.apply(self, args);
+				}
+				if (selection.start.scrollView !== runtime.scroll) {
+					return original.apply(self, args);
+				}
+				const scrollBox = findScrollViewLayoutBox(self.currentLayout?.root, runtime.scroll);
+				const sourceLines = scrollBox?.scrollContentLines;
+				if (!sourceLines) {
+					return original.apply(self, args);
+				}
+				const selectedLines: SelectedTranscriptLine[] = [];
+				for (let row = selection.start.row; row <= selection.end.row; row += 1) {
+					const fullLine = sourceLines[row] ?? "";
+					const columns = self.getSelectionColumns(fullLine, row, selection) as {
+						start: number;
+						end: number;
+					};
+					const span = Math.max(0, columns.end - columns.start);
+					selectedLines.push({
+						fullLine,
+						selectedAnsi: sliceByColumn(fullLine, columns.start, span, true),
+						startCol: columns.start,
+						endCol: columns.end,
+						contentWidth: scrollBox.rect.width,
+					});
+				}
+				const cleaned = extractCleanSelectionText(selectedLines, { theme: runtime.theme() });
+				return cleaned.length > 0 ? cleaned : undefined;
+			},
+		);
+
+		hookMethod(
+			altProto,
+			"copySelectionToClipboard",
+			"quotes.cleanCopySelectionToClipboard",
+			(self, args, original) => {
+				const runtime = getActiveHostRuntime();
+				if (!runtime || !runtime.isFullscreen || !isSameHostTui(runtime.tui, self)) {
+					return original.apply(self, args);
+				}
+				const text = self.getActiveSelectionText?.() as string | undefined;
+				if (!text) return Promise.resolve(false);
+				copyToClipboard(text);
+				return Promise.resolve(true);
+			},
+		);
+
+		hookMethod(
+			altProto,
 			"handleSelectionMouseEvent",
 			"quotes.allowSelectionWithHoverOverlays",
-			(self, args, original) =>
-				withNonCapturingOverlaysTransparent(self, () => original.apply(self, args)),
+			(self, args, original) => {
+				const runtime = getActiveHostRuntime();
+				if (runtime && isSameHostTui(runtime.tui, self)) {
+					self.copyOnSelect = loadPiUiUserConfig().copyOnSelect;
+				}
+				return withNonCapturingOverlaysTransparent(self, () => original.apply(self, args));
+			},
 		);
 
 		hookMethod(
@@ -436,7 +604,7 @@ export function installSelectionQuoteRuntimeHooks(
 						| { start?: SelectionPointLike; end?: SelectionPointLike }
 						| undefined;
 					const rawSelected = self.getActiveSelectionText?.() as string | undefined;
-					const cleaned = typeof rawSelected === "string" ? normalizeQuoteText(rawSelected) : "";
+					const cleaned = typeof rawSelected === "string" ? rawSelected.trim() : "";
 
 					const scrollBox = runtime.scroll
 						? findScrollViewLayoutBox(self.currentLayout?.root, runtime.scroll)
@@ -500,7 +668,8 @@ export function installSelectionQuoteRuntimeHooks(
 							viewportTop,
 							viewportBottom,
 							stickyBottom,
-							rightReservedCols: railVisible ? 3 : 1,
+							rightReservedCols: railVisible ? 2 : 1,
+							copyOnSelect: loadPiUiUserConfig().copyOnSelect,
 						});
 						self.requestRender?.();
 					} else {

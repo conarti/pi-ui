@@ -7,6 +7,7 @@ import {
 	type TuiMouseEvent,
 } from "@earendil-works/pi-tui";
 import { fgRgb, getActiveGlobalTheme, isLightTheme, paintSurfaceRow, type RgbTuple } from "../../shared/ansi.ts";
+import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
 import {
 	claimHover,
@@ -379,15 +380,19 @@ export function renderUserPromptCardLines(
 		}
 	}
 
-	const leftPad = width >= 32 ? "  " : " ";
-	const rightPad = width >= 32 ? "  " : " ";
+	const outerPad = computeOuterCanvasMargin(width);
+	const outerMargin = " ".repeat(outerPad);
+	const cardWidth = Math.max(12, width - outerPad * 2);
+
+	const leftPad = cardWidth >= 28 ? "  " : " ";
+	const rightPad = cardWidth >= 28 ? "  " : " ";
 	const firstPrefix = `${leftPad}${fgRgb(chevronRgb, "› ")}`;
 	const prefixWidth = leftPad.length + 2;
 	const nextPrefix = " ".repeat(prefixWidth);
 
 	/* Фиксированный правый отступ под HH:MM исключает перенос строк при наведении и появлении Copy */
-	const timeGutterWidth = width >= 32 ? 9 : width >= 22 ? 7 : 0;
-	const textAvail = Math.max(4, width - prefixWidth - timeGutterWidth);
+	const timeGutterWidth = cardWidth >= 32 ? 9 : cardWidth >= 22 ? 7 : 0;
+	const textAvail = Math.max(4, cardWidth - prefixWidth - timeGutterWidth);
 
 	const taggedText = tagFormattedPillsWithOsc8(formattedText, pillDescriptors);
 	const wrappedRows: string[] = [];
@@ -404,43 +409,47 @@ export function renderUserPromptCardLines(
 	if (options.maxContentLines !== undefined && wrappedRows.length > options.maxContentLines) {
 		truncated = true;
 		visibleRows = wrappedRows.slice(0, options.maxContentLines);
+		const hidden = wrappedRows.length - visibleRows.length;
 		const lastIdx = visibleRows.length - 1;
 		if (lastIdx >= 0) {
 			const trimmedLast = visibleRows[lastIdx]!.replace(/\s+$/, "");
-			if (visibleWidth(trimmedLast) + 1 <= textAvail) {
-				visibleRows[lastIdx] = `${trimmedLast}${fgRgb(dimRgb, "…")}`;
+			const foldHint =
+				options.surface === "sticky"
+					? ` · +${hidden} ${hidden === 1 ? "line" : "lines"} (Alt+s)`
+					: "…";
+			const hintWidth = visibleWidth(foldHint);
+			const styledHint = fgRgb(options.hovered ? chevronRgb : dimRgb, foldHint);
+			if (visibleWidth(trimmedLast) + hintWidth <= textAvail) {
+				visibleRows[lastIdx] = `${trimmedLast}${styledHint}`;
+			} else if (hintWidth < textAvail) {
+				visibleRows[lastIdx] = `${truncateToWidth(trimmedLast, Math.max(1, textAvail - hintWidth), "")}${styledHint}`;
 			} else {
 				visibleRows[lastIdx] = `${truncateToWidth(trimmedLast, Math.max(1, textAvail - 1), "")}${fgRgb(dimRgb, "…")}`;
 			}
 		}
 	}
 
+	const paintCardRow = (inner: string): string =>
+		`${outerMargin}${paintSurfaceRow(inner, cardWidth, surfaceRgb[0], surfaceRgb[1], surfaceRgb[2])}${outerMargin}`;
+
 	const lines: string[] = [];
 	let copyHit: PromptCardHitBox | undefined;
 
-	if (options.showCopyBadge && (options.hovered || options.copied) && width >= 20) {
+	if (options.showCopyBadge && (options.hovered || options.copied) && cardWidth >= 20) {
 		const rawLabel = options.copied ? "✓ Copied" : "Copy";
 		const styledLabel = options.copied
 			? fgRgb(light ? [21, 128, 61] : [140, 194, 101], rawLabel)
 			: fgRgb(light ? [71, 85, 105] : [148, 168, 198], rawLabel);
 		const labelWidth = visibleWidth(rawLabel);
-		const padCount = Math.max(0, width - labelWidth - rightPad.length);
+		const padCount = Math.max(0, cardWidth - labelWidth - rightPad.length);
 		copyHit = {
 			y: 0,
-			xStart: Math.max(0, padCount - 1),
-			xEnd: Math.min(width - 1, padCount + labelWidth),
+			xStart: Math.max(outerPad, outerPad + padCount - 1),
+			xEnd: Math.min(outerPad + cardWidth - 1, outerPad + padCount + labelWidth),
 		};
-		lines.push(
-			paintSurfaceRow(
-				`${" ".repeat(padCount)}${styledLabel}${rightPad}`,
-				width,
-				surfaceRgb[0],
-				surfaceRgb[1],
-				surfaceRgb[2],
-			),
-		);
+		lines.push(paintCardRow(`${" ".repeat(padCount)}${styledLabel}${rightPad}`));
 	} else {
-		lines.push(paintSurfaceRow("", width, surfaceRgb[0], surfaceRgb[1], surfaceRgb[2]));
+		lines.push(paintCardRow(""));
 	}
 
 	const pillHits: PromptPillHitTarget[] = [];
@@ -450,7 +459,7 @@ export function renderUserPromptCardLines(
 		const { cleanedRow, hits } = extractAndStripPillHits(
 			visibleRows[i]!,
 			i + 1,
-			prefixWidth,
+			outerPad + prefixWidth,
 			pillDescriptors,
 		);
 		if (hits.length > 0) {
@@ -461,20 +470,12 @@ export function renderUserPromptCardLines(
 		const timeStr = i === 0 && options.formattedTime && timeGutterWidth > 0 ? options.formattedTime : "";
 		const rightStyled = timeStr ? `${fgRgb(dimRgb, timeStr)}${rightPad}` : "";
 		const gap = " ".repeat(
-			Math.max(0, width - prefixWidth - visibleWidth(styledBody) - visibleWidth(rightStyled)),
+			Math.max(0, cardWidth - prefixWidth - visibleWidth(styledBody) - visibleWidth(rightStyled)),
 		);
-		lines.push(
-			paintSurfaceRow(
-				`${prefix}${styledBody}${gap}${rightStyled}`,
-				width,
-				surfaceRgb[0],
-				surfaceRgb[1],
-				surfaceRgb[2],
-			),
-		);
+		lines.push(paintCardRow(`${prefix}${styledBody}${gap}${rightStyled}`));
 	}
 
-	lines.push(paintSurfaceRow("", width, surfaceRgb[0], surfaceRgb[1], surfaceRgb[2]));
+	lines.push(paintCardRow(""));
 
 	return {
 		lines,

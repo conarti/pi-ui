@@ -448,12 +448,12 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 
 		scroll.scrollTo(rail.offsetOf(0) + 6, { disableFollow: true });
 		const scrolledScreen = harness.screen();
-		expect(scrolledScreen.rowText(1)).toContain("Review [🖼 Image #1] and [📋 Pasted #2 · 5 lines]");
+		expect(scrolledScreen.rowText(4)).toContain("Review [🖼 Image #1] and [📋 Pasted #2 · 5 lines]");
 		expect(scrolledScreen.text()).not.toContain("[изображение]");
 
-		const stickyPasteCol = scrolledScreen.rowText(1).indexOf("[📋 Pasted #2 · 5 lines]");
+		const stickyPasteCol = scrolledScreen.rowText(4).indexOf("[📋 Pasted #2 · 5 lines]");
 		expect(stickyPasteCol).toBeGreaterThan(0);
-		await harness.mouseClick(stickyPasteCol + 2, 1);
+		await harness.mouseClick(stickyPasteCol + 2, 4);
 		expect(harness.screen().text()).toContain("req-9912");
 
 		await harness.pressKey("\x1b");
@@ -1025,29 +1025,29 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await harness.submitDraft();
 
 		const checkRailPreviews = async () => {
+			const headerRows = 3;
 			const rail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
 			const geo = rail.geometry!;
 			expect(geo.windowEnd - geo.windowStart).toBe(4);
 
-			await harness!.mouseMove(97, geo.ticksY);
+			await harness!.mouseMove(99, headerRows + geo.ticksY);
 			const p1 = harness!.screen().text();
-			expect(p1).toContain("16:09");
 			expect(p1).toContain("[🖼 Image #1]");
 			expect(p1).not.toContain("[изображение]");
 
-			await harness!.mouseMove(97, geo.ticksY + 1);
+			await harness!.mouseMove(99, headerRows + geo.ticksY + 1);
 			const p2 = harness!.screen().text();
 			expect(p2).toContain("[❝ Quote #1 · 2 lines]");
 			expect(p2).toContain("Compare");
 			expect(p2).toContain("screenshot [🖼 Image #1]");
 			expect(p2).not.toContain("quoted one");
 
-			await harness!.mouseMove(97, geo.ticksY + 2);
+			await harness!.mouseMove(99, headerRows + geo.ticksY + 2);
 			const p3 = harness!.screen().text();
 			expect(p3).toContain("Mounted fallback [🖼 Image #1]");
 			expect(p3).not.toContain("[изображение]");
 
-			await harness!.mouseMove(97, geo.ticksY + 3);
+			await harness!.mouseMove(99, headerRows + geo.ticksY + 3);
 			const p4 = harness!.screen().text();
 			expect(p4).toContain("Check [🖼 Image #1]");
 			expect(p4).toContain("[📋 Pasted #2 · 4 lines]");

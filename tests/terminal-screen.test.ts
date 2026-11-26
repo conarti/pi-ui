@@ -61,11 +61,11 @@ describe("headless terminal screen buffer snapshot", () => {
 		expect(screen.cellAt(0, 11)?.inverse).toBe(false);
 	});
 
-	it("verifies composited Sticky Prompt, Outline Rail, rightmost scrollbar, and selection masking on cell grid in real InteractiveMode", async () => {
+	it("verifies composited Sticky Prompt, over-scrollbar Outline Rail, and selection masking on cell grid in real InteractiveMode", async () => {
 		harness = await createInteractiveHarness({
 			theme: "dark",
 			width: 96,
-			height: 22,
+			height: 24,
 			responses: [
 				fauxAssistantMessage(buildLines("selectable transcript line", 16)),
 				fauxAssistantMessage(buildLines("tail line", 14)),
@@ -80,33 +80,33 @@ describe("headless terminal screen buffer snapshot", () => {
 		const preSelect = harness.screen();
 		const targetPos = preSelect.findText("selectable transcript line");
 		expect(targetPos).toBeDefined();
-		expect(targetPos!.row).toBeGreaterThanOrEqual(3);
+		expect(targetPos!.row).toBeGreaterThanOrEqual(6);
 
+		const headerRows = 3;
 		const railGeo = getActiveHostRuntime()?.viewportSlots?.rightRail?.geometry!;
 		expect(railGeo).toBeDefined();
+		const railScreenUp = headerRows + railGeo.upY;
+		const railScreenDown = headerRows + railGeo.downY;
 		await harness.mouseDrag(
 			targetPos!.col,
-			Math.min(targetPos!.row, railGeo.upY),
-			94,
-			Math.max(targetPos!.row + 1, railGeo.downY),
+			Math.min(targetPos!.row, railScreenUp),
+			95,
+			Math.max(targetPos!.row + 1, railScreenDown),
 			{ steps: 3 },
 		);
 
 		const screen = captureTerminalScreen(harness);
-		const viewportRows = getActiveHostRuntime()?.scroll?.viewportHeight ?? 16;
+		const viewportRows = getActiveHostRuntime()?.scroll?.viewportHeight ?? 14;
 
-		expect(screen.sliceText(1, 0, 40)).toContain("› First pinned prompt");
-		expect(screen.cellAt(1, 2)?.bg.kind).toBe("rgb");
+		expect(screen.sliceText(4, 0, 44)).toContain("› First pinned prompt");
+		expect(screen.cellAt(4, 2)?.bg.kind).toBe("rgb");
+		expect(screen.cellAt(4, 0)?.bg.kind).toBe("default");
 
-		const hasRightmostScrollbar = Array.from(
-			{ length: viewportRows },
-			(_, r) => screen.cellAt(r, 95)?.char,
-		).some((ch) => ch === "┃" || ch === "│" || ch === "█");
-		expect(hasRightmostScrollbar).toBe(true);
-
-		const railSlices = Array.from({ length: viewportRows }, (_, r) => screen.sliceText(r, 93, 95));
+		const railSlices = Array.from({ length: viewportRows }, (_, r) =>
+			screen.sliceText(headerRows + r, 94, 96),
+		);
 		expect(railSlices.some((s) => s === " ▲")).toBe(true);
-		expect(railSlices.some((s) => s === "──")).toBe(true);
+		expect(railSlices.some((s) => s === "━━")).toBe(true);
 
 		const transcriptSelected = Array.from(
 			{ length: 40 },
@@ -114,16 +114,13 @@ describe("headless terminal screen buffer snapshot", () => {
 		).some(Boolean);
 		expect(transcriptSelected).toBe(true);
 
-		for (let r = 0; r < 3; r += 1) {
-			for (let c = 0; c < 93; c += 1) {
+		for (let r = headerRows; r < headerRows + 3; r += 1) {
+			for (let c = 0; c < 94; c += 1) {
 				expect(screen.cellAt(r, c)?.inverse).toBe(false);
 			}
 		}
-		for (let r = railGeo.upY; r <= railGeo.downY; r += 1) {
-			expect(screen.cellAt(r, 93)?.inverse).toBe(false);
+		for (let r = railScreenUp; r <= railScreenDown; r += 1) {
 			expect(screen.cellAt(r, 94)?.inverse).toBe(false);
-		}
-		for (let r = 0; r < viewportRows; r += 1) {
 			expect(screen.cellAt(r, 95)?.inverse).toBe(false);
 		}
 	});

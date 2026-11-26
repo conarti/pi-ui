@@ -271,36 +271,32 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			const rail = runtime.viewportSlots!.rightRail as OutlineRailComponent;
 
 			scroll.scrollTo(rail.offsetOf(1) + 2, { disableFollow: true });
+			const headerRows = 3;
 			const idleScreen = harness.screen();
 			const geo = getRailGeometry();
 
-			expect(idleScreen.sliceText(geo.upY, 97, 99)).toBe(" ▲");
-			expect(idleScreen.sliceText(geo.ticksY, 97, 99)).toBe(" ─");
-			expect(idleScreen.sliceText(geo.ticksY + 1, 97, 99)).toBe("──");
-			expect(idleScreen.sliceText(geo.ticksY + 2, 97, 99)).toBe(" ─");
-			expect(idleScreen.sliceText(geo.downY, 97, 99)).toBe(" ▼");
+			expect(idleScreen.sliceText(headerRows + geo.upY, 98, 100)).toBe(" ▲");
+			expect(idleScreen.sliceText(headerRows + geo.ticksY, 98, 100)).toBe(" ─");
+			expect(idleScreen.sliceText(headerRows + geo.ticksY + 1, 98, 100)).toBe("━━");
+			expect(idleScreen.sliceText(headerRows + geo.ticksY + 2, 98, 100)).toBe(" ─");
+			expect(idleScreen.sliceText(headerRows + geo.downY, 98, 100)).toBe(" ▼");
 
 			const rawFrameIdle = harness.renderFrame();
-			expect(rawFrameIdle[geo.ticksY]).toContain(theme.getFgAnsi("dim"));
-			expect(rawFrameIdle[geo.ticksY + 1]).toContain(theme.getFgAnsi("text"));
+			expect(rawFrameIdle[headerRows + geo.ticksY]).toContain(theme.getFgAnsi("dim"));
+			expect(rawFrameIdle[headerRows + geo.ticksY + 1]).toContain(theme.getFgAnsi("text"));
 
-			const tick3Row = geo.ticksY + 2;
-			await harness.mouseMove(97, tick3Row);
+			const tick3Row = headerRows + geo.ticksY + 2;
+			await harness.mouseMove(99, tick3Row);
 
 			const hoveredScreen = harness.screen();
-			expect(hoveredScreen.sliceText(tick3Row, 97, 99)).toBe("━━");
+			expect(hoveredScreen.sliceText(tick3Row, 98, 100)).toBe("━━");
 
-			const popupTimeHit = hoveredScreen.findText("16:42");
-			expect(popupTimeHit).toBeDefined();
-			expect(hoveredScreen.sliceText(popupTimeHit!.row, 0, 96).trimEnd().endsWith("16:42")).toBe(true);
-			const boxTopRow = hoveredScreen.rowText(popupTimeHit!.row + 1);
-			expect(boxTopRow).toContain("╭─");
-			expect(boxTopRow).toContain("─╮");
+			const boxTopHit = hoveredScreen.findText("╭─");
+			expect(boxTopHit).toBeDefined();
+			expect(hoveredScreen.rowText(boxTopHit!.row)).toContain("─╮");
 			expect(hoveredScreen.text()).toContain("Third prompt gamma");
 			expect(hoveredScreen.text()).not.toContain("Реплика");
-
-			const rawFrameHovered = harness.renderFrame();
-			expect(rawFrameHovered[popupTimeHit!.row + 1]).toContain(theme.getFgAnsi("borderMuted"));
+			expect(hoveredScreen.text()).not.toContain("Turn #3");
 
 			await harness.pressKey("\x0b");
 			expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
@@ -312,7 +308,7 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 
 			await harness.mouseMove(20, 4);
 			const afterLeaveViewport = Array.from({ length: scroll.viewportHeight }, (_, r) =>
-				harness!.screen().sliceText(r, 40, 96),
+				harness!.screen().sliceText(headerRows + r, 40, 97),
 			).join("\n");
 			expect(afterLeaveViewport).not.toContain("Third prompt gamma");
 		},
@@ -340,13 +336,14 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			harness = await createInteractiveHarness({
 				theme: themeMode,
 				width: 100,
-				height: 20,
+				height: 24,
 				initialEntries,
 			});
 
 			const layoutRoot = (harness.tui as unknown as { layoutRoot?: unknown }).layoutRoot;
 			expect(layoutRoot).toBeInstanceOf(VStack);
 
+			const headerRows = 3;
 			const scroll = getActiveHostRuntime()!.scroll!;
 			scroll.scrollTo(0, { disableFollow: true });
 			const atTopScreen = harness.screen();
@@ -354,66 +351,45 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			expect(initialViewportHeight).toBeGreaterThanOrEqual(14);
 			expect(atTopScreen.text()).toContain("Line four hidden while collapsed");
 
-			vi.useFakeTimers();
 			scroll.scrollTo(10, { disableFollow: true });
-			const midScreen = harness.screen();
 			expect(scroll.viewportHeight).toBe(initialViewportHeight);
+			expect(scroll.scrollbar).toBe("hidden");
 
-			const scrollbarChars = Array.from({ length: initialViewportHeight }, (_, r) =>
-				midScreen.cellAt(r, 99)?.char,
-			);
-			expect(scrollbarChars.some((ch) => ch === "┃" || ch === "│" || ch === "█")).toBe(true);
-
-			const railSlicesVisible = Array.from({ length: initialViewportHeight }, (_, r) =>
-				midScreen.sliceText(r, 97, 99),
-			);
-			expect(railSlicesVisible.some((s) => s === " ▲")).toBe(true);
-			expect(railSlicesVisible.some((s) => s === "──")).toBe(true);
-			expect(railSlicesVisible.some((s) => s === " ─")).toBe(true);
-			expect(railSlicesVisible.some((s) => s === " ▼")).toBe(true);
-
-			vi.advanceTimersByTime(3000);
-			vi.useRealTimers();
-			expect(scroll.isScrollbarVisible).toBe(false);
-			const hiddenScrollbarScreen = harness.screen();
-			const railSlicesHidden = Array.from({ length: initialViewportHeight }, (_, r) =>
-				hiddenScrollbarScreen.sliceText(r, 97, 99),
-			);
-			expect(railSlicesHidden).toEqual(railSlicesVisible);
-
-			scroll.scrollTo(2, { disableFollow: true });
-			harness.flushFrame();
-			await harness.mouseMove(99, 1);
-			await harness.mouseDrag(99, 1, 99, 10, { steps: 3 });
-			expect(scroll.scrollTop).toBeGreaterThan(6);
-
-			scroll.scrollTo(10, { disableFollow: true });
 			const collapsedScreen = harness.screen();
-			const stickyTopFive = Array.from({ length: 5 }, (_, r) => collapsedScreen.sliceText(r, 0, 99));
+			const railSlices = Array.from({ length: initialViewportHeight }, (_, r) =>
+				collapsedScreen.sliceText(headerRows + r, 98, 100),
+			);
+			expect(railSlices.some((s) => s === " ▲")).toBe(true);
+			expect(railSlices.some((s) => s === "━━")).toBe(true);
+			expect(railSlices.some((s) => s === " ─")).toBe(true);
+			expect(railSlices.some((s) => s === " ▼")).toBe(true);
+
+			const stickyTopFive = Array.from({ length: 5 }, (_, r) =>
+				collapsedScreen.sliceText(headerRows + r, 0, 100),
+			);
 			expect(stickyTopFive[0]?.trim()).toBe("");
 			expect(stickyTopFive[1]).toContain("› Line one of multi-line user prompt");
 			expect(stickyTopFive[1]?.trimEnd().endsWith("10:15")).toBe(true);
-			expect(stickyTopFive[1]?.indexOf("10:15")).toBe(93);
 			expect(stickyTopFive[2]).toContain("Line two of multi-line user prompt");
 			expect(stickyTopFive[3]).toContain("Line three of multi-line user prompt");
-			expect(stickyTopFive[3]).toContain("…");
+			expect(stickyTopFive[3]).toContain("+2 lines (Alt+s)");
 			expect(stickyTopFive[4]?.trim()).toBe("");
 			expect(stickyTopFive.join("\n")).not.toContain("#1/2");
 			expect(stickyTopFive.join("\n")).not.toContain("↑");
 			expect(stickyTopFive.join("\n")).not.toContain("Line four hidden while collapsed");
 
-			await harness.mouseClick(12, 2);
+			await harness.mouseClick(12, headerRows + 2);
 			const expandedScreen = harness.screen();
 			expect(scroll.viewportHeight).toBe(initialViewportHeight);
 			const expandedTopSeven = Array.from({ length: 7 }, (_, r) =>
-				expandedScreen.sliceText(r, 0, 99),
+				expandedScreen.sliceText(headerRows + r, 0, 100),
 			).join("\n");
 			expect(expandedTopSeven).toContain("Line four hidden while collapsed");
 			expect(expandedTopSeven).toContain("Line five hidden while collapsed");
 
-			await harness.pressKey("\x0f");
+			await harness.pressKey("\x1bs");
 			const recollapsedTopSix = Array.from({ length: 6 }, (_, r) =>
-				harness!.screen().sliceText(r, 0, 99),
+				harness!.screen().sliceText(headerRows + r, 0, 100),
 			).join("\n");
 			expect(recollapsedTopSix).not.toContain("Line four hidden while collapsed");
 
@@ -421,18 +397,18 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			const turn2Start = rail.offsetOf(1);
 			scroll.scrollTo(turn2Start - 3, { disableFollow: true });
 			const pushedScreen = harness.screen();
-			expect(pushedScreen.sliceText(0, 0, 99)).toContain("Line two of multi-line user prompt");
-			expect(pushedScreen.sliceText(1, 0, 99)).toContain("Line three of multi-line user prompt");
-			expect(pushedScreen.sliceText(2, 0, 99).trim()).toBe("");
-			expect(pushedScreen.sliceText(4, 0, 99)).toContain("› Next turn prompt");
+			expect(pushedScreen.sliceText(headerRows + 0, 0, 100)).toContain("Line two of multi-line user prompt");
+			expect(pushedScreen.sliceText(headerRows + 1, 0, 100)).toContain("Line three of multi-line user prompt");
+			expect(pushedScreen.sliceText(headerRows + 2, 0, 100).trim()).toBe("");
+			expect(pushedScreen.sliceText(headerRows + 4, 0, 100)).toContain("› Next turn prompt");
 
 			scroll.scrollTo(turn2Start + 4, { disableFollow: true });
 			const turn2Pinned = harness.screen();
-			expect(turn2Pinned.sliceText(0, 0, 99).trim()).toBe("");
-			expect(turn2Pinned.sliceText(1, 0, 99)).toContain("› Next turn prompt");
-			expect(turn2Pinned.sliceText(1, 0, 99).trimEnd().endsWith("10:30")).toBe(true);
+			expect(turn2Pinned.sliceText(headerRows + 0, 0, 100).trim()).toBe("");
+			expect(turn2Pinned.sliceText(headerRows + 1, 0, 100)).toContain("› Next turn prompt");
+			expect(turn2Pinned.sliceText(headerRows + 1, 0, 100).trimEnd().endsWith("10:30")).toBe(true);
 			expect(
-				Array.from({ length: 4 }, (_, r) => turn2Pinned.sliceText(r, 0, 99)).join("\n"),
+				Array.from({ length: 4 }, (_, r) => turn2Pinned.sliceText(headerRows + r, 0, 100)).join("\n"),
 			).not.toContain("Line one of multi-line user prompt");
 		},
 	);
@@ -495,6 +471,7 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			],
 		});
 
+		const headerRows = 3;
 		const scroll = getActiveHostRuntime()!.scroll!;
 		const rail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
 		const turn1Start = rail.offsetOf(0);
@@ -503,10 +480,10 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 		for (let offset = turn1Start + 1; offset < turn1Start + 14; offset += 1) {
 			scroll.scrollTo(offset, { disableFollow: true });
 			const frame = harness.renderFrame();
-			const rowIdx = frame.findIndex((line, idx) => idx >= 3 && line.includes("\x1b_G"));
-			if (rowIdx >= 4) {
-				kittyDocRow = offset + rowIdx;
-				expect(frame.slice(0, 3).some((line) => line.includes("\x1b_G"))).toBe(false);
+			const rowIdx = frame.findIndex((line, idx) => idx >= headerRows + 3 && line.includes("\x1b_G"));
+			if (rowIdx >= headerRows + 4) {
+				kittyDocRow = offset + (rowIdx - headerRows);
+				expect(frame.slice(headerRows, headerRows + 3).some((line) => line.includes("\x1b_G"))).toBe(false);
 				break;
 			}
 		}
@@ -515,24 +492,24 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 		/* При перекрытии верхних 2 строк 6-строчной Kitty-картинки остаётся r=4, y=36, h=72 */
 		scroll.scrollTo(kittyDocRow - 1, { disableFollow: true });
 		const partiallyCovered2 = harness.renderFrame();
-		expect(partiallyCovered2.slice(0, 3).some((line) => line.includes("\x1b_G"))).toBe(false);
-		expect(stripTerminalSequences(partiallyCovered2[1]!)).toContain("› Show chart");
-		expect(partiallyCovered2[3]).toContain("\x1b_G");
-		expect(partiallyCovered2[3]).toContain("r=4");
-		expect(partiallyCovered2[3]).toContain("y=36");
-		expect(partiallyCovered2[3]).toContain("h=72");
+		expect(partiallyCovered2.slice(headerRows, headerRows + 3).some((line) => line.includes("\x1b_G"))).toBe(false);
+		expect(stripTerminalSequences(partiallyCovered2[headerRows + 1]!)).toContain("› Show chart");
+		expect(partiallyCovered2[headerRows + 3]).toContain("\x1b_G");
+		expect(partiallyCovered2[headerRows + 3]).toContain("r=4");
+		expect(partiallyCovered2[headerRows + 3]).toContain("y=36");
+		expect(partiallyCovered2[headerRows + 3]).toContain("h=72");
 
 		scroll.scrollTo(kittyDocRow + 1, { disableFollow: true });
 		const partiallyCovered4 = harness.renderFrame();
-		expect(partiallyCovered4.slice(0, 3).some((line) => line.includes("\x1b_G"))).toBe(false);
-		expect(partiallyCovered4[3]).toContain("\x1b_G");
-		expect(partiallyCovered4[3]).toContain("r=2");
-		expect(partiallyCovered4[3]).toContain("y=72");
-		expect(partiallyCovered4[3]).toContain("h=36");
+		expect(partiallyCovered4.slice(headerRows, headerRows + 3).some((line) => line.includes("\x1b_G"))).toBe(false);
+		expect(partiallyCovered4[headerRows + 3]).toContain("\x1b_G");
+		expect(partiallyCovered4[headerRows + 3]).toContain("r=2");
+		expect(partiallyCovered4[headerRows + 3]).toContain("y=72");
+		expect(partiallyCovered4[headerRows + 3]).toContain("h=36");
 
 		scroll.scrollTo(kittyDocRow + 3, { disableFollow: true });
 		const itermBleedFrame = harness.renderFrame();
-		expect(itermBleedFrame[3]).not.toContain("\x1b]1337;File=");
+		expect(itermBleedFrame[headerRows + 3]).not.toContain("\x1b]1337;File=");
 	});
 
 	it("prevents applySelection highlight bleed onto composited Sticky Prompt and Outline Rail while highlighting uncovered transcript text", async () => {
@@ -554,12 +531,13 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 		await harness.submitInput("Select response lines");
 		await harness.submitInput("Second turn");
 
+		const headerRows = 3;
 		const scroll = getActiveHostRuntime()!.scroll!;
 		const rail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
 		scroll.scrollTo(rail.offsetOf(0) + 2, { disableFollow: true });
 		harness.flushFrame();
 
-		await harness.mouseDrag(2, 4, 96, 8, { steps: 3 });
+		await harness.mouseDrag(4, headerRows + 4, 97, headerRows + 8, { steps: 3 });
 
 		scroll.scrollTo(rail.offsetOf(0) + 6, { disableFollow: true });
 		const selectedScreen = harness.screen();
@@ -567,36 +545,33 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 
 		const hasUncoveredInverse = Array.from(
 			{ length: 80 },
-			(_, c) => selectedScreen.cellAt(3, c)?.inverse === true,
+			(_, c) => selectedScreen.cellAt(headerRows + 3, c)?.inverse === true,
 		).some(Boolean);
 		expect(hasUncoveredInverse).toBe(true);
 
-		for (let r = 0; r < 3; r += 1) {
-			for (let c = 0; c < 97; c += 1) {
+		for (let r = headerRows; r < headerRows + 3; r += 1) {
+			for (let c = 0; c < 98; c += 1) {
 				expect(selectedScreen.cellAt(r, c)?.inverse).toBe(false);
 			}
 		}
 		const geo = getRailGeometry();
-		for (let r = geo.upY; r <= geo.downY; r += 1) {
-			expect(selectedScreen.cellAt(r, 97)?.inverse).toBe(false);
+		for (let r = headerRows + geo.upY; r <= headerRows + geo.downY; r += 1) {
 			expect(selectedScreen.cellAt(r, 98)?.inverse).toBe(false);
-		}
-		for (let r = 0; r < vpHeight; r += 1) {
 			expect(selectedScreen.cellAt(r, 99)?.inverse).toBe(false);
 		}
-		await harness.mouseMove(97, geo.ticksY);
+		await harness.mouseMove(99, headerRows + geo.ticksY);
 		const popupScreen = harness.screen();
 		const topBoxHit = popupScreen.findText("╭─");
 		expect(topBoxHit).toBeDefined();
 
 		const leftOfPopupSelected = Array.from(
 			{ length: Math.max(0, topBoxHit!.col - 2) },
-			(_, c) => popupScreen.cellAt(4, c)?.inverse === true,
+			(_, c) => popupScreen.cellAt(headerRows + 4, c)?.inverse === true,
 		).some(Boolean);
 		expect(leftOfPopupSelected).toBe(true);
 
-		for (let r = topBoxHit!.row; r < vpHeight; r += 1) {
-			const rowSlice = popupScreen.sliceText(r, topBoxHit!.col, 96);
+		for (let r = topBoxHit!.row; r < headerRows + vpHeight; r += 1) {
+			const rowSlice = popupScreen.sliceText(r, topBoxHit!.col, 98);
 			const endIdx = rowSlice.indexOf("╯") !== -1 ? rowSlice.indexOf("╯") : rowSlice.indexOf("│", 1);
 			if (endIdx === -1) break;
 			for (let c = topBoxHit!.col; c <= topBoxHit!.col + endIdx; c += 1) {
@@ -630,6 +605,7 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 		await harness.submitDraft();
 		await harness.submitInput("Beta target turn");
 
+		const headerRows = 3;
 		const scroll = getActiveHostRuntime()!.scroll!;
 		const rail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
 		const turn1Start = rail.offsetOf(0);
@@ -637,52 +613,52 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 		scroll.scrollTo(turn1Start + 1, { disableFollow: true });
 		const thoughtWhenOpen = harness.screen().findText("Thought");
 		expect(thoughtWhenOpen).toBeDefined();
-		const thoughtDocRow = scroll.scrollTop + thoughtWhenOpen!.row;
+		const thoughtDocRow = scroll.scrollTop + (thoughtWhenOpen!.row - headerRows);
 
 		scroll.scrollTo(thoughtDocRow - 2, { disableFollow: true });
 		harness.flushFrame();
 
-		await harness.mouseMove(8, 2);
-		await harness.mouseClick(8, 2);
+		await harness.mouseMove(8, headerRows + 2);
+		await harness.mouseClick(8, headerRows + 2);
 		const afterStickyExpand = harness.screen().text();
 		expect(afterStickyExpand).toContain("Alpha line 4");
 		expect(afterStickyExpand).not.toContain("Underlying hidden reasoning line");
 
-		await harness.mouseClick(8, 2);
+		await harness.mouseClick(8, headerRows + 2);
 
 		const beforeStickyWheel = scroll.scrollTop;
-		await harness.mouseWheel("down", 15, 2, 1);
+		await harness.mouseWheel("down", 15, headerRows + 2, 1);
 		expect(scroll.scrollTop).toBeGreaterThan(beforeStickyWheel);
 
 		scroll.scrollTo(turn1Start + 1, { disableFollow: true });
 		const uncoveredThought = harness.screen().findText("Thought");
 		expect(uncoveredThought).toBeDefined();
-		expect(uncoveredThought!.row).toBeGreaterThanOrEqual(3);
+		expect(uncoveredThought!.row).toBeGreaterThanOrEqual(headerRows + 3);
 		await harness.mouseClick(uncoveredThought!.col + 1, uncoveredThought!.row);
 		expect(harness.screen().text()).toContain("Underlying hidden reasoning line");
 
 		scroll.scrollTo(turn1Start + 8, { disableFollow: true });
 		harness.flushFrame();
 		const geo = getRailGeometry();
-		await harness.mouseMove(97, geo.ticksY + 1);
+		await harness.mouseMove(99, headerRows + geo.ticksY + 1);
 		expect(harness.screen().text()).toContain("Beta target turn");
 
 		const beforeRailWheel = scroll.scrollTop;
-		await harness.mouseWheel("down", 97, geo.ticksY + 1, 1);
+		await harness.mouseWheel("down", 99, headerRows + geo.ticksY + 1, 1);
 		expect(scroll.scrollTop).toBeGreaterThan(beforeRailWheel);
 
-		await harness.mouseClick(97, getRailGeometry().ticksY);
+		await harness.mouseClick(99, headerRows + getRailGeometry().ticksY);
 		expect(scroll.scrollTop).toBe(turn1Start);
 
 		await harness.mouseMove(20, 8);
 		const afterLeaveText = Array.from({ length: scroll.viewportHeight }, (_, r) =>
-			harness!.screen().sliceText(r, 40, 96),
+			harness!.screen().sliceText(headerRows + r, 40, 97),
 		).join("\n");
 		expect(afterLeaveText).not.toContain("╭─");
 
 		await harness.pressKey("\x0b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
-		await harness.mouseMove(97, getRailGeometry().ticksY + 1);
+		await harness.mouseMove(99, headerRows + getRailGeometry().ticksY + 1);
 		expect(harness.screen().text()).toContain("Command Palette");
 		expect(harness.screen().text()).not.toContain("Beta target turn");
 		await harness.pressKey("\x1b");
@@ -711,6 +687,7 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 		expect(harness.screen().width).toBe(8);
 		await harness.resize(80, 18);
 
+		const headerRows = 3;
 		const scroll = getActiveHostRuntime()!.scroll!;
 		scroll.scrollTo(0, { disableFollow: true });
 		expect(harness.screen().text()).toContain("日本語テスト");
@@ -721,49 +698,37 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 
 		scroll.scrollTo(turn2Start - 3, { disableFollow: true });
 		const midPushScreen = harness.screen();
-		expect(midPushScreen.sliceText(0, 0, 79)).toContain("Кириллица строка 2");
-		expect(midPushScreen.sliceText(4, 0, 79)).toContain("23:59");
-		expect(midPushScreen.rowText(4).indexOf("23:59")).toBe(73);
+		expect(midPushScreen.sliceText(headerRows + 0, 0, 80)).toContain("Кириллица строка 2");
+		expect(midPushScreen.sliceText(headerRows + 4, 0, 80)).toContain("23:59");
 
 		const railGeoOnCard = rail.geometry!;
 		scroll.scrollTo(Math.max(0, turn2Start - railGeoOnCard.ticksY), { disableFollow: true });
 		const railOverCard = harness.screen();
-		const cardBgLeft = railOverCard.cellAt(railGeoOnCard.ticksY, 10)?.bg;
-		const railBgOverCard = railOverCard.cellAt(railGeoOnCard.ticksY, 78)?.bg;
+		const cardBgLeft = railOverCard.cellAt(headerRows + railGeoOnCard.ticksY, 10)?.bg;
+		const railBgOverCard = railOverCard.cellAt(headerRows + railGeoOnCard.ticksY, 79)?.bg;
 		expect(cardBgLeft?.kind).toBe("rgb");
-		expect(railBgOverCard).toEqual(cardBgLeft);
+		expect(railBgOverCard?.kind).toBe("default");
 
-		await harness.mouseClick(10, 1);
+		await harness.mouseClick(10, headerRows + 1);
 		scroll.scrollTo(turn1Start + 6, { disableFollow: true });
 		const expandedAfterMidPush = Array.from({ length: 6 }, (_, r) =>
-			harness!.screen().rowText(r),
+			harness!.screen().rowText(headerRows + r),
 		).join("\n");
 		expect(expandedAfterMidPush).toContain("Hidden line 4");
 
 		await harness.submitInput("/outline");
-		vi.useFakeTimers();
 		scroll.scrollTo(turn1Start + 5, { disableFollow: true });
 		scroll.scrollTo(turn1Start + 6, { disableFollow: true });
 		const railOffScreen = harness.screen();
 		const vpHeight = scroll.viewportHeight;
 		const railOffCols = Array.from({ length: vpHeight }, (_, r) =>
-			railOffScreen.sliceText(r, 77, 79),
+			railOffScreen.sliceText(headerRows + r, 78, 80),
 		);
-		expect(railOffCols.some((c) => c === " ▲" || c === "──")).toBe(false);
+		expect(railOffCols.some((c) => c === " ▲" || c === "━━")).toBe(false);
+		expect(scroll.scrollbar).toBe("hidden");
 
-		const scrollbarColOff = Array.from({ length: vpHeight }, (_, r) =>
-			railOffScreen.cellAt(r, 79)?.char,
-		);
-		expect(scrollbarColOff.some((ch) => ch === "┃" || ch === "│" || ch === "█")).toBe(true);
-
-		const tsColVisible = railOffScreen.rowText(1).indexOf("00:00");
+		const tsColVisible = railOffScreen.rowText(headerRows + 1).indexOf("00:00");
 		expect(tsColVisible).toBeGreaterThan(60);
-
-		vi.advanceTimersByTime(3000);
-		vi.useRealTimers();
-		expect(scroll.isScrollbarVisible).toBe(false);
-		const tsColHidden = harness.screen().rowText(1).indexOf("00:00");
-		expect(tsColHidden).toBe(tsColVisible);
 
 		await harness.dispose();
 		harness = await createInteractiveHarness({
@@ -778,12 +743,12 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 		await harness.submitInput("/sticky always");
 		getActiveHostRuntime()!.scroll!.scrollTo(0, { disableFollow: true });
 		const shortCollapsed = harness.screen();
-		expect(shortCollapsed.rowText(3)).toContain("Line 3…");
+		expect(shortCollapsed.rowText(headerRows + 3)).toContain("Line 3 · +1 line (Alt+s)");
 
-		await harness.mouseClick(79, 1);
+		await harness.mouseClick(75, headerRows + 1);
 		const shortExpanded = harness.screen();
-		expect(shortExpanded.rowText(3)).not.toContain("…");
-		expect(shortExpanded.rowText(4)).toContain("Hidden line 4");
+		expect(shortExpanded.rowText(headerRows + 3)).not.toContain("(Alt+s)");
+		expect(shortExpanded.rowText(headerRows + 4)).toContain("Hidden line 4");
 	});
 
 	it("renders Outline Rail, Hover Popup, and Sticky Prompt together in narrow 46-column split panes", async () => {
@@ -801,30 +766,30 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			],
 		});
 
+		const headerRows = 3;
 		await harness.mouseWheel("up", 20, 10, 5);
 		const scrolled = harness.screen();
-		expect(scrolled.sliceText(1, 0, 45)).toContain("First split-pane prompt");
-		expect(scrolled.rowText(1).indexOf("10:15")).toBe(39);
+		expect(scrolled.sliceText(headerRows + 1, 0, 46)).toContain("First split-pane prompt");
+		expect(scrolled.rowText(headerRows + 1).trimEnd().endsWith("10:15")).toBe(true);
 
 		const railSlices = Array.from({ length: scrolled.height }, (_, r) =>
-			scrolled.sliceText(r, 43, 45),
+			scrolled.sliceText(r, 44, 46),
 		);
 		const upRow = railSlices.findIndex((s) => s === " ▲");
 		const downRow = railSlices.findIndex((s) => s === " ▼");
-		expect(upRow).toBeGreaterThanOrEqual(0);
+		expect(upRow).toBeGreaterThanOrEqual(headerRows);
 		expect(downRow).toBeGreaterThan(upRow);
-		expect(railSlices.slice(upRow + 1, downRow)).toEqual([" ─", "──"]);
+		expect(railSlices.slice(upRow + 1, downRow)).toEqual([" ─", "━━"]);
 
 		const rail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
-		await harness.mouseMove(44, upRow + 1);
+		await harness.mouseMove(45, upRow + 1);
 		const hovered = harness.screen();
-		expect(hovered.sliceText(upRow, 43, 45)).toBe(" ▲");
-		expect(hovered.sliceText(upRow + 1, 43, 45)).toBe("━━");
-		expect(hovered.sliceText(downRow, 43, 45)).toBe(" ▼");
-		expect(hovered.text()).toContain("10:15");
+		expect(hovered.sliceText(upRow, 44, 46)).toBe(" ▲");
+		expect(hovered.sliceText(upRow + 1, 44, 46)).toBe("━━");
+		expect(hovered.sliceText(downRow, 44, 46)).toBe(" ▼");
 		expect(hovered.text()).toContain("First split-pane");
 
-		await harness.mouseClick(44, upRow + 1);
+		await harness.mouseClick(45, upRow + 1);
 		expect(getActiveHostRuntime()!.scroll!.scrollTop).toBe(rail.offsetOf(0));
 	});
 
@@ -849,16 +814,17 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			],
 		});
 
+		const headerRows = 3;
 		const lightScroll = getActiveHostRuntime()!.scroll!;
 		const lightRail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
 		lightScroll.scrollTo(2, { disableFollow: true });
 		const lightTextScreen = harness.screen();
 		const lightGeo = lightRail.geometry!;
 		expect(lightGeo).toBeDefined();
-		for (let r = lightGeo.upY; r <= lightGeo.downY; r++) {
+		for (let r = headerRows + lightGeo.upY; r <= headerRows + lightGeo.downY; r++) {
 			const leftBg = lightTextScreen.cellAt(r, 4)?.bg;
+			expect(lightTextScreen.cellAt(r, 45)?.bg).toEqual(leftBg);
 			expect(lightTextScreen.cellAt(r, 44)?.bg).toEqual(leftBg);
-			expect(lightTextScreen.cellAt(r, 43)?.bg).toEqual(leftBg);
 		}
 
 		await harness.dispose();
@@ -888,7 +854,6 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 
 		const darkScroll = getActiveHostRuntime()!.scroll!;
 		const darkRail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
-		let sawCodeCardUnderTwoColTick = false;
 		for (let top = 0; top <= 8; top++) {
 			darkScroll.scrollTo(top, { disableFollow: true });
 			const withRail = harness.screen();
@@ -902,21 +867,13 @@ describe("Viewport chrome & refined user prompt cards (real InteractiveMode)", (
 			await harness.submitInput("/outline");
 			darkScroll.scrollTo(top, { disableFollow: true });
 
-			for (let r = geo.upY; r <= geo.downY; r++) {
-				expect(withRail.cellAt(r, 43)?.bg).toEqual(withoutRail.cellAt(r, 43)?.bg);
+			for (let r = headerRows + geo.upY; r <= headerRows + geo.downY; r++) {
 				expect(withRail.cellAt(r, 44)?.bg).toEqual(withoutRail.cellAt(r, 44)?.bg);
-				if (
-					withRail.sliceText(r, 43, 45) === "──" &&
-					withoutRail.cellAt(r, 43)?.bg.kind === "rgb" &&
-					withoutRail.cellAt(r, 44)?.bg.kind === "default"
-				) {
-					sawCodeCardUnderTwoColTick = true;
-				}
+				expect(withRail.cellAt(r, 45)?.bg).toEqual(withoutRail.cellAt(r, 45)?.bg);
 				if (withRail.rowText(r).trimStart().startsWith("Heading")) {
 					expect(withRail.cellAt(r, 20)?.underline).toBe(false);
 				}
 			}
 		}
-		expect(sawCodeCardUnderTwoColTick).toBe(true);
 	});
 });

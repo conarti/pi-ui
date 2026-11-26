@@ -273,7 +273,7 @@ export class ThinkingBlock implements Component {
 
 	render(width: number): string[] {
 		if (width <= 0) return [];
-		const outerPad = width >= 48 ? 2 : 1;
+		const outerPad = width >= 40 ? 4 : 2;
 		const margin = " ".repeat(outerPad);
 		const cappedWidth = Math.max(8, Math.min(width - outerPad * 2, MAX_THOUGHTS_WIDTH));
 		const textAvail = Math.max(4, cappedWidth - 2);
@@ -391,7 +391,7 @@ export function installAssistantTranscriptBlocks(): void {
 			self.contentContainer.clear();
 			const previousSlots: Array<{ kind: string; markdown: Markdown }> = self.markdownSlots ?? [];
 			self.markdownSlots = [];
-			const chatPad = Math.max(2, self.outputPad ?? 1);
+			const chatPad = 4;
 
 			const markdownBlock = (kind: string, text: string, create: () => Markdown) => {
 				const slot = previousSlots[self.markdownSlots.length];

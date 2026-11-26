@@ -25,6 +25,8 @@ const MAX_EXCERPT_LINES = 8;
 export interface PreviewContentSpec {
 	readonly title: string;
 	readonly lines: Array<{ text: string; muted?: boolean }>;
+	readonly allLines: Array<{ text: string; muted?: boolean }>;
+	readonly scrollable: boolean;
 }
 
 export function buildChipPreviewSpec(chip: SerializedPromptChip): PreviewContentSpec {
@@ -48,16 +50,17 @@ export function buildChipPreviewSpec(chip: SerializedPromptChip): PreviewContent
 		return {
 			title: `🖼 Image #${chip.number}`,
 			lines,
+			allLines: lines,
+			scrollable: false,
 		};
 	}
 
 	if (chip.kind === "paste") {
 		const rawLines = (chip.previewText || "").replace(/\t/g, "  ").split("\n");
-		const shown: Array<{ text: string; muted?: boolean }> = rawLines
-			.slice(0, MAX_EXCERPT_LINES)
-			.map((line) => ({
-				text: line.length > 0 ? line : " ",
-			}));
+		const allLines: Array<{ text: string; muted?: boolean }> = rawLines.map((line) => ({
+			text: line.length > 0 ? line : " ",
+		}));
+		const shown = allLines.slice(0, MAX_EXCERPT_LINES);
 		const remaining = Math.max(chip.lineCount, rawLines.length) - shown.length;
 		if (remaining > 0) {
 			shown.push({ text: `… (+${remaining} more ${remaining === 1 ? "line" : "lines"})`, muted: true });
@@ -69,15 +72,16 @@ export function buildChipPreviewSpec(chip: SerializedPromptChip): PreviewContent
 		return {
 			title: `📋 Pasted #${chip.number} · ${unitLabel}`,
 			lines: shown.length > 0 ? shown : [{ text: " " }],
+			allLines: allLines.length > 0 ? allLines : [{ text: " " }],
+			scrollable: allLines.length > MAX_EXCERPT_LINES,
 		};
 	}
 
 	const quoteLines = (chip.previewText || "").replace(/\t/g, "  ").split("\n");
-	const shown: Array<{ text: string; muted?: boolean }> = quoteLines
-		.slice(0, MAX_EXCERPT_LINES)
-		.map((line) => ({
-			text: line.length > 0 ? `│ ${line}` : "│",
-		}));
+	const allLines: Array<{ text: string; muted?: boolean }> = quoteLines.map((line) => ({
+		text: line.length > 0 ? `│ ${line}` : "│",
+	}));
+	const shown = allLines.slice(0, MAX_EXCERPT_LINES);
 	const remaining = Math.max(chip.lineCount, quoteLines.length) - shown.length;
 	if (remaining > 0) {
 		shown.push({ text: `… (+${remaining} more ${remaining === 1 ? "line" : "lines"})`, muted: true });
@@ -86,18 +90,43 @@ export function buildChipPreviewSpec(chip: SerializedPromptChip): PreviewContent
 	return {
 		title: `❝ Quote #${chip.number} · ${chip.lineCount} ${unit}`,
 		lines: shown.length > 0 ? shown : [{ text: " " }],
+		allLines: allLines.length > 0 ? allLines : [{ text: " " }],
+		scrollable: allLines.length > MAX_EXCERPT_LINES,
 	};
 }
 
 export class PromptChipPreviewPopup implements Component {
-	chip: SerializedPromptChip | undefined;
+	private currentChip: SerializedPromptChip | undefined;
+	scrollOffset = 0;
 	onDismiss?: () => void;
 
 	constructor(private readonly getTheme: () => Theme) {}
 
+	get chip(): SerializedPromptChip | undefined {
+		return this.currentChip;
+	}
+
+	set chip(next: SerializedPromptChip | undefined) {
+		if (this.currentChip?.id !== next?.id || this.currentChip?.token !== next?.token) {
+			this.scrollOffset = 0;
+		}
+		this.currentChip = next;
+	}
+
 	invalidate(): void {}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (event.type === "wheel" && event.wheelDelta && this.currentChip) {
+			const spec = buildChipPreviewSpec(this.currentChip);
+			if (spec.scrollable) {
+				const maxScroll = Math.max(0, spec.allLines.length - MAX_EXCERPT_LINES);
+				const next = Math.max(0, Math.min(maxScroll, this.scrollOffset + event.wheelDelta));
+				const changed = next !== this.scrollOffset;
+				this.scrollOffset = next;
+				return { handled: true, render: changed };
+			}
+			return undefined;
+		}
 		if (event.type === "press" && event.button === "left") {
 			return { handled: true, render: false };
 		}
@@ -109,20 +138,21 @@ export class PromptChipPreviewPopup implements Component {
 	}
 
 	computeDimensions(termCols: number): { width: number; height: number } {
-		if (!this.chip) return { width: 24, height: 3 };
-		const spec = buildChipPreviewSpec(this.chip);
+		if (!this.currentChip) return { width: 24, height: 3 };
+		const spec = buildChipPreviewSpec(this.currentChip);
 		const maxAllowed = Math.max(20, Math.min(68, termCols - 4));
 		const naturalInner = Math.max(
 			visibleWidth(spec.title) + 4,
-			...spec.lines.map((l) => visibleWidth(l.text) + 2),
+			...spec.allLines.map((l) => visibleWidth(l.text) + 2),
 		);
 		const width = Math.max(20, Math.min(maxAllowed, naturalInner + 2));
-		const height = spec.lines.length + 2;
+		const visibleRows = spec.scrollable ? MAX_EXCERPT_LINES + 1 : spec.lines.length;
+		const height = visibleRows + 2;
 		return { width, height };
 	}
 
 	render(width: number): string[] {
-		if (!this.chip) return [];
+		if (!this.currentChip) return [];
 		const theme = this.getTheme();
 		const light = isLightTheme(theme);
 		const palette = getThemeSurfacePalette(theme);
@@ -136,8 +166,33 @@ export class PromptChipPreviewPopup implements Component {
 		const mutedRgb: RgbTuple = light ? [100, 116, 139] : [136, 152, 176];
 		const popupBg = palette.popupSurfaceBg;
 
-		const spec = buildChipPreviewSpec(this.chip);
+		const spec = buildChipPreviewSpec(this.currentChip);
 		const b = (s: string) => fgRgb(borderRgb, s);
+
+		let renderRows: Array<{ text: string; muted?: boolean }>;
+		if (spec.scrollable) {
+			const maxScroll = Math.max(0, spec.allLines.length - MAX_EXCERPT_LINES);
+			this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll));
+			const windowRows = spec.allLines.slice(this.scrollOffset, this.scrollOffset + MAX_EXCERPT_LINES);
+			const remainingBelow = Math.max(
+				0,
+				spec.allLines.length - (this.scrollOffset + windowRows.length),
+			);
+			const statusParts: string[] = [];
+			if (this.scrollOffset > 0) statusParts.push(`↑ ${this.scrollOffset}`);
+			if (remainingBelow > 0) {
+				statusParts.push(`… (+${remainingBelow} more ${remainingBelow === 1 ? "line" : "lines"})`);
+			}
+			renderRows = [
+				...windowRows,
+				{
+					text: statusParts.length > 0 ? statusParts.join(" · ") : "End of preview",
+					muted: true,
+				},
+			];
+		} else {
+			renderRows = spec.lines;
+		}
 
 		const clippedTitle = truncateToWidth(` ${spec.title} `, Math.max(1, innerSpan - 2), "…");
 		const titleW = visibleWidth(clippedTitle);
@@ -150,7 +205,7 @@ export class PromptChipPreviewPopup implements Component {
 		);
 
 		const out: string[] = [topRow];
-		for (const row of spec.lines) {
+		for (const row of renderRows) {
 			const clipped = truncateToWidth(row.text, textWidth, "…");
 			const pad = " ".repeat(Math.max(0, textWidth - visibleWidth(clipped)));
 			const colored = fgRgb(row.muted ? mutedRgb : textRgb, `${clipped}${pad}`);

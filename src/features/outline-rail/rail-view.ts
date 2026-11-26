@@ -9,7 +9,11 @@ import {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
-import { getThemeSurfacePalette, paintThemeSurfaceRow } from "../../shared/ansi.ts";
+import {
+	getThemeSurfacePalette,
+	paintThemeSurfaceRow,
+	themeFgRgb,
+} from "../../shared/ansi.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import { sanitizeTurnText, type IndexedTurn, type TranscriptTurnIndex } from "../../shared/turn-index.ts";
@@ -177,28 +181,20 @@ export class OutlinePreviewPopup implements Component {
 		const safeWidth = Math.max(6, width);
 		const inner = Math.max(4, safeWidth - 2);
 		const textW = Math.max(1, inner - 2);
-		const time = this.time.trim();
 		const body = wrapPreviewLines(this.preview, textW);
 		const lines = body.length ? body : [" "];
 
-		const edge = (s: string) => th.fg("borderMuted", s);
+		const edge = (s: string) => themeFgRgb(th, palette.border, s);
 		const fit = (s: string) => {
 			const clipped = truncateToWidth(s, textW, "");
 			return clipped + " ".repeat(Math.max(0, textW - visibleWidth(clipped)));
 		};
-		const bodyRow = (s: string) => `${edge("│")} ${th.fg("text", fit(s))} ${edge("│")}`;
 		const paintCardRow = (s: string) =>
 			paintThemeSurfaceRow(th, s, safeWidth, palette.popupSurfaceBg);
 
-		const out: string[] = [];
-		if (time) {
-			const clippedTime = truncateToWidth(time, safeWidth, "");
-			const padLeft = " ".repeat(Math.max(0, safeWidth - visibleWidth(clippedTime)));
-			out.push(`${padLeft}${th.fg("muted", clippedTime)}`);
-		}
-		out.push(paintCardRow(edge(`╭${"─".repeat(inner)}╮`)));
+		const out: string[] = [paintCardRow(edge(`╭${"─".repeat(inner)}╮`))];
 		for (const line of lines) {
-			out.push(paintCardRow(bodyRow(line)));
+			out.push(paintCardRow(`${edge("│")} ${th.fg("text", fit(line))} ${edge("│")}`));
 		}
 		out.push(paintCardRow(edge(`╰${"─".repeat(inner)}╯`)));
 		return out;
@@ -374,10 +370,13 @@ export class OutlineRailComponent implements Component {
 			}
 		}
 
-		const paint = (y: number, glyph: string, tone: "dim" | "muted" | "primary") => {
+		const palette = getThemeSurfacePalette(th);
+		const paint = (y: number, glyph: string, tone: "dim" | "muted" | "primary" | "hover") => {
 			if (y < 0 || y >= height) return;
 			const padded = padRailCell(glyph);
-			if (tone === "primary") {
+			if (tone === "hover") {
+				lines[y] = themeFgRgb(th, palette.accentBright, padded);
+			} else if (tone === "primary") {
 				lines[y] = th.fg("text", padded);
 			} else if (tone === "muted") {
 				lines[y] = th.fg("muted", padded);
@@ -388,8 +387,8 @@ export class OutlineRailComponent implements Component {
 
 		const upOn = geo.upTarget !== undefined;
 		const downOn = geo.downTarget !== undefined;
-		paint(geo.upY, "▲", this.hovered?.kind === "up" && upOn ? "primary" : upOn ? "muted" : "dim");
-		paint(geo.downY, "▼", this.hovered?.kind === "down" && downOn ? "primary" : downOn ? "muted" : "dim");
+		paint(geo.upY, "▲", this.hovered?.kind === "up" && upOn ? "hover" : upOn ? "muted" : "dim");
+		paint(geo.downY, "▼", this.hovered?.kind === "down" && downOn ? "hover" : downOn ? "muted" : "dim");
 
 		for (let i = 0; i < geo.windowEnd - geo.windowStart; i++) {
 			const turn = geo.windowStart + i;
@@ -398,8 +397,8 @@ export class OutlineRailComponent implements Component {
 			const isHovered = this.hovered?.kind === "tick" && this.hovered.turn === turn;
 			paint(
 				geo.ticksY + i,
-				isHovered ? "━━" : isActive ? "──" : "─",
-				isHovered || isActive ? "primary" : "dim",
+				isHovered || isActive ? "━━" : "─",
+				isHovered ? "hover" : isActive ? "primary" : "dim",
 			);
 		}
 

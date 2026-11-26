@@ -209,8 +209,8 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		expect(readyScreen.text()).not.toContain(COMPOSER_PLACEHOLDER);
 		const sugHit = readyScreen.findText("Запусти полный набор");
 		expect(sugHit).toBeDefined();
-		expect(readyScreen.cellAt(sugHit!.row, 0)?.char).toBe("│");
-		expect(readyScreen.cellAt(sugHit!.row, readyScreen.width - 1)?.char).toBe("│");
+		expect(readyScreen.cellAt(sugHit!.row, 2)?.char).toBe("│");
+		expect(readyScreen.cellAt(sugHit!.row, readyScreen.width - 3)?.char).toBe("│");
 		expect(readyScreen.cellAt(sugHit!.row, sugHit!.col + 1)?.fg).toEqual(dimFgColor);
 
 		await harness.resize(44, 26);
@@ -218,9 +218,9 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		const narrowHit = narrowScreen.findText("Запусти полный");
 		expect(narrowHit).toBeDefined();
 		const narrowRow = narrowScreen.rowText(narrowHit!.row);
-		expect(narrowRow.startsWith("│ › Запусти")).toBe(true);
-		expect(narrowRow.endsWith("… │")).toBe(true);
-		expect(narrowScreen.cellAt(narrowHit!.row, narrowScreen.width - 1)?.char).toBe("│");
+		expect(narrowRow.startsWith("  │ › Запусти")).toBe(true);
+		expect(narrowRow.endsWith("… │  ")).toBe(true);
+		expect(narrowScreen.cellAt(narrowHit!.row, narrowScreen.width - 3)?.char).toBe("│");
 
 		harness.session.setThinkingLevel("off");
 		await harness.resize(84, 26);

@@ -670,7 +670,7 @@ describe("Tool Density: real InteractiveMode integration", () => {
 			cwd: projDir,
 			projectTrusted: true,
 			width: 110,
-			height: 48,
+			height: 54,
 			customTools: [fastBash, fastPs, fastCm, mcpLookup],
 			responses: [
 				fauxAssistantMessage(

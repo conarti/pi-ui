@@ -10,6 +10,7 @@ export const EN_MESSAGES = {
 	"composer.pill.plan": "Plan",
 	"composer.pill.planWithComments": "Plan ({count})",
 	"header.menu": "⌃K menu",
+	"header.copiedPath": "Copied path: {path}",
 
 	/* Session Mode & Preflight */
 	"sessionMode.alwaysApprove.label": "Always-approve",
@@ -165,8 +166,11 @@ export const EN_MESSAGES = {
 	"context.compactDone": "Context compacted successfully",
 
 	/* Quotes */
+	"quotes.selectionPopup.copy": "Copy",
+	"quotes.selectionPopup.copied": "✓ Copied",
+	"quotes.selectionPopup.quoteAction": "Quote · Alt+Q",
 	"quotes.selectionPopup.word": "Quote",
-	"quotes.selectionPopup.label": "╭ ❝ Quote ╮",
+	"quotes.selectionPopup.label": "[Copy]  [Quote · Alt+Q]",
 	"quotes.shortcut": "Insert selected text or clipboard as a quote chip",
 	"quotes.command.quote": "Quote an assistant reply from history (/quote [n], default 1)",
 	"quotes.command.quotes": "Inspect, edit, and clear active draft quotes",

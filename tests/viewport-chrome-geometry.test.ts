@@ -1,10 +1,18 @@
+import { homedir } from "node:os";
 import { describe, expect, it } from "vitest";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import {
+	formatTildeWorkspacePath,
+	renderHeaderContextHoverBar,
+} from "../src/features/chrome/header.ts";
 import {
 	computeOutlineGeometry,
 	computeRailViewport,
 	wrapPreviewLines,
 } from "../src/features/outline-rail/rail-view.ts";
+import { getThemeSurfacePalette } from "../src/shared/ansi.ts";
 import {
+	computeOuterCanvasMargin,
 	computeStickyPushOffset,
 	computeTranscriptContentWidth,
 	cropKittyLineBelowSticky,
@@ -12,6 +20,7 @@ import {
 	stripInlineImageSequences,
 } from "../src/shared/fullscreen-layout.ts";
 import { selectStickyTurn, type IndexedTurn } from "../src/shared/turn-index.ts";
+import { loadPackageThemes } from "./harness/index.ts";
 
 function makeIndexedTurn(
 	index: number,
@@ -197,5 +206,33 @@ describe("Viewport chrome pure geometry and push-offset math", () => {
 		expect(manyGeo!.downY).toBe(7);
 
 		expect(wrapPreviewLines("   \n\t  ", 20)).toEqual([]);
+	});
+
+	it("computes symmetric outer canvas margins, tilde workspace paths, and fixed-width Header hover context bars without width shift", async () => {
+		expect(computeOuterCanvasMargin(80)).toBe(2);
+		expect(computeOuterCanvasMargin(40)).toBe(2);
+		expect(computeOuterCanvasMargin(39)).toBe(0);
+
+		const home = homedir();
+		expect(formatTildeWorkspacePath(home)).toBe("~");
+		expect(formatTildeWorkspacePath(`${home}/projects/pi-ui`)).toBe("~/projects/pi-ui");
+		expect(formatTildeWorkspacePath("/tmp/non-home-path")).toBe("/tmp/non-home-path");
+
+		const { dark, light } = await loadPackageThemes();
+		for (const theme of [dark, light]) {
+			const pal = getThemeSurfacePalette(theme);
+			for (const pct of [0, 10.3, 25, 87.5, 100]) {
+				for (const slotW of [11, 12, 14]) {
+					const bar = renderHeaderContextHoverBar(
+						pct,
+						slotW,
+						pal.accentBright,
+						pal.codeHeaderBg,
+						theme,
+					);
+					expect(visibleWidth(bar)).toBe(slotW);
+				}
+			}
+		}
 	});
 });
