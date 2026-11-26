@@ -30,6 +30,11 @@ import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import { loadPiUiUserConfig } from "../../shared/pi-ui-config.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import { getSessionWorkflow, MODE_META } from "../../shared/session-workflow.ts";
+import {
+	isSlotOwnedByPiUi,
+	PI_UI_OWNER_ID,
+	registerSlotOwnershipChangeListener,
+} from "../../shared/slot-arbitration.ts";
 import { runAppAction, setAppActionRunner, setRequestRender } from "../../shared/ui-action-bridge.ts";
 import { setSessionMode } from "../plan-studio/index.ts";
 import { showPlanStudio } from "../plan-studio/studio-overlay.ts";
@@ -934,15 +939,15 @@ export class PiUiComposerEditor extends CustomEditor {
 			!isKeyRelease(data) &&
 			!hasBlockingModalOverlay(this.tui)
 		) {
-			if (matchesLayoutChord(data, "ctrl+l")) {
+			if (matchesLayoutChord(data, "ctrl+l") && isSlotOwnedByPiUi("shortcut:ctrl+l")) {
 				openComposerPopover(this.deps.pi, this.deps.ctx, "model");
 				return;
 			}
-			if (matchesLayoutChord(data, "alt+t")) {
+			if (matchesLayoutChord(data, "alt+t") && isSlotOwnedByPiUi("shortcut:alt+t")) {
 				openComposerPopover(this.deps.pi, this.deps.ctx, "thinking");
 				return;
 			}
-			if (matchesLayoutChord(data, "alt+m")) {
+			if (matchesLayoutChord(data, "alt+m") && isSlotOwnedByPiUi("shortcut:alt+m")) {
 				openComposerPopover(this.deps.pi, this.deps.ctx, "mode");
 				return;
 			}
@@ -1927,6 +1932,14 @@ export function mountComposer(pi: ExtensionAPI, ctx: ExtensionContext): void {
 		[COMPOSER_FACTORY_ORIGIN]?: unknown;
 	};
 	factory[COMPOSER_FACTORY_ORIGIN] = previousFactory;
+
+	registerSlotOwnershipChangeListener("composer.editorSlot", (slotId, ownerId) => {
+		if (slotId !== "editor") return;
+		if (ownerId !== PI_UI_OWNER_ID) {
+			getActiveComposerEditor()?.dispose();
+			setActiveComposerEditor(undefined);
+		}
+	});
 
 	ctx.ui.setEditorComponent(factory);
 }

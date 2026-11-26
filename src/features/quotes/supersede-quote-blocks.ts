@@ -10,7 +10,7 @@ import {
 export { isConartiInternalRegistrationActive, withConartiInternalRegistration };
 
 const QUOTE_BLOCKS_PATH_RE =
-	/(?:^|[/\\]|npm:)pi-quote-blocks(?:$|[/\\])|[/\\]quote-blocks\.[cm]?[jt]s$/i;
+	/(?:^|[/\\]|npm:)pi-quote-blocks(?:$|[/\\]|\.[cm]?[jt]s$)|[/\\]quote-blocks\.[cm]?[jt]s$/i;
 const QUOTE_BLOCKS_WIDGET_KEY = "quote-blocks";
 const QUOTE_BLOCKS_STORE_SYMBOL = Symbol.for("pi.quoteBlocks.store");
 const GUARDED_APIS = new WeakSet<object>();

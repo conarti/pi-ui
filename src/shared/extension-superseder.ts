@@ -76,15 +76,22 @@ export function matchesExtensionSourcePath(ext: unknown, pathRegex: RegExp): boo
 	return candidates.some((candidate) => typeof candidate === "string" && pathRegex.test(candidate));
 }
 
-function neutralizeRunnerExtensions(runner: unknown): void {
+export function isSupersededExtension(ext: unknown): boolean {
+	if (!ext || typeof ext !== "object") return false;
+	for (const predicate of getPredicatesMap().values()) {
+		if (predicate(ext)) return true;
+	}
+	return false;
+}
+
+export function neutralizeRunnerExtensions(runner: unknown): void {
 	if (!runner || typeof runner !== "object") return;
 	const extensions = (runner as { extensions?: unknown[] }).extensions;
 	if (!Array.isArray(extensions)) return;
-	const predicates = [...getPredicatesMap().values()];
-	if (predicates.length === 0) return;
+	if (getPredicatesMap().size === 0) return;
 
 	for (const ext of extensions) {
-		if (!predicates.some((predicate) => predicate(ext))) continue;
+		if (!isSupersededExtension(ext)) continue;
 		const rec = ext as {
 			shortcuts?: Map<unknown, unknown>;
 			commands?: Map<unknown, unknown>;

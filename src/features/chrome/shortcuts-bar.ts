@@ -350,25 +350,13 @@ class ShortcutsBarComponent implements Component {
 	}
 }
 
-function isFooterOwnedByExternalExtension(): boolean {
-	const owner = loadPiUiUserConfig().slotOwners.footer;
-	return Boolean(owner && owner !== "@conarti/pi-ui" && owner !== "pi-ui");
-}
-
 export function mountShortcutsBar(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	if (ctx.mode !== "tui" || !ctx.hasUI) return;
 	const state = getBarSlotState();
 	state.pi = pi;
 	state.ctx = ctx;
 
-	if (isFooterOwnedByExternalExtension()) {
-		if (state.ownsFooter) {
-			state.ownsFooter = false;
-			ctx.ui.setFooter(undefined);
-		}
-		return;
-	}
-
+	/* Всегда регистрируем фабрику через Slot Arbitration, чтобы она кэшировалась для мгновенного live-переключения */
 	state.ownsFooter = true;
 	ctx.ui.setFooter((tui, _theme) => {
 		return new ShortcutsBarComponent(

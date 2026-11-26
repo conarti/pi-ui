@@ -34,6 +34,7 @@ import { registerToolCallsFeature } from "./features/tool-calls/index.ts";
 import { registerPromptChipsFeature } from "./features/prompt-chips/index.ts";
 import { registerPromptSuggestionFeature } from "./features/prompt-suggestion/index.ts";
 import { registerQuotesFeature } from "./features/quotes/index.ts";
+import { registerSlotArbitrationFeature } from "./features/slot-arbitration/index.ts";
 import { registerTranscriptFeature } from "./features/transcript/index.ts";
 import { acquireHostRuntime, disposeActiveHostRuntime } from "./shared/host-runtime.ts";
 import { t } from "./shared/i18n.ts";
@@ -86,64 +87,12 @@ function registerUnifiedConfigCommands(pi: ExtensionAPI): void {
 			);
 		},
 	});
-
-	pi.registerCommand("slots", {
-		description: t("slots.command"),
-		getArgumentCompletions: (prefix) => {
-			const typed = prefix.trimStart().toLowerCase();
-			const choices = ["status", "clear"];
-			const items = choices
-				.filter((choice) => choice.startsWith(typed) && choice !== typed.trimEnd())
-				.map((choice) => ({ value: choice, label: choice }));
-			return items.length > 0 ? items : null;
-		},
-		handler: async (args, ctx) => {
-			const trimmed = args.trim();
-			const parts = trimmed ? trimmed.split(/\s+/) : [];
-			const sub = parts[0]?.toLowerCase() ?? "";
-
-			if (sub === "" || sub === "status") {
-				const owners = loadPiUiUserConfig().slotOwners;
-				const pairs = Object.entries(owners);
-				if (pairs.length === 0) {
-					ctx.ui.notify(t("slots.empty"), "info");
-				} else {
-					ctx.ui.notify(
-						t("slots.status", {
-							entries: pairs.map(([slot, owner]) => `${slot}=${owner}`).join(", "),
-						}),
-						"info",
-					);
-				}
-				return;
-			}
-
-			if (sub === "clear" || sub === "reset") {
-				updatePiUiUserConfig({ slotOwners: {} });
-				mountShortcutsBar(pi, ctx);
-				requestRender();
-				ctx.ui.notify(t("slots.cleared"), "info");
-				return;
-			}
-
-			if (parts.length === 2) {
-				const [slot, owner] = parts as [string, string];
-				const existing = loadPiUiUserConfig().slotOwners;
-				updatePiUiUserConfig({ slotOwners: { ...existing, [slot]: owner } });
-				if (slot === "footer") {
-					mountShortcutsBar(pi, ctx);
-				}
-				requestRender();
-				ctx.ui.notify(t("slots.updated", { slot, owner }), "info");
-				return;
-			}
-
-			ctx.ui.notify(t("slots.usage"), "warning");
-		},
-	});
 }
 
 export default function conartiPiUi(pi: ExtensionAPI): void {
+	/* Устанавливаем динамический арбитраж слотов до регистрации остальных подсистем (ADR-0007) */
+	registerSlotArbitrationFeature(pi);
+
 	/* Синхронизируем app.thinking.cycle -> alt+t до чтения keybindings.json в InteractiveMode */
 	syncThinkingCycleKeybinding();
 	installKeyboardLayoutSupport(pi);
