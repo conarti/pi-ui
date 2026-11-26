@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import {
 	convertToPng,
 	type ExtensionAPI,
@@ -30,6 +31,7 @@ import {
 	getActiveHostRuntime,
 	installViewportScrollDismissHooks,
 	resolveActiveClipboardProvider,
+	unwrapHostTui,
 } from "../../shared/host-runtime.ts";
 import { matchesLayoutChord } from "../../shared/keyboard-layout.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
@@ -40,7 +42,12 @@ import {
 	materializeClipboardImagePayload,
 	tryReadImageFileSync,
 } from "./clipboard.ts";
-import { PromptChipOverlayController } from "./preview-popup.ts";
+import { showQuotesManagerModal } from "../quotes/quotes-modal.ts";
+import {
+	PromptChipOverlayController,
+	type PreviewImageSource,
+	type PreviewPopupActions,
+} from "./preview-popup.ts";
 import {
 	classifyTextPaste,
 	findPromptChipSpans,
@@ -141,7 +148,7 @@ export function insertQuoteChipInComposer(
 	const registry = getActivePromptChipRegistry();
 	const preSnap = registry.captureUndoSnapshot();
 	const chip = registry.registerQuote(quoteText, sourceLabel);
-	editor.insertTextWithUndoSnapshot(chip.token, preSnap);
+	editor.insertChipTokenWithAutoSpaces(chip.token, preSnap);
 	requestRender();
 	return chip;
 }
@@ -282,7 +289,8 @@ function resolveComposerTopRow(
 	editor: PiUiComposerEditor,
 	pointer?: ComposerPointerInfo,
 ): number {
-	const fromLayout = findComponentScreenY((tui as any)?.currentLayout?.root, editor);
+	const rawTui = tui ? unwrapHostTui(tui) : undefined;
+	const fromLayout = findComponentScreenY((rawTui as any)?.currentLayout?.root, editor);
 	if (fromLayout !== undefined) return fromLayout;
 	if (pointer?.screenY !== undefined && pointer?.mouseY !== undefined) {
 		return Math.max(0, pointer.screenY - pointer.mouseY);
@@ -342,6 +350,80 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 	const resolveEditorTui = (editor?: PiUiComposerEditor): TUI | undefined =>
 		editor?.getTui() ?? getActiveHostRuntime()?.tui;
 
+	const resolveChipImageSource = (chip: SerializedPromptChip): PreviewImageSource | undefined => {
+		if (chip.kind !== "image") return undefined;
+		const registry = getActivePromptChipRegistry();
+		const entry = registry.getChipById(chip.id);
+		if (entry?.kind === "image" && entry.base64Data) {
+			return {
+				base64Data: entry.base64Data,
+				mimeType: entry.mimeType,
+				widthPx: entry.widthPx,
+				heightPx: entry.heightPx,
+			};
+		}
+		if (chip.filePath) {
+			try {
+				const bytes = readFileSync(chip.filePath);
+				return {
+					base64Data: bytes.toString("base64"),
+					mimeType: chip.mimeType,
+					widthPx: chip.widthPx,
+					heightPx: chip.heightPx,
+				};
+			} catch {
+				return undefined;
+			}
+		}
+		return undefined;
+	};
+
+	const resolveChipFullText = (chip: SerializedPromptChip): string | undefined => {
+		if (chip.kind === "image") return undefined;
+		const entry = getActivePromptChipRegistry().getChipById(chip.id);
+		if (entry && (entry.kind === "paste" || entry.kind === "quote")) {
+			return entry.text;
+		}
+		return chip.previewText;
+	};
+
+	const removeChipFromComposerDraft = (chip: SerializedPromptChip): void => {
+		const editor = lastEditor;
+		if (!editor) return;
+		const registry = getActivePromptChipRegistry();
+		const preSnap = registry.captureUndoSnapshot();
+		const text = editor.getText();
+		const spans = findPromptChipSpans(text);
+		const target = spans.find((s) => s.kind === chip.kind && s.number === chip.number);
+		if (!target) return;
+		const hasLeadSpace = target.start > 0 && text[target.start - 1] === " ";
+		const hasTrailSpace = target.end < text.length && text[target.end] === " ";
+		const nextText =
+			hasLeadSpace && hasTrailSpace
+				? `${text.slice(0, target.start)}${text.slice(target.end + 1)}`
+				: `${text.slice(0, target.start)}${text.slice(target.end)}`.trim();
+		overlayController.hide();
+		editor.setTextWithUndoSnapshot(nextText, preSnap);
+		requestRender();
+	};
+
+	const buildPreviewActions = (): PreviewPopupActions => ({
+		resolveImageData: resolveChipImageSource,
+		resolveFullText: resolveChipFullText,
+		onCopy: (_chip, fullText) => {
+			void resolveActiveClipboardProvider().writeText?.(fullText);
+			requestRender();
+		},
+		onEdit: (chip) => {
+			if (chip.kind !== "quote" || !activeCtx) return;
+			overlayController.hide();
+			void showQuotesManagerModal(activeCtx, { initialEditQuoteNumber: chip.number });
+		},
+		onRemove: (chip) => {
+			removeChipFromComposerDraft(chip);
+		},
+	});
+
 	const syncComposerPreview = (editor: PiUiComposerEditor, pointerOverride?: ComposerPointerInfo): void => {
 		lastEditor = editor;
 		if (pointerOverride !== undefined) {
@@ -353,26 +435,42 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 			return;
 		}
 
+		if (overlayController.isPopupHovered) {
+			return;
+		}
+
 		const registry = getActivePromptChipRegistry();
 		const hoveredMatch = lastPointer
 			? findHoveredComposerChip(editor, registry, lastPointer, tui)
 			: undefined;
 		if (hoveredMatch) {
 			const topRow = resolveComposerTopRow(tui, editor, lastPointer);
-			overlayController.show(tui, hoveredMatch.chip, "composer-hover", {
-				col: hoveredMatch.col,
-				rowAbove: topRow,
-			});
+			overlayController.show(
+				tui,
+				hoveredMatch.chip,
+				"composer-hover",
+				{ col: hoveredMatch.col, rowAbove: topRow },
+				buildPreviewActions(),
+				() => {
+					if (lastEditor) syncComposerPreview(lastEditor);
+				},
+			);
 			return;
 		}
 
 		const caretMatch = findCaretComposerChip(editor, registry, tui);
 		if (caretMatch && caretMatch.chip.kind !== "image") {
 			const topRow = resolveComposerTopRow(tui, editor, lastPointer);
-			overlayController.show(tui, caretMatch.chip, "composer-caret", {
-				col: caretMatch.col,
-				rowAbove: topRow,
-			});
+			overlayController.show(
+				tui,
+				caretMatch.chip,
+				"composer-caret",
+				{ col: caretMatch.col, rowAbove: topRow },
+				buildPreviewActions(),
+				() => {
+					if (lastEditor) syncComposerPreview(lastEditor);
+				},
+			);
 			return;
 		}
 
@@ -411,7 +509,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 					}
 				}
 				if (tokens.length > 0) {
-					editor.insertTextWithUndoSnapshot(tokens.join(" "), preSnap);
+					editor.insertChipTokenWithAutoSpaces(tokens.join(" "), preSnap);
 					syncComposerPreview(editor);
 					requestRender();
 				}
@@ -424,7 +522,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 				if (materialized) {
 					const preSnap = registry.captureUndoSnapshot();
 					const chip = registry.registerImage(materialized);
-					editor.insertTextWithUndoSnapshot(chip.token, preSnap);
+					editor.insertChipTokenWithAutoSpaces(chip.token, preSnap);
 					syncComposerPreview(editor);
 					requestRender();
 				}
@@ -441,7 +539,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 				if (imageFiles && imageFiles.length > 0) {
 					const preSnap = registry.captureUndoSnapshot();
 					const tokens = imageFiles.map((img) => registry.registerImage(img).token);
-					editor.insertTextWithUndoSnapshot(tokens.join(" "), preSnap);
+					editor.insertChipTokenWithAutoSpaces(tokens.join(" "), preSnap);
 					syncComposerPreview(editor);
 					requestRender();
 					return;
@@ -450,7 +548,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 				if (!isBashDraft(editor) && classified.shouldCreateChip) {
 					const preSnap = registry.captureUndoSnapshot();
 					const chip = registry.registerPaste(text);
-					editor.insertTextWithUndoSnapshot(chip.token, preSnap);
+					editor.insertChipTokenWithAutoSpaces(chip.token, preSnap);
 				} else if (classified.normalizedText.length > 0) {
 					editor.insertTextAtCursor(classified.normalizedText);
 				}
@@ -588,11 +686,17 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 			requestRender();
 			return;
 		}
-		overlayController.show(tui, chip, "sent-pill", {
-			col: Math.max(1, screenX - 2),
-			rowAbove: Math.max(0, screenY - 1),
-			rowBelow: screenY + 2,
-		});
+		overlayController.show(
+			tui,
+			chip,
+			"sent-pill",
+			{
+				col: Math.max(1, screenX - 2),
+				rowAbove: Math.max(0, screenY - 1),
+				rowBelow: screenY + 2,
+			},
+			buildPreviewActions(),
+		);
 		requestRender();
 	};
 
@@ -708,14 +812,18 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 		registry.restorePersistedEntries(entries);
 		if (ctx.mode === "tui" && ctx.hasUI) {
 			unsubscribeInputGuard = ctx.ui.onTerminalInput((data) => {
-				if (
-					!isKeyRelease(data) &&
-					(data === "\x1b" || matchesKey(data, "escape")) &&
-					overlayController.source === "sent-pill"
-				) {
+				const isEsc = !isKeyRelease(data) && (data === "\x1b" || matchesKey(data, "escape"));
+				if (isEsc && overlayController.source === "sent-pill") {
 					overlayController.hide(["sent-pill"]);
 					requestRender();
 					return { consume: true };
+				}
+				if (isEsc) {
+					if (overlayController.isShowing) {
+						overlayController.hide();
+						requestRender();
+					}
+					return undefined;
 				}
 				queueMicrotask(() => {
 					const tui = resolveEditorTui(lastEditor);

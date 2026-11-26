@@ -19,6 +19,7 @@ import {
 	getActiveComposerEditor,
 	registerFeatureComposerHooks,
 	type ComposerHooks,
+	type PiUiComposerEditor,
 } from "../chrome/composer.ts";
 import { getActivePromptChipRegistry } from "../prompt-chips/index.ts";
 import {
@@ -44,6 +45,33 @@ export {
 } from "./supersede-external.ts";
 
 const SUGGESTIONS_MODES = ["on", "off"] as const;
+const SUGGESTION_BRIDGE_KEY = Symbol.for("conarti.pi-ui.prompt-suggestion-bridge.v1");
+
+interface PromptSuggestionBridge {
+	hasActive(): boolean;
+	accept(editor: PiUiComposerEditor): boolean;
+	dismiss(): boolean;
+}
+
+function getSuggestionBridgeSlot(): { bridge?: PromptSuggestionBridge } {
+	const g = globalThis as Record<symbol, { bridge?: PromptSuggestionBridge } | undefined>;
+	if (!g[SUGGESTION_BRIDGE_KEY]) {
+		g[SUGGESTION_BRIDGE_KEY] = {};
+	}
+	return g[SUGGESTION_BRIDGE_KEY]!;
+}
+
+export function hasActivePromptSuggestion(): boolean {
+	return getSuggestionBridgeSlot().bridge?.hasActive() ?? false;
+}
+
+export function acceptActivePromptSuggestion(editor: PiUiComposerEditor): boolean {
+	return getSuggestionBridgeSlot().bridge?.accept(editor) ?? false;
+}
+
+export function dismissActivePromptSuggestion(): boolean {
+	return getSuggestionBridgeSlot().bridge?.dismiss() ?? false;
+}
 
 function resolveActiveTui() {
 	return getActiveHostRuntime()?.tui ?? getActiveComposerEditor()?.getTui();
@@ -70,7 +98,19 @@ export function registerPromptSuggestionFeature(pi: ExtensionAPI): void {
 
 	const suggestionComposerHooks: ComposerHooks = {
 		hasDraftAttachments: () => getActivePromptChipRegistry().hasActiveDraftChips(),
-		getEmptyPlaceholder: () => (enabled ? activeSuggestion : undefined),
+		getEmptyPlaceholder: () => {
+			if (!enabled || !activeSuggestion) return undefined;
+			return loadPiUiUserConfig().showShortcutsBar
+				? activeSuggestion
+				: `${activeSuggestion} [Tab]`;
+		},
+		onEmptyPlaceholderClick: (editor) => {
+			if (!enabled || !activeSuggestion) return false;
+			const accepted = activeSuggestion;
+			activeSuggestion = undefined;
+			editor.acceptTextWithUndoSnapshot(accepted);
+			return true;
+		},
 		interceptEmptyDraftInput: (data, editor) => {
 			if (!enabled || !activeSuggestion) return false;
 			if (matchesKey(data, "tab") || matchesKey(data, "right")) {
@@ -84,6 +124,23 @@ export function registerPromptSuggestionFeature(pi: ExtensionAPI): void {
 				return true;
 			}
 			return false;
+		},
+	};
+
+	getSuggestionBridgeSlot().bridge = {
+		hasActive: () => Boolean(enabled && activeSuggestion),
+		accept: (editor) => {
+			if (!enabled || !activeSuggestion) return false;
+			const accepted = activeSuggestion;
+			activeSuggestion = undefined;
+			editor.acceptTextWithUndoSnapshot(accepted);
+			return true;
+		},
+		dismiss: () => {
+			if (!activeSuggestion) return false;
+			activeSuggestion = undefined;
+			requestRender();
+			return true;
 		},
 	};
 
