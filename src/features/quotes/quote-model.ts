@@ -159,9 +159,9 @@ function stripSpecificTokensFromDraft(draftText: string, tokens: readonly string
 		.split("\n")
 		.map((line) =>
 			line.replace(pattern, (full, lead: string, trail: string, offset: number) => {
-				if (lead === " " && trail === " ") return " ";
 				if (offset === 0 && trail === " ") return "";
 				if (offset + full.length === line.length && lead === " ") return "";
+				if (lead === " " && trail === " ") return " ";
 				return `${lead}${trail}`;
 			}),
 		)

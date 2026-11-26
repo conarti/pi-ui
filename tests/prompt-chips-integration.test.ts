@@ -3,10 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { defineTool } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { getCapabilities, setCapabilities, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { getActiveComposerEditor } from "../src/features/chrome/composer.ts";
+import type { PersistedPromptChipsPayload } from "../src/features/prompt-chips/registry.ts";
 import type { OutlineRailComponent } from "../src/features/outline-rail/rail-view.ts";
 import { getActiveHostRuntime, type HostClipboardProvider } from "../src/shared/host-runtime.ts";
 import { hasBlockingModalOverlay } from "../src/shared/modal-card.ts";
@@ -108,37 +109,32 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 
 		await harness.pressKey("\x16");
 		await flushClipboardAction(harness);
-		expect(editor.getText()).toBe("[🖼 Image #1]");
+		expect(editor.getText()).toBe("[🖼 Image #1] ");
 		expect(editor.getText()).not.toContain("/tmp");
 
-		await harness.typeText(" ");
 		await harness.pressKey("\x1b[118;9u");
 		await flushClipboardAction(harness);
-		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2]");
+		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2] ");
 
-		await harness.typeText(" ");
 		await harness.pressKey("\x1b[1084;9u");
 		await flushClipboardAction(harness);
-		await harness.typeText(" ");
 		await harness.pressKey("\x1b[27;9;1084~");
 		await flushClipboardAction(harness);
-		await harness.typeText(" ");
 		await harness.pressKey("\x1b[1084;5u");
 		await flushClipboardAction(harness);
 		expect(editor.getText()).toBe(
-			"[🖼 Image #1] [🖼 Image #2] [🖼 Image #3] [🖼 Image #4] [🖼 Image #5]",
+			"[🖼 Image #1] [🖼 Image #2] [🖼 Image #3] [🖼 Image #4] [🖼 Image #5] ",
 		);
 
 		editor.setText("");
 		await harness.sendInput("\x1b[200~\x1b[201~");
 		await flushClipboardAction(harness);
-		expect(editor.getText()).toBe("[🖼 Image #1]");
+		expect(editor.getText()).toBe("[🖼 Image #1] ");
 
-		await harness.typeText(" ");
 		await harness.sendInput("\x1b[200~");
 		await harness.sendInput("\x1b[201~");
 		await flushClipboardAction(harness);
-		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2]");
+		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2] ");
 
 		harness.setClipboard({
 			image: null,
@@ -147,7 +143,7 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		});
 		await harness.sendInput("\x1b[200~\x1b[201~");
 		await flushClipboardAction(harness);
-		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2]");
+		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2] ");
 
 		editor.setText("");
 		harness.setClipboard({
@@ -157,14 +153,13 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		});
 		await harness.pressKey("\x1b[27;9;118~");
 		await flushClipboardAction(harness);
-		expect(editor.getText()).toBe("[🖼 Image #1]");
+		expect(editor.getText()).toBe("[🖼 Image #1] ");
 		expect(editor.getText()).not.toContain("copied-from-finder.png");
 
 		const escapedPath = pastedPathImg.replace(/ /g, "\\ ");
-		await harness.typeText(" ");
 		await harness.paste(escapedPath, true);
 		await flushClipboardAction(harness);
-		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2]");
+		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2] ");
 
 		const screenText = harness.screen().text();
 		expect(screenText).toContain("[🖼 Image #1] [🖼 Image #2]");
@@ -192,24 +187,24 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		editor.setText("");
 		await harness.pressKey("\x16");
 		await flushClipboardAction(harness);
-		expect(editor.getText()).toBe("[🖼 Image #1]");
+		expect(editor.getText()).toBe("[🖼 Image #1] ");
 
-		await harness.typeText(" ");
 		const fourLineSnippet = 'fn main() {\n  let x = 1;\n  println!("{x}");\n}';
 		await harness.paste(fourLineSnippet, true);
-		expect(editor.getText()).toBe("[🖼 Image #1] [📋 Pasted #2 · 4 lines]");
+		expect(editor.getText()).toBe("[🖼 Image #1] [📋 Pasted #2 · 4 lines] ");
 
 		harness.setClipboard({
 			image: null,
 			text: "L".repeat(312),
 		});
-		await harness.typeText(" ");
 		await harness.pressKey("\x1b[118;9u");
 		await flushClipboardAction(harness);
 		expect(editor.getText()).toBe(
-			"[🖼 Image #1] [📋 Pasted #2 · 4 lines] [📋 Pasted #3 · 312 chars]",
+			"[🖼 Image #1] [📋 Pasted #2 · 4 lines] [📋 Pasted #3 · 312 chars] ",
 		);
 
+		/* Отступаем через завершающий пробел на сам чип #3 */
+		await harness.pressKey("\x1b[D");
 		await harness.pressKey("\x1b[D");
 		for (const mode of ["dark", "light"] as const) {
 			harness.setTheme(mode);
@@ -230,23 +225,25 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 
 		await harness.pressKey("\x01");
 		await harness.pressKey("\x1b[3~");
-		expect(editor.getText()).toBe(" [📋 Pasted #1 · 4 lines] [📋 Pasted #2 · 312 chars]");
+		expect(editor.getText()).toBe(" [📋 Pasted #1 · 4 lines] [📋 Pasted #2 · 312 chars] ");
 
 		await harness.pressKey("\x1b[1103;9u");
-		expect(editor.getText()).toBe(" [📋 Pasted #1 · 4 lines] [📋 Pasted #2 · 312 chars]");
+		expect(editor.getText()).toBe(" [📋 Pasted #1 · 4 lines] [📋 Pasted #2 · 312 chars] ");
 
 		await harness.pressKey("\x1b[45;5u");
 		expect(editor.getText()).toBe(
-			"[🖼 Image #1] [📋 Pasted #2 · 4 lines] [📋 Pasted #3 · 312 chars]",
+			"[🖼 Image #1] [📋 Pasted #2 · 4 lines] [📋 Pasted #3 · 312 chars] ",
 		);
 
 		await harness.pressKey("\x05");
 		await harness.pressKey("\x7f");
+		await harness.pressKey("\x7f");
 		expect(editor.getText()).toBe("[🖼 Image #1] [📋 Pasted #2 · 4 lines] ");
 
 		await harness.pressKey("\x1f");
+		await harness.pressKey("\x1f");
 		expect(editor.getText()).toBe(
-			"[🖼 Image #1] [📋 Pasted #2 · 4 lines] [📋 Pasted #3 · 312 chars]",
+			"[🖼 Image #1] [📋 Pasted #2 · 4 lines] [📋 Pasted #3 · 312 chars] ",
 		);
 
 		await harness.submitDraft();
@@ -288,6 +285,9 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await harness.pressKey("\x16");
 		await flushClipboardAction(harness);
 
+		expect(harness.screen().text()).not.toContain("architecture-shot.png");
+		const chip = harness.screen().findText("[🖼 Image #1]")!;
+		await harness.mouseMove(chip.col + 2, chip.row);
 		const afterImageText = harness.screen().text();
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 		expect(afterImageText).toContain("architecture-shot.png");
@@ -295,6 +295,7 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		expect(afterImageText).toContain("75B");
 		expect(afterImageText).toContain("Path: ");
 
+		await harness.mouseMove(85, chip.row);
 		await harness.typeText(" notes");
 		expect(harness.screen().text()).not.toContain("architecture-shot.png");
 
@@ -331,7 +332,16 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await harness.mouseMove(imgPos!.col + 2, composerBodyRow);
 		expect(harness.screen().text()).toContain("architecture-shot.png");
 
-		await harness.mouseMove(85, composerBodyRow);
+		/* Перевод мыши с чипа через верхнюю рамку Composer внутрь самого попапа не закрывает превью */
+		const composerTop = findComposerTopRow(harness);
+		await harness.mouseMove(imgPos!.col + 2, composerTop);
+		expect(harness.screen().text()).toContain("architecture-shot.png");
+		const removeBtn = harness.screen().findText("[Remove]");
+		expect(removeBtn).toBeDefined();
+		await harness.mouseMove(removeBtn!.col + 2, removeBtn!.row);
+		expect(harness.screen().text()).toContain("architecture-shot.png");
+
+		await harness.mouseMove(85, 1);
 		expect(harness.screen().text()).not.toContain("architecture-shot.png");
 	});
 
@@ -388,7 +398,7 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await harness.typeText("Review ");
 		await harness.pressKey("\x1b[118;9u");
 		await flushClipboardAction(harness);
-		await harness.typeText(" and ");
+		await harness.typeText("and ");
 		const fiveLineLog = [
 			"ERROR 502 Bad Gateway",
 			"upstream: 10.0.4.12:8080",
@@ -397,7 +407,7 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 			"retryable: true",
 		].join("\n");
 		await harness.paste(fiveLineLog, true);
-		expect(editor.getText()).toBe("Review [🖼 Image #1] and [📋 Pasted #2 · 5 lines]");
+		expect(editor.getText()).toBe("Review [🖼 Image #1] and [📋 Pasted #2 · 5 lines] ");
 
 		await harness.pressKey("\r");
 		await toolEnteredPromise;
@@ -406,7 +416,7 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		const steerPaste = "step A\nstep B\nstep C\nstep D";
 		await harness.typeText("Steer with ");
 		await harness.paste(steerPaste, true);
-		expect(editor.getText()).toBe("Steer with [📋 Pasted #1 · 4 lines]");
+		expect(editor.getText()).toBe("Steer with [📋 Pasted #1 · 4 lines] ");
 		await harness.pressKey("\r");
 		await flushClipboardAction(harness);
 
@@ -431,6 +441,10 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 
 		const imgPillHit = topScreen.findText("[🖼 Image #1]");
 		expect(imgPillHit).toBeDefined();
+		await harness.mouseMove(imgPillHit!.col + 2, imgPillHit!.row);
+		expect(harness.screen().text()).toContain("mockup-v2.png");
+		await harness.mouseMove(0, 0);
+		expect(harness.screen().text()).not.toContain("mockup-v2.png");
 		await harness.mouseClick(imgPillHit!.col + 2, imgPillHit!.row);
 		expect(harness.screen().text()).toContain("mockup-v2.png");
 
@@ -444,12 +458,12 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 
 		scroll.scrollTo(rail.offsetOf(0) + 6, { disableFollow: true });
 		const scrolledScreen = harness.screen();
-		expect(scrolledScreen.rowText(1)).toContain("Review [🖼 Image #1] and [📋 Pasted #2 · 5 lines]");
+		expect(scrolledScreen.rowText(4)).toContain("Review [🖼 Image #1] and [📋 Pasted #2 · 5 lines]");
 		expect(scrolledScreen.text()).not.toContain("[изображение]");
 
-		const stickyPasteCol = scrolledScreen.rowText(1).indexOf("[📋 Pasted #2 · 5 lines]");
+		const stickyPasteCol = scrolledScreen.rowText(4).indexOf("[📋 Pasted #2 · 5 lines]");
 		expect(stickyPasteCol).toBeGreaterThan(0);
-		await harness.mouseClick(stickyPasteCol + 2, 1);
+		await harness.mouseClick(stickyPasteCol + 2, 4);
 		expect(harness.screen().text()).toContain("req-9912");
 
 		await harness.pressKey("\x1b");
@@ -464,6 +478,114 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 
 		postReloadScroll.scrollTo(postReloadRail.offsetOf(1), { disableFollow: true });
 		expect(harness.screen().text()).toContain("Steer with [📋 Pasted #1 · 4 lines]");
+	});
+
+	it.each(["current", "legacy"])("copies the full original paste from a reopened %s session despite draft chip ID reuse", async (format) => {
+		let copied = "";
+		const original = "original ".repeat(500).trimEnd() + " SENT END";
+		harness = await createInteractiveHarness({ responses: [fauxAssistantMessage("Got it.")] });
+		await harness.paste(original, true);
+		await harness.submitDraft();
+		await harness.waitForIdle();
+		const initialEntries = harness.sessionManager.getEntries().map((entry) => {
+			if (format !== "legacy" || entry.type !== "custom" || entry.customType !== "conarti-prompt-chips") return entry;
+			const data = entry.data as PersistedPromptChipsPayload;
+			return { ...entry, data: { ...data, chips: data.chips.map((chip) => chip.kind === "image"
+				? chip : { ...chip, previewText: chip.previewText.slice(0, 4000) }) } };
+		});
+		await harness.dispose();
+		harness = await createInteractiveHarness({
+			initialEntries, persistSession: true,
+			clipboard: { async readText() { return copied; }, async writeText(text) { copied = text; } },
+		});
+		const copyOriginal = async () => {
+			const pill = harness!.screen().findText(`Pasted #1 · ${original.length} chars`)!;
+			await harness!.mouseClick(pill.col + 2, pill.row);
+			const copy = harness!.screen().findText("[Copy]")!;
+			await harness!.mouseClick(copy.col + 1, copy.row);
+			expect(copied).toBe(original);
+			await harness!.pressKey("\x1b");
+		};
+		await copyOriginal();
+		await harness.paste("New draft ".repeat(40), true);
+		await copyOriginal();
+	});
+
+	it("renders the saved image thumbnail when hovering a reopened clipboard-image Prompt Chip", async () => {
+		harness = await createInteractiveHarness({
+			clipboard: { image: { bytes: TINY_PNG_BYTES, mimeType: "image/png", fileName: "clipboard.png" } },
+			responses: [fauxAssistantMessage("Got it.")],
+		});
+		await harness.pressKey("\x16");
+		await flushClipboardAction(harness);
+		await harness.submitDraft();
+		await harness.waitForIdle();
+		const initialEntries = harness.sessionManager.getEntries();
+		for (const entry of initialEntries) {
+			if (entry.type === "custom" && entry.customType === "conarti-prompt-chips") {
+				for (const chip of (entry.data as PersistedPromptChipsPayload).chips) {
+					if (chip.kind === "image" && chip.filePath) rmSync(chip.filePath, { force: true });
+				}
+			}
+		}
+		await harness.dispose();
+		harness = await createInteractiveHarness({ initialEntries, persistSession: true });
+		const capabilities = getCapabilities();
+		try {
+			setCapabilities({ ...capabilities, images: "kitty" });
+			const pill = harness.screen().findText("Image #1")!;
+			await harness.mouseMove(pill.col + 2, pill.row);
+			const previewScreen = harness.screen();
+			expect(previewScreen.text()).toContain("File: clipboard.png");
+			expect(harness.terminal.writes.join("")).toContain(`;${TINY_PNG_BASE64}\x1b\\`);
+
+			/* Строка 1 попапа с Kitty-миниатюрой окрашена тем же popupSurfaceBg без тёмной полосы */
+			const fileHit = previewScreen.findText("File: clipboard.png")!;
+			let popupTop = fileHit.row;
+			while (popupTop > 0 && !previewScreen.rowText(popupTop).includes("╭─")) {
+				popupTop -= 1;
+			}
+			let popupLeft = -1;
+			let popupRight = -1;
+			for (let c = 0; c < previewScreen.width; c += 1) {
+				const ch = previewScreen.cellAt(popupTop, c)?.char;
+				if (ch === "╭" && popupLeft === -1) popupLeft = c;
+				if (ch === "╮") popupRight = c;
+			}
+			expect(popupLeft).toBeGreaterThanOrEqual(0);
+			expect(popupRight).toBeGreaterThan(popupLeft + 10);
+			const expectedBg = previewScreen.cellAt(popupTop, popupLeft + 1)?.bg;
+			expect(expectedBg?.kind).toBe("rgb");
+			for (let r = popupTop + 1; r <= fileHit.row; r += 1) {
+				for (let c = popupLeft; c <= popupRight; c += 1) {
+					expect(previewScreen.cellAt(r, c)?.bg).toEqual(expectedBg);
+				}
+			}
+		} finally {
+			setCapabilities(capabilities);
+		}
+	});
+
+	it("contains wheel scrolling inside a sent Prompt Chip preview", async () => {
+		harness = await createInteractiveHarness({
+			width: 96, height: 25,
+			responses: [fauxAssistantMessage(Array.from({ length: 26 }, (_, i) => `Reply line ${i + 1}`).join("\n"))],
+		});
+		await harness.paste(Array.from({ length: 20 }, (_, i) => `sent-paste-row-${i + 1}`).join("\n"), true);
+		await harness.submitDraft();
+		await harness.waitForIdle();
+		const scroll = getActiveHostRuntime()!.scroll!;
+		scroll.scrollToStart();
+		const chip = harness.screen().findText("Pasted #1")!;
+		await harness.mouseClick(chip.col + 1, chip.row);
+		const first = harness.screen().findText("sent-paste-row-1")!;
+		expect(first).toBeDefined();
+		const top = scroll.scrollTop;
+		await harness.mouseWheel("down", first.col + 1, first.row, 10);
+		expect(harness.screen().text()).toContain("sent-paste-row-20");
+		expect(scroll.scrollTop).toBe(top);
+		await harness.mouseWheel("down", 94, 5);
+		expect(harness.screen().text()).not.toContain("sent-paste-row-20");
 	});
 
 	it("handles edge cases: file:// URLs, nonexistent .png paths, !bash mode paths, clipboard errors, narrow widths 1..30, legacy [Image #1: path] cards, and pill toggle/outside-click dismissal", async () => {
@@ -511,7 +633,7 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 
 		editor.setText("");
 		await harness.paste(fileUrl, true);
-		expect(editor.getText()).toBe("[🖼 Image #1]");
+		expect(editor.getText()).toBe("[🖼 Image #1] ");
 
 		for (const w of [1, 2, 3, 8, 16, 24, 30]) {
 			await harness.resize(w, 28);
@@ -652,15 +774,16 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 
 		editor.setText("");
 		await harness.paste(bmpPath, true);
-		await harness.typeText(" ");
 		await harness.paste(bmpPath, true);
-		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2]");
+		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2] ");
 
 		await harness.pressKey("\x01");
 		await harness.pressKey("\x1b[3~");
-		expect(editor.getText()).toBe(" [🖼 Image #1]");
+		expect(editor.getText()).toBe(" [🖼 Image #1] ");
 
 		await harness.pressKey("\x05");
+		const bmpChip = harness.screen().findText("[🖼 Image #1]")!;
+		await harness.mouseMove(bmpChip.col + 2, bmpChip.row);
 		const bmpPreviewText = harness.screen().text();
 		expect(bmpPreviewText).toContain("diagram.bmp");
 		expect(bmpPreviewText).toContain("4×3");
@@ -844,6 +967,10 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await harness.pressKey("\x16");
 		await flushClipboardAction(harness);
 		await harness.pressKey("\x1b[D");
+		const boundaryRow = findComposerTopRow(harness) + 2;
+		const boundaryCol = harness.screen().rowText(boundaryRow).indexOf("[🖼 Image #1]");
+		expect(boundaryCol).toBeGreaterThanOrEqual(0);
+		await harness.mouseMove(boundaryCol + 2, boundaryRow);
 		const boundaryScreen = harness.screen();
 		const wrapHit = boundaryScreen.findText("wrap-check.png");
 		expect(wrapHit).toBeDefined();
@@ -869,9 +996,9 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await flushClipboardAction(harness);
 		await harness.pressKey("\x16");
 		await flushClipboardAction(harness);
-		expect(editor.getText()).toBe("[🖼 Image #1][🖼 Image #2]");
+		expect(editor.getText()).toBe("[🖼 Image #1] [🖼 Image #2] ");
 		await harness.pressKey("\x17");
-		expect(editor.getText()).toBe("[🖼 Image #1]");
+		expect(editor.getText()).toBe("[🖼 Image #1] ");
 		editor.setText("");
 
 		getActiveHostRuntime()!.scroll!.scrollTo(0, { disableFollow: true });
@@ -1004,40 +1131,40 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await harness.typeText("Check ");
 		await harness.pressKey("\x16");
 		await flushClipboardAction(harness);
-		await harness.typeText(" log ");
+		await harness.typeText("log ");
 		await harness.paste("TRACE line 1\nTRACE line 2\nTRACE line 3\nTRACE line 4", true);
-		await harness.typeText(" ref ");
+		await harness.typeText("ref ");
 		await harness.pressKey("\x1b[113;3u");
 		await flushClipboardAction(harness);
 		expect(getActiveComposerEditor()!.getText()).toBe(
-			"Check [🖼 Image #1] log [📋 Pasted #2 · 4 lines] ref [❝ Quote #3 · 2 lines]",
+			"Check [🖼 Image #1] log [📋 Pasted #2 · 4 lines] ref [❝ Quote #3 · 2 lines] ",
 		);
 		await harness.submitDraft();
 
 		const checkRailPreviews = async () => {
+			const headerRows = 3;
 			const rail = getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent;
 			const geo = rail.geometry!;
 			expect(geo.windowEnd - geo.windowStart).toBe(4);
 
-			await harness!.mouseMove(97, geo.ticksY);
+			await harness!.mouseMove(99, headerRows + geo.ticksY);
 			const p1 = harness!.screen().text();
-			expect(p1).toContain("16:09");
 			expect(p1).toContain("[🖼 Image #1]");
 			expect(p1).not.toContain("[изображение]");
 
-			await harness!.mouseMove(97, geo.ticksY + 1);
+			await harness!.mouseMove(99, headerRows + geo.ticksY + 1);
 			const p2 = harness!.screen().text();
 			expect(p2).toContain("[❝ Quote #1 · 2 lines]");
 			expect(p2).toContain("Compare");
 			expect(p2).toContain("screenshot [🖼 Image #1]");
 			expect(p2).not.toContain("quoted one");
 
-			await harness!.mouseMove(97, geo.ticksY + 2);
+			await harness!.mouseMove(99, headerRows + geo.ticksY + 2);
 			const p3 = harness!.screen().text();
 			expect(p3).toContain("Mounted fallback [🖼 Image #1]");
 			expect(p3).not.toContain("[изображение]");
 
-			await harness!.mouseMove(97, geo.ticksY + 3);
+			await harness!.mouseMove(99, headerRows + geo.ticksY + 3);
 			const p4 = harness!.screen().text();
 			expect(p4).toContain("Check [🖼 Image #1]");
 			expect(p4).toContain("[📋 Pasted #2 · 4 lines]");
@@ -1053,5 +1180,145 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		harness.setTheme("light");
 		await harness.reload();
 		await checkRailPreviews();
+	});
+
+	it("renders formatted Markdown (GFM tables, headings, lists, and inline code) inside Paste, Quote, and Skill preview popups", async () => {
+		const tmpCwd = mkdtempSync(join(tmpdir(), "pi-ui-popup-md-"));
+		try {
+			const skillDir = join(tmpCwd, ".agents", "skills", "md-demo");
+			mkdirSync(skillDir, { recursive: true });
+			writeFileSync(
+				join(skillDir, "SKILL.md"),
+				[
+					"---",
+					"name: md-demo",
+					"description: Demo skill with Markdown",
+					"---",
+					"# Skill Heading",
+					"",
+					"| Metric | Budget |",
+					"|---|---|",
+					"| Latency | 12ms |",
+					"",
+					"- **Bold rule** with `inline_helper()`",
+				].join("\n"),
+				"utf8",
+			);
+
+			harness = await createInteractiveHarness({
+				theme: "dark",
+				cwd: tmpCwd,
+				additionalSkillPaths: [skillDir],
+				width: 110,
+				height: 30,
+				clipboard: {
+					image: null,
+					text: "**Quoted bold** with `quoted_fn()`\nand second line",
+				},
+				responses: [fauxAssistantMessage("Markdown popups verified.")],
+			});
+
+			const mdTablePaste = [
+				"| Model | Calls | Stream tok/s |",
+				"|---|---:|---:|",
+				"| gpt-6.2-astra | 299 | 52.6 |",
+				"| gemini-4-carbon | 504 | 84.5 |",
+			].join("\n");
+
+			await harness.typeText("/skill:md-demo ");
+			await harness.paste(mdTablePaste, true);
+
+			/* Сразу после вставки каретка стоит у чипа Paste: попап рисует GFM-таблицу с рамками вместо сырого |---| */
+			const pastePopupText = harness.screen().text();
+			expect(pastePopupText).toContain("Pasted #1 · 4 lines");
+			expect(pastePopupText).toContain("gpt-6.2-astra");
+			expect(pastePopupText).toContain("84.5");
+			expect(pastePopupText).toContain("┼");
+			expect(pastePopupText).not.toContain("|---|");
+
+			/* Добавляем цитату с Markdown через Alt+Q и проверяем рендер **bold** и `code` без сырых звёздочек */
+			await harness.pressKey("\x1b[113;3u");
+			await flushClipboardAction(harness);
+			const quotePopupText = harness.screen().text();
+			expect(quotePopupText).toContain("Quote #2 · 2 lines");
+			expect(quotePopupText).toContain("Quoted bold");
+			expect(quotePopupText).toContain("quoted_fn()");
+			expect(quotePopupText).not.toContain("**Quoted bold**");
+
+			/* Отправляем промпт со скиллом и открываем попап /md-demo: frontmatter скрыт, а заголовок и таблица отформатированы */
+			await harness.submitDraft();
+			const sentScreen = harness.screen();
+			const skillPill = sentScreen.findText("/md-demo");
+			expect(skillPill).toBeDefined();
+			await harness.mouseClick(skillPill!.col + 2, skillPill!.row);
+
+			const skillPopupText = harness.screen().text();
+			expect(skillPopupText).toContain("✦ /md-demo");
+			expect(skillPopupText).toContain("Skill Heading");
+			expect(skillPopupText).toContain("Latency");
+			expect(skillPopupText).toContain("12ms");
+			expect(skillPopupText).toContain("Bold rule");
+			expect(skillPopupText).toContain("inline_helper()");
+			expect(skillPopupText).not.toContain("description: Demo skill with Markdown");
+			expect(skillPopupText).not.toContain("# Skill Heading");
+			expect(skillPopupText).not.toContain("|---|");
+			expect(skillPopupText).not.toContain("**Bold rule**");
+		} finally {
+			rmSync(tmpCwd, { recursive: true, force: true });
+		}
+	});
+
+	it("anchors Composer chip preview popups directly above the chip's own visual line in a multiline draft rather than above the entire Composer box", async () => {
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 100,
+			height: 36,
+			clipboard: {
+				image: { bytes: TINY_PNG_BYTES, mimeType: "image/png" },
+				text: null,
+			},
+		});
+
+		await harness.typeText("1. First line of multiline prompt");
+		await harness.pressKey("\x1b[13;2u");
+		await harness.typeText("2. ");
+		harness.setClipboard({ image: null, text: "Quoted line alpha\nQuoted line beta" });
+		await harness.pressKey("\x1b[113;3u");
+		await flushClipboardAction(harness);
+		await harness.typeText("question after quote");
+		await harness.pressKey("\x1b[13;2u");
+		await harness.typeText("3. Third line");
+		await harness.pressKey("\x1b[13;2u");
+		await harness.typeText("4. Fourth line");
+		await harness.pressKey("\x1b[13;2u");
+		await harness.typeText("5. ");
+		harness.setClipboard({
+			image: { bytes: TINY_PNG_BYTES, mimeType: "image/png" },
+			text: null,
+		});
+		await harness.pressKey("\x16");
+		await flushClipboardAction(harness);
+		await harness.typeText("after image");
+
+		const composerTop = findComposerTopRow(harness);
+		const baseScreen = harness.screen();
+		const quoteHit = baseScreen.findText("[❝ Quote #1 · 2 lines]")!;
+		const imageHit = baseScreen.findText("[🖼 Image #2]")!;
+		expect(quoteHit).toBeDefined();
+		expect(imageHit).toBeDefined();
+		expect(imageHit.row).toBeGreaterThan(composerTop + 4);
+
+		/* При наведении на [🖼 Image #2] на 5-й строке нижняя рамка попапа стоит ровно над строкой [🖼 Image #2], а не над верхней рамкой Composer */
+		await harness.mouseMove(imageHit.col + 2, imageHit.row);
+		const imgPopScreen = harness.screen();
+		expect(imgPopScreen.rowText(imageHit.row - 1)).toContain("╰─");
+		expect(imgPopScreen.rowText(imageHit.row)).toContain("[🖼 Image #2]");
+
+		/* Снимаем фокус с открытого попапа чипа #2 и наводим мышь на [❝ Quote #1] на 2-й строке: попап стоит на quoteHit.row - 1 */
+		await harness.mouseMove(95, 1);
+		await harness.mouseMove(quoteHit.col + 2, quoteHit.row);
+		const quotePopScreen = harness.screen();
+		expect(quotePopScreen.rowText(quoteHit.row - 1)).toContain("╰─");
+		expect(quotePopScreen.rowText(quoteHit.row)).toContain("[❝ Quote #1 · 2 lines]");
 	});
 });

@@ -2,17 +2,20 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
-import { fgRgb, renderPill, type HitBox } from "../../shared/ansi.ts";
+import { fgRgb, renderCloseButton, renderPill, type HitBox } from "../../shared/ansi.ts";
+import { t } from "../../shared/i18n.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import {
 	extractPlanSteps,
 	getSessionWorkflow,
 	MODE_META,
-	type PlanStep,
+	normalizeSessionMode,
+	SESSION_MODE_ORDER,
 	type SessionMode,
 } from "../../shared/session-workflow.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
-import { confirmSafeToolCall, showPlanStudio } from "./studio-overlay.ts";
+import { openComposerPopover } from "../chrome/composer-popovers.ts";
+import { confirmSafeToolCall, showPlanApproval } from "./approval-overlay.ts";
 
 export { extractPlanSteps };
 
@@ -38,16 +41,6 @@ function extractAllText(message: AssistantMessage): string {
 		.join("\n");
 }
 
-const ZERO_FLUFF_PLAN_PROMPT = `[PLAN MODE — СТРОГИЙ РЕЖИМ ПЛАНИРОВАНИЯ]
-Файлы менять запрещено (инструменты записи отключены, bash только для чтения).
-Сначала изучи нужные файлы проекта инструментами чтения, затем выдай **чёткий инженерный план без воды**:
-- Никаких вступлений, вежливых штампов и пересказа задачи.
-- Короткая цель (1–2 предложения).
-- Пронумерованные шаги (\`1.\`, \`2.\`, ...) с точными путями к файлам, именами функций/компонентов и сутью изменений.
-- Подводные камни / крайние случаи — только реальные, по существу (1–3 пункта максимум).
-- Проверка — конкретные команды/сценарии верификации.
-Пиши компактно и структурно: пользователь сможет оставлять построчные комментарии прямо под строками твоего плана.`;
-
 export function applyModeTools(
 	pi: ExtensionAPI,
 	mode: SessionMode,
@@ -67,14 +60,17 @@ export function setSessionMode(pi: ExtensionAPI, ctx: ExtensionContext, nextMode
 
 	if (!silent && ctx.hasUI) {
 		const meta = MODE_META[nextMode];
-		ctx.ui.notify(`${meta.icon} Режим: ${meta.label} — ${meta.desc}`, "info");
+		ctx.ui.notify(
+			t("sessionMode.notification", { icon: meta.icon, label: meta.label, desc: meta.desc }),
+			"info",
+		);
 	}
 }
 
 export function cycleSessionMode(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	const wf = getSessionWorkflow();
-	const order: SessionMode[] = ["code", "plan", "safe"];
-	const next = order[(order.indexOf(wf.mode) + 1) % order.length]!;
+	const currentIdx = SESSION_MODE_ORDER.indexOf(wf.mode);
+	const next = SESSION_MODE_ORDER[(currentIdx + 1) % SESSION_MODE_ORDER.length]!;
 	setSessionMode(pi, ctx, next);
 }
 
@@ -85,7 +81,7 @@ export function clearPlanState(pi: ExtensionAPI, ctx: ExtensionContext, notify =
 	wf.persist(pi);
 	requestRender();
 	if (notify && ctx.hasUI) {
-		ctx.ui.notify("Сохранённый план очищен", "info");
+		ctx.ui.notify(t("plan.cleared"), "info");
 	}
 }
 
@@ -116,30 +112,33 @@ export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void 
 					const filled = Math.round((doneCount / Math.max(1, total)) * barW);
 					const bar = fgRgb(97, 175, 239, "━".repeat(filled)) + fgRgb(58, 68, 86, "─".repeat(barW - filled));
 
-					const btnOpen = renderPill(`📋 План ${doneCount}/${total}`, {
-						hovered: hovered === "open",
-						active: true,
-						rgb: [97, 175, 239],
-						theme,
-					});
-					const btnClear = renderPill("✕ Скрыть", { hovered: hovered === "clear", theme });
+					const btnOpen = renderPill(
+						t("plan.widget.progress", { done: doneCount, total }),
+						{
+							hovered: hovered === "open",
+							active: true,
+							rgb: [97, 175, 239],
+							theme,
+						},
+					);
+					const btnClear = renderPill(t("plan.widget.hide"), { hovered: hovered === "clear", theme });
 					const nextStep = wf.planSteps.find((s) => !s.completed);
 					const stepPreview = nextStep
-						? theme.fg("muted", ` · Сейчас: ${nextStep.step}. ${nextStep.text}`)
-						: fgRgb(140, 194, 101, " · Все шаги выполнены ✓");
+						? theme.fg("muted", t("plan.widget.currentStep", { step: nextStep.step, text: nextStep.text }))
+						: fgRgb(140, 194, 101, t("plan.widget.allDone"));
 
 					boxes.push({
 						id: "open",
-						xStart: 1,
-						xEnd: 1 + visibleWidth(btnOpen),
+						xStart: 0,
+						xEnd: visibleWidth(btnOpen),
 						y: 0,
-						onClick: () => void showPlanStudio(pi, ctx),
+						onClick: () => void showPlanApproval(pi, ctx),
 					});
-					const prefix = ` ${btnOpen}  ${bar} `;
-					const availPreview = Math.max(0, width - visibleWidth(prefix) - visibleWidth(btnClear) - 3);
+					const prefix = `${btnOpen}  ${bar} `;
+					const availPreview = Math.max(0, width - visibleWidth(prefix) - visibleWidth(btnClear) - 2);
 					const clippedPreview = availPreview > 8 ? truncateToWidth(stepPreview, availPreview, "…") : "";
 					const gap = " ".repeat(
-						Math.max(1, width - visibleWidth(prefix) - visibleWidth(clippedPreview) - visibleWidth(btnClear) - 1),
+						Math.max(1, width - visibleWidth(prefix) - visibleWidth(clippedPreview) - visibleWidth(btnClear)),
 					);
 					const xClear = visibleWidth(prefix) + visibleWidth(clippedPreview) + gap.length;
 					boxes.push({
@@ -155,27 +154,27 @@ export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void 
 				if (hasPlan) {
 					const btnReview = renderPill(
 						commentCount > 0
-							? `📋 Открыть план · 💬 ${commentCount} комм.`
-							: `📋 Открыть план (${wf.planSteps.length || wf.planLines.length} стр.)`,
+							? t("plan.widget.openWithComments", { count: commentCount })
+							: t("plan.widget.open", { count: wf.planSteps.length || wf.planLines.length }),
 						{ hovered: hovered === "review", active: true, rgb: [229, 192, 123], theme },
 					);
-					const btnRun = renderPill("✓ В работу", {
+					const btnRun = renderPill(t("plan.widget.approve"), {
 						hovered: hovered === "run",
 						active: true,
 						rgb: [140, 194, 101],
 						theme,
 					});
-					const btnDismiss = renderPill("✕", { hovered: hovered === "dismiss", theme });
+					const btnDismiss = renderCloseButton(theme, hovered === "dismiss");
 
-					let x = 1;
+					let x = 0;
 					const wRev = visibleWidth(btnReview);
-					boxes.push({ id: "review", xStart: x, xEnd: x + wRev, y: 0, onClick: () => void showPlanStudio(pi, ctx) });
+					boxes.push({ id: "review", xStart: x, xEnd: x + wRev, y: 0, onClick: () => void showPlanApproval(pi, ctx) });
 					x += wRev + 2;
 					const wRun = visibleWidth(btnRun);
 					boxes.push({ id: "run", xStart: x, xEnd: x + wRun, y: 0, onClick: () => approveAndExecutePlan(pi, ctx) });
-					const leftPart = ` ${btnReview}  ${btnRun}`;
+					const leftPart = `${btnReview}  ${btnRun}`;
 					const gap = " ".repeat(
-						Math.max(1, width - visibleWidth(leftPart) - visibleWidth(btnDismiss) - 1),
+						Math.max(1, width - visibleWidth(leftPart) - visibleWidth(btnDismiss)),
 					);
 					const xDismiss = visibleWidth(leftPart) + gap.length;
 					boxes.push({
@@ -188,7 +187,7 @@ export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void 
 					return [truncateToWidth(`${leftPart}${gap}${btnDismiss}`, width, "…")];
 				}
 
-				const badge = renderPill("◈ Plan Mode", {
+				const badge = renderPill(t("plan.widget.modeBadge"), {
 					hovered: hovered === "exit-plan",
 					active: true,
 					rgb: [229, 192, 123],
@@ -196,13 +195,13 @@ export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void 
 				});
 				boxes.push({
 					id: "exit-plan",
-					xStart: 1,
-					xEnd: 1 + visibleWidth(badge),
+					xStart: 0,
+					xEnd: visibleWidth(badge),
 					y: 0,
-					onClick: () => setSessionMode(pi, ctx, "code"),
+					onClick: () => setSessionMode(pi, ctx, "always-approve"),
 				});
-				const info = theme.fg("muted", " Опиши задачу — агент соберёт компактный план без воды с построчным ревью");
-				return [truncateToWidth(` ${badge}${info}`, width, "…")];
+				const info = theme.fg("muted", t("plan.widget.modeHint"));
+				return [truncateToWidth(`${badge}${info}`, width, "…")];
 			},
 			handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 				const hit = boxes.find((b) => b.y === event.y && event.x >= b.xStart && event.x < b.xEnd);
@@ -238,17 +237,17 @@ export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void 
 export function approveAndExecutePlan(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	const wf = getSessionWorkflow();
 	if (!wf.planRaw.trim()) {
-		ctx.ui.notify("Сначала сгенерируй план в режиме Plan", "warning");
+		ctx.ui.notify(t("plan.emptyNotify"), "warning");
 		return;
 	}
 	if (!ctx.isIdle()) {
-		ctx.ui.notify("Подожди завершения текущего ответа агента", "warning");
+		ctx.ui.notify(t("plan.waitForIdle"), "warning");
 		return;
 	}
 
 	const result = wf.approvePlan(pi);
 	if (!result.ok) {
-		ctx.ui.notify("Сначала сгенерируй план в режиме Plan", "warning");
+		ctx.ui.notify(t("plan.emptyNotify"), "warning");
 		return;
 	}
 
@@ -262,17 +261,17 @@ export function approveAndExecutePlan(pi: ExtensionAPI, ctx: ExtensionContext): 
 export function revisePlanWithComments(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	const wf = getSessionWorkflow();
 	if (!wf.formatLineComments()) {
-		ctx.ui.notify("Добавь хотя бы один комментарий к строке плана (клик мышкой или Enter)", "warning");
+		ctx.ui.notify(t("plan.needComment"), "warning");
 		return;
 	}
 	if (!ctx.isIdle()) {
-		ctx.ui.notify("Подожди завершения текущего ответа агента", "warning");
+		ctx.ui.notify(t("plan.waitForIdle"), "warning");
 		return;
 	}
 
 	const result = wf.revisePlan(pi);
 	if (!result.ok) {
-		ctx.ui.notify("Добавь хотя бы один комментарий к строке плана (клик мышкой или Enter)", "warning");
+		ctx.ui.notify(t("plan.needComment"), "warning");
 		return;
 	}
 
@@ -283,7 +282,7 @@ export function revisePlanWithComments(pi: ExtensionAPI, ctx: ExtensionContext):
 	pi.sendUserMessage(result.prompt);
 }
 
-export function registerPlanStudioFeature(pi: ExtensionAPI): void {
+export function registerPlanApprovalFeature(pi: ExtensionAPI): void {
 	pi.on("agent_start", async () => {
 		getSessionWorkflow().beginAgentTurn();
 	});
@@ -294,7 +293,7 @@ export function registerPlanStudioFeature(pi: ExtensionAPI): void {
 			return {
 				message: {
 					customType: "conarti-plan-context",
-					content: ZERO_FLUFF_PLAN_PROMPT,
+					content: t("plan.prompt.system"),
 					display: false,
 				},
 			};
@@ -306,7 +305,7 @@ export function registerPlanStudioFeature(pi: ExtensionAPI): void {
 				return {
 					message: {
 						customType: "conarti-plan-exec-context",
-						content: `[Выполнение плана] Оставшиеся шаги:\n${list}\nПосле завершения каждого шага добавляй маркер [DONE:n].`,
+						content: t("plan.prompt.execContext", { list }),
 						display: false,
 					},
 				};
@@ -378,26 +377,42 @@ export function registerPlanStudioFeature(pi: ExtensionAPI): void {
 				updatePlanWidget(pi, ctx);
 
 				if (ctx.mode === "tui" && ctx.hasUI && lastAssistant.stopReason === "stop") {
-					void showPlanStudio(pi, ctx);
+					void showPlanApproval(pi, ctx);
 				}
 			}
 		} else if (wf.executingPlan && wf.planSteps.length > 0) {
 			const { allCompleted } = wf.markCompletedSteps(extractAllText(lastAssistant));
 			if (allCompleted) {
-				ctx.ui.notify("✓ Все шаги плана выполнены", "info");
+				ctx.ui.notify(t("plan.allStepsDone"), "info");
 			}
 			updatePlanWidget(pi, ctx);
 			wf.persist(pi);
 		}
 	});
 
+	pi.registerCommand("always-approve", {
+		description: t("sessionMode.command.alwaysApprove"),
+		handler: async (_args, ctx) => {
+			setSessionMode(pi, ctx, "always-approve");
+		},
+	});
+
+	pi.registerCommand("auto", {
+		description: t("sessionMode.command.auto"),
+		handler: async (_args, ctx) => {
+			setSessionMode(pi, ctx, "auto");
+		},
+	});
+
 	pi.registerCommand("plan", {
-		description: "Режим планирования без воды и ревью плана с построчными комментариями",
+		description: t("sessionMode.command.plan"),
 		handler: async (args, ctx) => {
 			const sub = args.trim().toLowerCase();
 			const wf = getSessionWorkflow();
 
-			if (sub === "off" || sub === "code") return setSessionMode(pi, ctx, "code");
+			if (sub === "off" || sub === "always-approve" || sub === "code") {
+				return setSessionMode(pi, ctx, "always-approve");
+			}
 			if (sub === "on") return setSessionMode(pi, ctx, "plan");
 			if (sub === "run" || sub === "approve") return approveAndExecutePlan(pi, ctx);
 			if (sub === "clear") {
@@ -405,19 +420,30 @@ export function registerPlanStudioFeature(pi: ExtensionAPI): void {
 				return;
 			}
 			if (sub === "review" || wf.hasPlan()) {
-				await showPlanStudio(pi, ctx);
+				await showPlanApproval(pi, ctx);
 				return;
 			}
-			setSessionMode(pi, ctx, wf.mode === "plan" ? "code" : "plan");
+			setSessionMode(pi, ctx, wf.mode === "plan" ? "always-approve" : "plan");
 		},
 	});
 
 	pi.registerCommand("mode", {
-		description: "Выбрать режим работы: /mode [code|plan|safe]",
+		description: t("sessionMode.command.mode"),
+		getArgumentCompletions: (prefix) => {
+			const typed = prefix.trimStart().toLowerCase();
+			const items = SESSION_MODE_ORDER.filter(
+				(choice) => choice.startsWith(typed) && choice !== typed.trimEnd(),
+			).map((choice) => ({ value: choice, label: choice }));
+			return items.length > 0 ? items : null;
+		},
 		handler: async (args, ctx) => {
-			const target = args.trim().toLowerCase();
-			if (target === "code" || target === "plan" || target === "safe") {
-				setSessionMode(pi, ctx, target);
+			const normalized = normalizeSessionMode(args);
+			if (normalized) {
+				setSessionMode(pi, ctx, normalized);
+				return;
+			}
+			if (ctx.mode === "tui" && ctx.hasUI && args.trim() === "") {
+				openComposerPopover(pi, ctx, "mode");
 				return;
 			}
 			cycleSessionMode(pi, ctx);

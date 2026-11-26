@@ -14,10 +14,12 @@ import {
 	updatePiUiUserConfig,
 } from "../../shared/pi-ui-config.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
+import { t } from "../../shared/i18n.ts";
 import {
 	getActiveComposerEditor,
 	registerFeatureComposerHooks,
 	type ComposerHooks,
+	type PiUiComposerEditor,
 } from "../chrome/composer.ts";
 import { getActivePromptChipRegistry } from "../prompt-chips/index.ts";
 import {
@@ -43,7 +45,39 @@ export {
 } from "./supersede-external.ts";
 
 const SUGGESTIONS_MODES = ["on", "off"] as const;
-const SUGGESTIONS_USAGE = "Использование: /suggestions [on|off]";
+const SUGGESTION_BRIDGE_KEY = Symbol.for("conarti.pi-ui.prompt-suggestion-bridge.v1");
+
+interface PromptSuggestionBridge {
+	setEnabled(next: boolean): boolean;
+	hasActive(): boolean;
+	accept(editor: PiUiComposerEditor): boolean;
+	dismiss(): boolean;
+}
+
+function getSuggestionBridgeSlot(): { bridge?: PromptSuggestionBridge } {
+	const g = globalThis as Record<symbol, { bridge?: PromptSuggestionBridge } | undefined>;
+	if (!g[SUGGESTION_BRIDGE_KEY]) {
+		g[SUGGESTION_BRIDGE_KEY] = {};
+	}
+	return g[SUGGESTION_BRIDGE_KEY]!;
+}
+
+export function setPromptSuggestionsEnabled(next: boolean): boolean {
+	return getSuggestionBridgeSlot().bridge?.setEnabled(next)
+		?? updatePiUiUserConfig({ promptSuggestions: next }).promptSuggestions;
+}
+
+export function hasActivePromptSuggestion(): boolean {
+	return getSuggestionBridgeSlot().bridge?.hasActive() ?? false;
+}
+
+export function acceptActivePromptSuggestion(editor: PiUiComposerEditor): boolean {
+	return getSuggestionBridgeSlot().bridge?.accept(editor) ?? false;
+}
+
+export function dismissActivePromptSuggestion(): boolean {
+	return getSuggestionBridgeSlot().bridge?.dismiss() ?? false;
+}
 
 function resolveActiveTui() {
 	return getActiveHostRuntime()?.tui ?? getActiveComposerEditor()?.getTui();
@@ -70,7 +104,19 @@ export function registerPromptSuggestionFeature(pi: ExtensionAPI): void {
 
 	const suggestionComposerHooks: ComposerHooks = {
 		hasDraftAttachments: () => getActivePromptChipRegistry().hasActiveDraftChips(),
-		getEmptyPlaceholder: () => (enabled ? activeSuggestion : undefined),
+		getEmptyPlaceholder: () => {
+			if (!enabled || !activeSuggestion) return undefined;
+			return loadPiUiUserConfig().showShortcutsBar
+				? activeSuggestion
+				: `${activeSuggestion} [Tab]`;
+		},
+		onEmptyPlaceholderClick: (editor) => {
+			if (!enabled || !activeSuggestion) return false;
+			const accepted = activeSuggestion;
+			activeSuggestion = undefined;
+			editor.acceptTextWithUndoSnapshot(accepted);
+			return true;
+		},
 		interceptEmptyDraftInput: (data, editor) => {
 			if (!enabled || !activeSuggestion) return false;
 			if (matchesKey(data, "tab") || matchesKey(data, "right")) {
@@ -87,11 +133,34 @@ export function registerPromptSuggestionFeature(pi: ExtensionAPI): void {
 		},
 	};
 
+	getSuggestionBridgeSlot().bridge = {
+		setEnabled: (next) => {
+			enabled = updatePiUiUserConfig({ promptSuggestions: next }).promptSuggestions;
+			if (!enabled) clearPromptSuggestion();
+			requestRender();
+			return enabled;
+		},
+		hasActive: () => Boolean(enabled && activeSuggestion),
+		accept: (editor) => {
+			if (!enabled || !activeSuggestion) return false;
+			const accepted = activeSuggestion;
+			activeSuggestion = undefined;
+			editor.acceptTextWithUndoSnapshot(accepted);
+			return true;
+		},
+		dismiss: () => {
+			if (!activeSuggestion) return false;
+			activeSuggestion = undefined;
+			requestRender();
+			return true;
+		},
+	};
+
 	registerFeatureComposerHooks("prompt-suggestion", suggestionComposerHooks);
 
 	withConartiInternalRegistration(() => {
 		pi.registerCommand("suggestions", {
-			description: "Включить или выключить Prompt Suggestion (/suggestions [on|off])",
+			description: t("suggestions.command"),
 			getArgumentCompletions: (prefix) => {
 				const typed = prefix.trimStart().toLowerCase();
 				const items = SUGGESTIONS_MODES.filter(
@@ -102,20 +171,15 @@ export function registerPromptSuggestionFeature(pi: ExtensionAPI): void {
 			handler: async (args, ctx) => {
 				const arg = args.trim().toLowerCase();
 				if (arg !== "" && arg !== "on" && arg !== "off") {
-					ctx.ui.notify(SUGGESTIONS_USAGE, "warning");
+					ctx.ui.notify(t("suggestions.usage"), "warning");
 					return;
 				}
 
 				const current = loadPiUiUserConfig().promptSuggestions;
 				const next = arg === "on" ? true : arg === "off" ? false : !current;
-				enabled = updatePiUiUserConfig({ promptSuggestions: next }).promptSuggestions;
-				if (!enabled) {
-					clearPromptSuggestion();
-				} else {
-					requestRender();
-				}
+				const active = setPromptSuggestionsEnabled(next);
 				ctx.ui.notify(
-					`Prompt Suggestion: ${enabled ? "включены (on)" : "выключены (off)"}`,
+					t("suggestions.toggled", { state: active ? t("state.on") : t("state.off") }),
 					"info",
 				);
 			},

@@ -8,12 +8,15 @@ import { getActiveComposerEditor } from "../src/features/chrome/composer.ts";
 import type { OutlineRailComponent } from "../src/features/outline-rail/rail-view.ts";
 import { getActiveHostRuntime, unwrapHostTui } from "../src/shared/host-runtime.ts";
 import { hasBlockingModalOverlay } from "../src/shared/modal-card.ts";
+import { updatePiUiUserConfig } from "../src/shared/pi-ui-config.ts";
 import {
 	createInteractiveHarness,
 	DEFAULT_EXTENSION_ENTRY,
 	fauxAssistantMessage,
 	fauxText,
 	fauxThinking,
+	fauxToolCall,
+	findComposerTopRow,
 	type InteractiveHarness,
 } from "./harness/index.ts";
 
@@ -28,17 +31,6 @@ async function flushAsyncQuote(harness?: InteractiveHarness): Promise<void> {
 	}
 	await new Promise<void>((resolve) => setTimeout(resolve, 0));
 	harness?.flushFrame();
-}
-
-function findComposerTopRow(harness: InteractiveHarness): number {
-	const screen = harness.screen();
-	for (let r = screen.height - 1; r >= 0; r -= 1) {
-		const row = screen.rowText(r);
-		if (row.startsWith("╭") && row.endsWith("╮")) {
-			return r;
-		}
-	}
-	throw new Error("Expected rounded composer top border on terminal screen");
 }
 
 function getSelectionText(harness: InteractiveHarness): string | undefined {
@@ -66,7 +58,7 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		harness = await createInteractiveHarness({
 			theme: "dark",
 			width: 100,
-			height: 28,
+			height: 34,
 			clipboard: {
 				text: "Clipboard line 1\nClipboard line 2\nClipboard line 3",
 			},
@@ -104,7 +96,7 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		await harness.pressKey("\x1b[1081;3u");
 		await flushAsyncQuote(harness);
 
-		expect(editor.getText()).toBe("[❝ Quote #1 · 2 lines]");
+		expect(editor.getText()).toBe("[❝ Quote #1 · 2 lines] ");
 		expect(getSelectionText(harness)).toBeUndefined();
 		const widgetAbove = (harness.tui as unknown as { children?: Array<{ children?: unknown[] }> })
 			.children?.[3];
@@ -143,16 +135,15 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 
 		editor.setText("");
 		await harness.prompt("/quote");
-		expect(editor.getText()).toBe("[❝ Quote #1 · 1 line]");
+		expect(editor.getText()).toBe("[❝ Quote #1 · 1 line] ");
 
-		await harness.typeText(" ");
 		await harness.prompt("/quote 2");
-		expect(editor.getText()).toBe("[❝ Quote #1 · 1 line] [❝ Quote #2 · 2 lines]");
+		expect(editor.getText()).toBe("[❝ Quote #1 · 1 line] [❝ Quote #2 · 2 lines] ");
 
 		await harness.prompt("/quote 99");
 		scroll.scrollToEnd();
-		expect(editor.getText()).toBe("[❝ Quote #1 · 1 line] [❝ Quote #2 · 2 lines]");
-		expect(harness.screen().text()).toContain("доступно ответов ассистента: 2");
+		expect(editor.getText()).toBe("[❝ Quote #1 · 1 line] [❝ Quote #2 · 2 lines] ");
+		expect(harness.screen().text()).toContain("Available assistant replies in this session: 2");
 	});
 
 	it("provides /quotes Modal Card inspection, multi-line editing, single removal, and full clearing while preserving non-quote chips and undo", async () => {
@@ -170,17 +161,16 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 
 		await harness.prompt("/quotes");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
-		expect(harness.screen().text()).toContain("В черновике нет активных цитат");
+		expect(harness.screen().text()).toContain("No active quotes in the draft");
 
 		await harness.pressKey("\x16");
 		await flushAsyncQuote(harness);
-		expect(editor.getText()).toBe("[🖼 Image #1]");
+		expect(editor.getText()).toBe("[🖼 Image #1] ");
 
 		harness.setClipboard({
 			image: null,
 			text: "Original quote A\nOriginal quote B",
 		});
-		await harness.typeText(" ");
 		await harness.pressKey("\x1b[113;3u");
 		await flushAsyncQuote(harness);
 
@@ -188,12 +178,11 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			image: null,
 			text: "Second quote line",
 		});
-		await harness.typeText(" ");
 		await harness.pressKey("\x1b[113;3u");
 		await flushAsyncQuote(harness);
 
 		expect(editor.getText()).toBe(
-			"[🖼 Image #1] [❝ Quote #2 · 2 lines] [❝ Quote #3 · 1 line]",
+			"[🖼 Image #1] [❝ Quote #2 · 2 lines] [❝ Quote #3 · 1 line] ",
 		);
 
 		let modalClosed = false;
@@ -214,7 +203,7 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		await harness.pressKey("\r");
 
 		expect(editor.getText()).toBe(
-			"[🖼 Image #1] [❝ Quote #2 · 3 lines] [❝ Quote #3 · 1 line]",
+			"[🖼 Image #1] [❝ Quote #2 · 3 lines] [❝ Quote #3 · 1 line] ",
 		);
 
 		await harness.pressKey("\x1b[B");
@@ -251,20 +240,19 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		expect(editor.getText()).toBe("[🖼 Image #1] keep this text");
 
 		harness.setClipboard({ text: "Mouse editable quote" });
-		await harness.typeText(" ");
 		await harness.pressKey("\x1b[113;3u");
 		await flushAsyncQuote(harness);
 		expect(editor.getText()).toBe(
-			"[🖼 Image #1] keep this text [❝ Quote #2 · 1 line]",
+			"[🖼 Image #1] keep this text [❝ Quote #2 · 1 line] ",
 		);
 
 		await harness.prompt("/quotes edit q2 Same-line replacement");
 		expect(editor.getText()).toBe(
-			"[🖼 Image #1] keep this text [❝ Quote #2 · 1 line]",
+			"[🖼 Image #1] keep this text [❝ Quote #2 · 1 line] ",
 		);
 		await harness.pressKey("\x1f");
 		expect(editor.getText()).toBe(
-			"[🖼 Image #1] keep this text [❝ Quote #2 · 1 line]",
+			"[🖼 Image #1] keep this text [❝ Quote #2 · 1 line] ",
 		);
 		expect(harness.screen().text()).toContain("Mouse editable quote");
 
@@ -279,18 +267,18 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		await harness.pressKey("\x1b");
 		await pasteEditPromise;
 		expect(editor.getText()).toBe(
-			"[🖼 Image #1] keep this text [❝ Quote #2 · 2 lines]",
+			"[🖼 Image #1] keep this text [❝ Quote #2 · 2 lines] ",
 		);
 
 		await harness.prompt("/quotes edit q2 Inline updated line 1\nInline updated line 2");
 		expect(editor.getText()).toBe(
-			"[🖼 Image #1] keep this text [❝ Quote #2 · 2 lines]",
+			"[🖼 Image #1] keep this text [❝ Quote #2 · 2 lines] ",
 		);
 
 		const mouseModalPromise = harness.prompt("/quotes");
 		await flushAsyncQuote(harness);
 		const modalScreen = harness.screen();
-		const clearPillHit = modalScreen.findText("Очистить все");
+		const clearPillHit = modalScreen.findText("Clear all");
 		expect(clearPillHit).toBeDefined();
 		await harness.mouseClick(clearPillHit!.col + 2, clearPillHit!.row);
 		await mouseModalPromise;
@@ -416,7 +404,7 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			await flushAsyncQuote(harness);
 
 			const editor = getActiveComposerEditor()!;
-			expect(editor.getText()).toBe("[❝ Quote #1 · 1 line]");
+			expect(editor.getText()).toBe("[❝ Quote #1 · 1 line] ");
 			await harness.prompt("/quotes clear");
 			expect(editor.getText()).toBe("");
 			expect(
@@ -453,17 +441,17 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		await flushAsyncQuote(harness);
 
 		harness.setClipboard({ image: null, text: null });
-		await harness.typeText(" code ");
+		await harness.typeText("code ");
 		await harness.paste("const a = 1;\nconst b = 2;\nconst c = 3;\nconst d = 4;", true);
 
 		harness.setClipboard({
 			image: null,
 			text: "\tQuoted first line\n\n\t\tQuoted third line",
 		});
-		await harness.typeText(" against ");
+		await harness.typeText("against ");
 		await harness.pressKey("\x1b[113;3u");
 		await flushAsyncQuote(harness);
-		await harness.typeText(" carefully");
+		await harness.typeText("carefully");
 
 		expect(editor.getText()).toBe(
 			"Review [🖼 Image #1] code [📋 Pasted #2 · 4 lines] against [❝ Quote #3 · 3 lines] carefully",
@@ -516,24 +504,24 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 
 		scroll.scrollTo(rail.offsetOf(0) + 8, { disableFollow: true });
 		const scrolledScreen = harness.screen();
-		const stickyRow = scrolledScreen.rowText(1);
-		expect(stickyRow).toContain("[❝ Quote #3 · 3 lines]");
-		const stickyQuoteCol = stickyRow.indexOf("[❝ Quote #3 · 3 lines]");
+		const stickyQuoteHit = scrolledScreen.findText("[❝ Quote #3 · 3 lines]");
+		expect(stickyQuoteHit).toBeDefined();
+		expect(stickyQuoteHit!.row).toBeGreaterThanOrEqual(4);
+		expect(stickyQuoteHit!.row).toBeLessThanOrEqual(6);
 
-		await harness.mouseClick(stickyQuoteCol + 3, 1);
+		await harness.mouseClick(stickyQuoteHit!.col + 3, stickyQuoteHit!.row);
 		const withStickyPreview = harness.screen().text();
 		expect(withStickyPreview).toContain("❝ Quote #3 · 3 lines");
 		expect(withStickyPreview).toContain("│   Quoted first line");
 	});
 
 	it.each(["dark", "light"] as const)(
-		"lazily mounts nonCapturing ╭ ❝ Цитировать ╮ Hover Popup on drag and multi-click selection in %s theme (preserving copyOnSelect and respecting Modal Cards), quotes on click, and dismisses on Esc, scroll, or outside click without stealing focus",
+		"lazily mounts nonCapturing selection Hover Popup on drag and multi-click selection in %s theme (preserving copyOnSelect and respecting Modal Cards), quotes on click, and dismisses on Esc, scroll, or outside click without stealing focus",
 		async (themeMode) => {
 			harness = await createInteractiveHarness({
 				theme: themeMode,
 				width: 100,
 				height: 26,
-				settings: { fullscreenCopyOnSelect: true },
 				responses: [
 					fauxAssistantMessage(
 						[
@@ -546,6 +534,7 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 					),
 				],
 			});
+			updatePiUiUserConfig({ copyOnSelect: true });
 
 			await harness.submitInput("Generate quotable text");
 
@@ -565,7 +554,7 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			expect(secondHit).toBeDefined();
 
 			await harness.mouseDrag(80, alphaHit!.row, 90, alphaHit!.row, { steps: 2 });
-			expect(harness.screen().text()).not.toContain("╭ ❝ Цитировать ╮");
+			expect(harness.screen().text()).not.toContain("[Quote · Alt+Q]");
 
 			harness.terminal.writes.length = 0;
 			await harness.mouseDrag(
@@ -581,9 +570,10 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			expect(renderer.getFocusedComponent?.()).toBe(editor);
 
 			const dragScreen = harness.screen();
-			const popupHit = dragScreen.findText("╭ ❝ Цитировать ╮");
+			const popupHit = dragScreen.findText("[Quote · Alt+Q]");
 			expect(popupHit).toBeDefined();
 			expect(popupHit!.col).toBeGreaterThanOrEqual(1);
+			expect(dragScreen.text()).toContain("✓ Copied · [Quote · Alt+Q]");
 
 			const rawPopupLine = harness.renderFrame()[popupHit!.row]!;
 			for (const m of rawPopupLine.matchAll(/\x1b\[(?:38|48);2;(\d+);(\d+);(\d+)m/g)) {
@@ -596,10 +586,10 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			renderer.setFocus?.(null);
 			await harness.mouseClick(popupHit!.col + 4, popupHit!.row);
 
-			expect(editor.getText()).toBe("[❝ Quote #1 · 2 lines]");
+			expect(editor.getText()).toBe("[❝ Quote #1 · 2 lines] ");
 			expect(getSelectionText(harness)).toBeUndefined();
 			expect(renderer.getFocusedComponent?.()).toBe(editor);
-			expect(harness.screen().text()).not.toContain("╭ ❝ Цитировать ╮");
+			expect(harness.screen().text()).not.toContain("[Quote · Alt+Q]");
 			expect(harness.screen().text()).toContain("❝ Quote #1 · 2 lines");
 
 			editor.setText("");
@@ -608,31 +598,31 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			await harness.mouseClick(wordCol.col + 1, wordCol.row);
 			await harness.mouseClick(wordCol.col + 1, wordCol.row);
 			expect(getSelectionText(harness)).toBe("alpha");
-			expect(harness.screen().text()).toContain("╭ ❝ Цитировать ╮");
+			expect(harness.screen().text()).toContain("[Quote · Alt+Q]");
 
 			await harness.pressKey("\x1b");
 			expect(renderer.getFocusedComponent?.()).toBe(editor);
-			expect(harness.screen().text()).not.toContain("╭ ❝ Цитировать ╮");
+			expect(harness.screen().text()).not.toContain("[Quote · Alt+Q]");
 
 			await harness.mouseDrag(alphaHit!.col, alphaHit!.row, alphaHit!.col + 16, alphaHit!.row);
-			expect(harness.screen().text()).toContain("╭ ❝ Цитировать ╮");
+			expect(harness.screen().text()).toContain("[Quote · Alt+Q]");
 			await harness.mouseWheel("down", 10, 8, 1);
 			expect(renderer.getFocusedComponent?.()).toBe(editor);
-			expect(harness.screen().text()).not.toContain("╭ ❝ Цитировать ╮");
+			expect(harness.screen().text()).not.toContain("[Quote · Alt+Q]");
 
 			scroll.scrollTo(railTestTop, { disableFollow: true });
 			await harness.mouseDrag(alphaHit!.col, alphaHit!.row, alphaHit!.col + 16, alphaHit!.row);
-			expect(harness.screen().text()).toContain("╭ ❝ Цитировать ╮");
+			expect(harness.screen().text()).toContain("[Quote · Alt+Q]");
 			await harness.mouseClick(2, alphaHit!.row + 4);
 			expect(renderer.getFocusedComponent?.()).toBe(editor);
-			expect(harness.screen().text()).not.toContain("╭ ❝ Цитировать ╮");
+			expect(harness.screen().text()).not.toContain("[Quote · Alt+Q]");
 
 			editor.setText("");
 			await harness.mouseClick(wordCol.col + 1, wordCol.row);
 			await harness.mouseClick(wordCol.col + 1, wordCol.row);
 			await harness.mouseClick(wordCol.col + 1, wordCol.row);
 			expect(getSelectionText(harness)?.trim()).toBe("Selectable alpha beta gamma delta");
-			const triplePopup = harness.screen().findText("╭ ❝ Цитировать ╮")!;
+			const triplePopup = harness.screen().findText("[Quote · Alt+Q]")!;
 			expect(triplePopup).toBeDefined();
 
 			await harness.mouseDrag(
@@ -642,7 +632,7 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 				triplePopup.row,
 				{ steps: 1 },
 			);
-			expect(editor.getText()).toBe("[❝ Quote #1 · 1 line]");
+			expect(editor.getText()).toBe("[❝ Quote #1 · 1 line] ");
 			editor.setText("");
 
 			for (const { startTop, scrollAction } of [
@@ -654,10 +644,10 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 				scroll.scrollTo(startTop, { disableFollow: true });
 				const rowForDrag = harness.screen().findText("Selectable alpha")!.row;
 				await harness.mouseDrag(4, rowForDrag, 20, rowForDrag);
-				expect(harness.screen().text()).toContain("╭ ❝ Цитировать ╮");
+				expect(harness.screen().text()).toContain("[Quote · Alt+Q]");
 				scrollAction();
 				expect(renderer.getFocusedComponent?.()).toBe(editor);
-				expect(harness.screen().text()).not.toContain("╭ ❝ Цитировать ╮");
+				expect(harness.screen().text()).not.toContain("[Quote · Alt+Q]");
 			}
 
 			scroll.scrollTo(railTestTop, { disableFollow: true });
@@ -665,7 +655,7 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			await harness.pressKey("\x0b");
 			expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
 			await harness.mouseDrag(4, modalTestRow, 20, modalTestRow);
-			expect(harness.screen().text()).not.toContain("╭ ❝ Цитировать ╮");
+			expect(harness.screen().text()).not.toContain("[Quote · Alt+Q]");
 			await harness.pressKey("\x1b");
 		},
 	);
@@ -675,7 +665,6 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 			theme: "dark",
 			width: 100,
 			height: 26,
-			settings: { fullscreenCopyOnSelect: true },
 			responses: [
 				fauxAssistantMessage(
 					Array.from({ length: 18 }, (_, idx) => `Body turn one row ${idx} clean text`).join("\n"),
@@ -685,6 +674,7 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 				),
 			],
 		});
+		updatePiUiUserConfig({ copyOnSelect: true });
 
 		await harness.submitInput("First user turn prompt");
 		await harness.submitInput("Second user turn prompt");
@@ -698,20 +688,18 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 		expect(bodyRowHit).toBeDefined();
 		await harness.mouseDrag(bodyRowHit!.col, bodyRowHit!.row, bodyRowHit!.col + 20, bodyRowHit!.row);
 
-		const firstPop = harness.screen().findText("╭ ❝ Цитировать ╮");
+		const firstPop = harness.screen().findText("[Quote · Alt+Q]");
 		expect(firstPop).toBeDefined();
-		expect(firstPop!.row).toBeGreaterThanOrEqual(3);
+		expect(firstPop!.row).toBeGreaterThanOrEqual(6);
 		await harness.mouseClick(firstPop!.col + 3, firstPop!.row);
-		expect(editor.getText()).toBe("[❝ Quote #1 · 1 line]");
+		expect(editor.getText()).toBe("[❝ Quote #1 · 1 line] ");
 
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 		const rawRenderer = unwrapHostTui(harness.tui) as {
-			getScrollbarTargetAt?: (x: number, y: number, allowTransient?: boolean) => unknown;
 			getSelectionBounds?: () => { start?: { scrollView?: unknown } } | undefined;
 			selectionAutoScrollDirection?: number;
 			selectionPressActive?: boolean;
 		};
-		expect(rawRenderer.getScrollbarTargetAt?.(99, 6, true)).toBeDefined();
 
 		const tripleTarget = harness.screen().findText("clean text")!;
 		await harness.mouseClick(tripleTarget.col + 2, tripleTarget.row);
@@ -722,19 +710,117 @@ describe("Native Quote Prompt Chips, Alt+Q, /quote, /quotes, and Selection Hover
 
 		harness.terminal.writes.length = 0;
 		await harness.mouseDown(4, tripleTarget.row, "left");
-		await harness.sendInput("\x1b[<32;19;1M");
+		await harness.sendInput("\x1b[<32;19;4M");
 		expect(rawRenderer.selectionAutoScrollDirection).toBe(-1);
-		await harness.mouseUp(18, 1, "left");
+		await harness.mouseUp(18, 4, "left");
 
 		expect(rawRenderer.selectionPressActive).toBe(false);
 		expect(harness.terminal.writes.some((w) => w.startsWith("\x1b]52;c;"))).toBe(true);
-		const stickySafePopup = harness.screen().findText("╭ ❝ Цитировать ╮");
+		const stickySafePopup = harness.screen().findText("[Quote · Alt+Q]");
 		expect(stickySafePopup).toBeDefined();
-		expect(stickySafePopup!.row).toBeGreaterThanOrEqual(3);
+		expect(stickySafePopup!.row).toBeGreaterThanOrEqual(6);
 
 		await harness.pressKey("\x1b");
 		const composerBodyRow = findComposerTopRow(harness) + 1;
 		await harness.mouseDrag(4, composerBodyRow, 20, 10, { steps: 2 });
-		expect(harness.screen().text()).not.toContain("╭ ❝ Цитировать ╮");
+		expect(harness.screen().text()).not.toContain("[Quote · Alt+Q]");
+	});
+
+	it("supports dragging across multiple collapsed tool rows, selecting above-editor widgets, Cmd+C (Latin & Cyrillic), and copyOnly [Copy] popup inside blocking Modal Cards", async () => {
+		const tempCwd = mkdtempSync(join(tmpdir(), "pi-ui-multi-tool-copy-"));
+		tempDirs.push(tempCwd);
+		writeFileSync(join(tempCwd, "alpha.ts"), "export const alpha = 1;\n", "utf8");
+		writeFileSync(join(tempCwd, "beta.ts"), "export const beta = 2;\n", "utf8");
+
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 110,
+			height: 36,
+			cwd: tempCwd,
+			settings: { toolDensity: "detailed" },
+			extensionFactories: [
+				(pi: ExtensionAPI) => {
+					pi.on("session_start", (_ev, ctx) => {
+						ctx.ui.setWidget("steps-demo", [
+							"◆ 0/4 steps",
+							"  ▸ Verify multi-tool drag selection",
+						]);
+					});
+				},
+			],
+			responses: [
+				fauxAssistantMessage(
+					[fauxToolCall("bash", { command: "printf alpha-one" })],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage(
+					[fauxToolCall("bash", { command: "printf beta-two" })],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage([fauxText("Completed running alpha and beta.")]),
+			],
+		});
+		updatePiUiUserConfig({ copyOnSelect: false });
+
+		await harness.submitInput("Inspect both files");
+		harness.flushFrame();
+
+		/* 1. Выделение перетаскиванием по нескольким строкам вызовов инструментов показывает попап и копирует их текст */
+		const alphaHit = harness.screen().findText("printf alpha-one");
+		const betaHit = harness.screen().findText("printf beta-two");
+		expect(alphaHit).toBeDefined();
+		expect(betaHit).toBeDefined();
+
+		await harness.mouseDrag(4, alphaHit!.row, 48, betaHit!.row, { steps: 4 });
+		await flushAsyncQuote(harness);
+		expect(getSelectionText(harness)).toBeTruthy();
+		expect(harness.screen().text()).toContain("[Copy]");
+		expect(harness.screen().text()).toContain("[Quote · Alt+Q]");
+
+		/* Cmd+C (CSI-u super+c) копирует выделенные вызовы инструментов без сброса терминала */
+		harness.setClipboard({ text: "" });
+		await harness.pressKey("\x1b[99;9u");
+		await flushAsyncQuote(harness);
+		const copiedTools = (await getActiveHostRuntime()!.clipboard.readText?.()) ?? "";
+		expect(copiedTools).toContain("printf alpha-one");
+		expect(copiedTools).toContain("printf beta-two");
+
+		/* 2. Выделение в виджете расширений над редактором показывает попап и копируется по кириллическому Cmd+с */
+		const widgetHit = harness.screen().findText("0/4 steps");
+		expect(widgetHit).toBeDefined();
+		await harness.mouseDrag(widgetHit!.col, widgetHit!.row, widgetHit!.col + 9, widgetHit!.row, { steps: 3 });
+		await flushAsyncQuote(harness);
+		expect(harness.screen().text()).toContain("[Copy]");
+
+		harness.setClipboard({ text: "" });
+		await harness.pressKey("\x1b[1089;9u");
+		await flushAsyncQuote(harness);
+		expect(await getActiveHostRuntime()!.clipboard.readText?.()).toContain("0/4 steps");
+
+		/* 3. Внутри блокирующей модальной карточки (/context) при выделении показывается только [Copy], и работает как клик [Copy], так и Cmd+C */
+		const contextOpen = harness.submitInput("/context");
+		await flushAsyncQuote(harness);
+		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
+
+		const modalHit =
+			harness.screen().findText("Context Inspector") ??
+			harness.screen().findText("Context");
+		expect(modalHit).toBeDefined();
+		await harness.mouseDrag(modalHit!.col, modalHit!.row, modalHit!.col + 14, modalHit!.row, { steps: 3 });
+		await flushAsyncQuote(harness);
+
+		const modalScreen = harness.screen();
+		expect(modalScreen.text()).toContain("[Copy]");
+		expect(modalScreen.text()).not.toContain("[Quote · Alt+Q]");
+
+		harness.setClipboard({ text: "" });
+		const copyBtn = modalScreen.findText("[Copy]");
+		expect(copyBtn).toBeDefined();
+		await harness.mouseClick(copyBtn!.col + 2, copyBtn!.row);
+		await flushAsyncQuote(harness);
+		expect(await getActiveHostRuntime()!.clipboard.readText?.()).toContain("Context");
+
+		await harness.pressKey("\x1b");
+		await contextOpen;
 	});
 });

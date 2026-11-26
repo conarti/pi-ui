@@ -3,7 +3,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runQuestionnaire } from "../src/features/ask-user/questionnaire.ts";
 import { showContextInspector } from "../src/features/context-inspector/index.ts";
-import { showPlanStudio } from "../src/features/plan-studio/studio-overlay.ts";
+import { showPlanApproval } from "../src/features/plan-approval/approval-overlay.ts";
+import { parseAnsiColorRgb, rgbHueDegrees } from "../src/shared/ansi.ts";
 import { hasBlockingModalOverlay } from "../src/shared/modal-card.ts";
 import { getSessionWorkflow } from "../src/shared/session-workflow.ts";
 import {
@@ -101,9 +102,10 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 				expect(lum).toBeGreaterThan(170);
 			}
 
+			expect(baseScreen.rowText(bounds.top)).toContain("[×]");
 			let closeCol = -1;
-			for (let c = bounds.left; c <= bounds.right; c += 1) {
-				if (baseScreen.cellAt(bounds.top, c)?.char === "✕") {
+			for (let c = bounds.right; c >= bounds.left; c -= 1) {
+				if (baseScreen.cellAt(bounds.top, c)?.char === "×") {
 					closeCol = c;
 					break;
 				}
@@ -114,7 +116,7 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 			const closeFgAfter = harness.screen().cellAt(bounds.top, closeCol)?.fg;
 			expect(closeFgAfter).not.toEqual(closeFgBefore);
 
-			const pillPos = baseScreen.findText("Закрыть");
+			const pillPos = baseScreen.findText("Close");
 			expect(pillPos).toBeDefined();
 			const pillBgBefore = baseScreen.cellAt(pillPos!.row, pillPos!.col)?.bg;
 			await harness.mouseMove(pillPos!.col + 1, pillPos!.row);
@@ -129,9 +131,10 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		await harness.resize(48, 32);
 		const narrowScreen = harness.screen();
 		const narrowBounds = findModalBounds(narrowScreen);
+		expect(narrowScreen.rowText(narrowBounds.top)).toContain("[×]");
 		let narrowCloseCol = -1;
-		for (let c = narrowBounds.left; c <= narrowBounds.right; c += 1) {
-			if (narrowScreen.cellAt(narrowBounds.top, c)?.char === "✕") {
+		for (let c = narrowBounds.right; c >= narrowBounds.left; c -= 1) {
+			if (narrowScreen.cellAt(narrowBounds.top, c)?.char === "×") {
 				narrowCloseCol = c;
 				break;
 			}
@@ -155,12 +158,12 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 			],
 		});
 
-		await harness.submitInput("/mode safe");
+		await harness.submitInput("/mode auto");
 		const turn = harness.submitInput("Write demo file");
 		await harness.flush();
 
 		const screen0 = harness.screen();
-		expect(screen0.text()).toContain("Auto-Safe Confirmation");
+		expect(screen0.text()).toContain("Auto Permission");
 		const bgLums = collectModalBgLuminances(screen0);
 		expect(bgLums.length).toBeGreaterThan(0);
 		for (const lum of bgLums) {
@@ -168,9 +171,10 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		}
 
 		const bounds = findModalBounds(screen0);
+		expect(screen0.rowText(bounds.top)).toContain("[×]");
 		let closeCol = -1;
-		for (let c = bounds.left; c <= bounds.right; c += 1) {
-			if (screen0.cellAt(bounds.top, c)?.char === "✕") {
+		for (let c = bounds.right; c >= bounds.left; c -= 1) {
+			if (screen0.cellAt(bounds.top, c)?.char === "×") {
 				closeCol = c;
 				break;
 			}
@@ -179,7 +183,7 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		await harness.mouseMove(closeCol, bounds.top);
 		expect(harness.screen().cellAt(bounds.top, closeCol)?.fg).not.toEqual(closeBefore);
 
-		const denyPos = harness.screen().findText("Отклонить");
+		const denyPos = harness.screen().findText("Deny");
 		expect(denyPos).toBeDefined();
 		await harness.mouseClick(denyPos!.col + 2, denyPos!.row);
 		await turn;
@@ -200,7 +204,7 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		await harness.pressKey("\x0b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
 		expect(harness.screen().text()).toContain("⌘ Command Palette");
-		expect(harness.screen().text()).toContain("Поиск команд");
+		expect(harness.screen().text()).toContain("Search commands");
 
 		const boundsWide = findModalBounds(harness.screen());
 		await harness.mouseMove(boundsWide.left + 6, boundsWide.top + 4);
@@ -217,16 +221,17 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		expect(afterBs).not.toContain("👨‍👩‍👧‍👦");
 		expect(afterBs).toContain("⌕");
 		await harness.pressKey("\x15");
-		expect(harness.screen().text()).toContain("Поиск команд");
+		expect(harness.screen().text()).toContain("Search commands");
 
 		for (const termW of [50, 110]) {
 			await harness.resize(termW, 32);
 			await harness.mouseMove(1, 1);
 			const s = harness.screen();
 			const b = findModalBounds(s);
+			expect(s.rowText(b.top)).toContain("[×]");
 			let xCol = -1;
-			for (let c = b.left; c <= b.right; c += 1) {
-				if (s.cellAt(b.top, c)?.char === "✕") {
+			for (let c = b.right; c >= b.left; c -= 1) {
+				if (s.cellAt(b.top, c)?.char === "×") {
 					xCol = c;
 					break;
 				}
@@ -239,9 +244,10 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		await harness.resize(50, 32);
 		const narrow = harness.screen();
 		const nb = findModalBounds(narrow);
+		expect(narrow.rowText(nb.top)).toContain("[×]");
 		let nxCol = -1;
-		for (let c = nb.left; c <= nb.right; c += 1) {
-			if (narrow.cellAt(nb.top, c)?.char === "✕") {
+		for (let c = nb.right; c >= nb.left; c -= 1) {
+			if (narrow.cellAt(nb.top, c)?.char === "×") {
 				nxCol = c;
 				break;
 			}
@@ -250,6 +256,37 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 		expect(harness.screen().text()).not.toContain("⌘ Command Palette");
 		expect(harness.screen().text()).toContain("keep my draft");
+	});
+
+	it("paints One Blue Pro's Command Palette surface without turquoise in 256 colors", async () => {
+		harness = await createInteractiveHarness({ theme: "one-blue-pro", trueColor: false, width: 100, height: 28 });
+		await harness.pressKey("\x0b");
+		const screen = harness.screen();
+		const { top, bottom, left, right } = findModalBounds(screen);
+		const paletteIndexes = new Set<number>();
+		for (let row = top; row <= bottom; row++) {
+			for (let col = left; col <= right; col++) {
+				const bg = screen.cellAt(row, col)?.bg;
+				if (bg?.kind === "palette256") paletteIndexes.add(bg.index);
+			}
+		}
+		expect(paletteIndexes.size).toBeGreaterThan(0);
+		for (const index of paletteIndexes) {
+			const { hue, saturation } = rgbHueDegrees(parseAnsiColorRgb(`\x1b[48;5;${index}m`)!);
+			expect(saturation > 0.04 && hue >= 165 && hue <= 198, `palette index ${index}`).toBe(false);
+		}
+	});
+
+	it("treats Enter inside a split Command Palette paste as filter text", async () => {
+		harness = await createInteractiveHarness({ width: 100, height: 28 });
+		await harness.pressKey("\x0b");
+		await harness.sendInput("\x1b[20");
+		await harness.sendInput("0~a");
+		await harness.sendInput("\r");
+		await harness.sendInput("b\x1b[20");
+		await harness.sendInput("1~");
+		expect(harness.screen().text()).toContain("Command Palette");
+		expect(harness.screen().text()).toContain("⌕ ab");
 	});
 
 	it("tracks split-chunk and back-to-back bracketed pastes statefully and opens Command Palette on post-paste Ctrl+K", async () => {
@@ -295,7 +332,7 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		await harness.submitInput("Create modal plan");
 
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
-		expect(harness.screen().text()).toContain("Plan Studio");
+		expect(harness.screen().text()).toContain("Plan Approval");
 
 		const b0 = findModalBounds(harness.screen());
 		await harness.mouseMove(b0.left + 8, b0.top + 4);
@@ -323,7 +360,7 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 			await harness.resize(termW, 34);
 			await harness.mouseMove(1, 1);
 			const s = harness.screen();
-			const clearPos = s.findText("Сбросить комменты");
+			const clearPos = s.findText("Clear comments");
 			expect(clearPos).toBeDefined();
 			const bgBefore = s.cellAt(clearPos!.row, clearPos!.col)?.bg;
 			await harness.mouseMove(clearPos!.col + 2, clearPos!.row);
@@ -331,11 +368,11 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		}
 
 		await harness.resize(56, 34);
-		const closePill = harness.screen().findText("Закрыть");
+		const closePill = harness.screen().findText("Close");
 		expect(closePill).toBeDefined();
 		await harness.mouseClick(closePill!.col + 1, closePill!.row);
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
-		expect(harness.screen().text()).not.toContain("Plan Studio");
+		expect(harness.screen().text()).not.toContain("Plan Approval");
 	});
 
 	it("performs a quiet no-op when opening a Modal Card over another Modal Card, while ignoring non-capturing Hover Popups", async () => {
@@ -352,7 +389,7 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 								return { consume: true };
 							}
 							if (data === "\x1b[112;7u") {
-								void showPlanStudio(pi, ctx);
+								void showPlanApproval(pi, ctx);
 								return { consume: true };
 							}
 							return undefined;
@@ -394,7 +431,7 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		await harness.pressKey("\x1b[112;7u");
 		expect(harness.screen().text()).toContain("⌘ Command Palette");
 		expect(harness.screen().text()).not.toContain("◐ Context Inspector");
-		expect(harness.screen().text()).not.toContain("╭─ 📋 Plan Studio");
+		expect(harness.screen().text()).not.toContain("◈ Plan Approval");
 
 		await harness.pressKey("\x0b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
@@ -496,6 +533,9 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		expect(harness.screen().text()).not.toContain("⌘ Command Palette");
 		expect(harness.screen().text()).toContain("☐ Storage");
 
+		/* Первый Esc паркует фокус в транскрипт, второй Esc отменяет опросник */
+		await harness.pressKey("\x1b");
+		expect(harness.screen().text()).toContain("Tab return to question");
 		await harness.pressKey("\x1b");
 		await askTurn;
 

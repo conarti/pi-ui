@@ -1,29 +1,37 @@
 import { generateUnifiedPatch, type AgentToolResult, type Theme } from "@earendil-works/pi-coding-agent";
 import {
+	getCapabilities,
+	getImageDimensions,
+	imageFallback,
 	stripTerminalSequences,
 	truncateToWidth,
 	visibleWidth,
+	wrapTextWithAnsi,
 	type Component,
 } from "@earendil-works/pi-tui";
 import {
 	getAnimationElapsedMs,
+	paintGlimmerSweepText,
 	sampleBreathingWaveRgb,
 } from "../../shared/animation-scheduler.ts";
 import { getActiveGlobalTheme, isLightTheme, type RgbTuple } from "../../shared/ansi.ts";
+import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { colorizeRgb } from "./color.ts";
 import {
 	classifyShellCommand as classifyShellExploration,
 	lookKind as classifyExploration,
 	pathOf,
 	type LookKind,
-} from "./claude.ts";
-import { isEmptyOutput, shellOutcome } from "./codex.ts";
+} from "./classic-rows.ts";
+import { isEmptyOutput, shellOutcome } from "./exploration-tail.ts";
 import { TOOL_DIAMOND, normalizeLineEndings, type RowStatus } from "./core.ts";
 import {
 	countEditChanges,
+	formatImageResultSummary,
 	formatResultLineSummary,
 	getEditDiff,
 	getEditPatch,
+	hasImageContent,
 	isReadTextResult,
 	readStartLine,
 	splitReadFooter,
@@ -35,11 +43,14 @@ import {
 	railComponent,
 	renderArguments,
 	renderCodeView,
-	renderCodexDiff,
+	renderTailDiff,
 	renderOutput,
 	trimDiffContext,
 	type CodeDiffLine,
 } from "./layout.ts";
+import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
+import { markSelectionChrome } from "../../shared/selection-copy.ts";
+import { buildStepHeaderParts } from "./step-summaries.ts";
 import type { RowState, ToolArgs, ToolDensity } from "./types.ts";
 
 export const COMMAND_PREVIEW_HEAD = 2;
@@ -217,12 +228,114 @@ export function formatExploredSummary<TRow extends ExplorationRowInput>(
 	return parts.length > 0 ? `${verb} ${parts.join(", ")}` : verb;
 }
 
+export interface DensityGroupSummary {
+	readonly summary: string;
+	readonly changes?: { added: number; removed: number };
+}
+
+/**
+ * Сводит произвольную группу вызовов инструментов (`Compact`, `Grouped`, `Balanced`)
+ * в единую читаемую строку с агрегированными счётчиками правок `+added -removed`.
+ */
+export function formatAllGroupedSummary<
+	TRow extends ExplorationRowInput & {
+		result?: AgentToolResult<unknown> & { isError?: boolean };
+	},
+>(
+	rows: readonly TRow[],
+	canRun: (row: TRow) => boolean = () => true,
+): DensityGroupSummary {
+	const running = rows.some((row) => (!row.result || row.isPartial) && canRun(row));
+	const editedPaths = new Set<string>();
+	let unnamedEdits = 0;
+	let commandCount = 0;
+	let customCount = 0;
+	let totalAdded = 0;
+	let totalRemoved = 0;
+	const exploreRows: TRow[] = [];
+
+	for (const row of rows) {
+		const args: ToolArgs =
+			typeof row.args === "object" && row.args !== null ? (row.args as ToolArgs) : {};
+		if (classifyExploration(row.toolName, args) !== undefined) {
+			exploreRows.push(row);
+			continue;
+		}
+		if (row.toolName === "edit" || row.toolName === "write") {
+			const p = pathOf(args).trim();
+			if (p) editedPaths.add(p);
+			else unnamedEdits += 1;
+			if (row.result && !row.isPartial && !row.result.isError) {
+				const diff = countDiffChangesFromResult(row.toolName, args, row.result);
+				totalAdded += diff.changes.added;
+				totalRemoved += diff.changes.removed;
+			}
+			continue;
+		}
+		if (
+			row.toolName === "bash" ||
+			row.toolName === "powershell" ||
+			row.toolName === "codemode"
+		) {
+			commandCount += 1;
+			continue;
+		}
+		customCount += 1;
+	}
+
+	const editCount = editedPaths.size + unnamedEdits;
+	const { files: expFiles, searches: expSearches, directories: expDirs } =
+		countExploration(exploreRows);
+
+	/* Чисто исследовательская группа сохраняет каноничный формат Explored N files, M searches. */
+	if (editCount === 0 && commandCount === 0 && customCount === 0) {
+		return { summary: formatExploredSummary(rows, canRun) };
+	}
+
+	const clauses: string[] = [];
+	if (editCount > 0) {
+		clauses.push(
+			`${running ? "Editing" : "Edited"} ${editCount} ${editCount === 1 ? "file" : "files"}`,
+		);
+	}
+	if (commandCount > 0) {
+		const verb = clauses.length === 0 ? (running ? "Running" : "Ran") : running ? "running" : "ran";
+		clauses.push(`${verb} ${commandCount} ${commandCount === 1 ? "command" : "commands"}`);
+	}
+	if (expFiles + expSearches + expDirs > 0) {
+		const expParts: string[] = [];
+		if (expFiles > 0) expParts.push(`${expFiles} ${expFiles === 1 ? "file" : "files"}`);
+		if (expSearches > 0) expParts.push(`${expSearches} ${expSearches === 1 ? "search" : "searches"}`);
+		if (expDirs > 0) expParts.push(`${expDirs} ${expDirs === 1 ? "directory" : "directories"}`);
+		const verb =
+			clauses.length === 0
+				? running
+					? "Exploring"
+					: "Explored"
+				: running
+					? "exploring"
+					: "explored";
+		clauses.push(`${verb} ${expParts.join(", ")}`);
+	}
+	if (customCount > 0) {
+		const verb = clauses.length === 0 ? (running ? "Calling" : "Called") : "called";
+		clauses.push(`${verb} ${customCount} ${customCount === 1 ? "tool" : "tools"}`);
+	}
+
+	return {
+		summary: clauses.join(", "),
+		changes:
+			totalAdded > 0 || totalRemoved > 0
+				? { added: totalAdded, removed: totalRemoved }
+				: undefined,
+	};
+}
+
 export interface DensityPalette {
 	readonly theme: Theme;
 	readonly light: boolean;
 	readonly key: string;
-	diamond(status: RowStatus, expanded: boolean): string;
-	title(text: string, status: RowStatus, expanded: boolean): string;
+	heading(text: string, status: RowStatus, expanded: boolean, target?: string): string;
 	target(text: string, expanded: boolean): string;
 	dim(text: string): string;
 	body(text: string): string;
@@ -244,45 +357,33 @@ export function densityPalette(fallbackTheme: Theme): DensityPalette {
 	const colorMode = theme.getColorMode?.() ?? "truecolor";
 	const key = `${light ? "light" : "dark"}:${colorMode}:${(theme as { name?: string })?.name ?? ""}:${theme.getFgAnsi?.("text") ?? ""}`;
 
+	const paintTarget = (text: string, expanded: boolean): string => paintDensityRgb(
+		theme,
+		light ? (expanded ? [29, 78, 216] : [56, 78, 108]) : (expanded ? [145, 195, 248] : [148, 168, 196]),
+		text,
+	);
 	return {
 		theme,
 		light,
 		key,
-		diamond(status: RowStatus, expanded: boolean): string {
+		target: paintTarget,
+		heading(text: string, status: RowStatus, expanded: boolean, target?: string): string {
 			if (status === "running") {
-				return paintDensityWaveGlyph(theme, light, 0, TOOL_DIAMOND);
+				const heading = `${TOOL_DIAMOND} ${text}${target ? ` ${target}` : ""}`;
+				return theme.bold(paintGlimmerSweepText(heading, { theme, light }));
 			}
-			if (status === "error") {
-				return theme.fg("error", TOOL_DIAMOND);
-			}
-			if (expanded && status === "success") {
-				return paintDensityRgb(theme, light ? [37, 99, 235] : [97, 175, 239], TOOL_DIAMOND);
-			}
-			return paintDensityRgb(theme, light ? [112, 128, 152] : [92, 110, 136], TOOL_DIAMOND);
-		},
-		title(text: string, status: RowStatus, expanded: boolean): string {
-			if (status === "error") {
-				return theme.fg("error", expanded ? theme.bold(text) : text);
-			}
-			if (status === "running" || expanded) {
-				const painted = paintDensityRgb(theme, light ? [24, 48, 82] : [172, 194, 222], text);
-				return theme.bold(painted);
-			}
-			return paintDensityRgb(theme, light ? [68, 86, 112] : [136, 154, 178], text);
-		},
-		target(text: string, expanded: boolean): string {
-			if (!text) return "";
-			return paintDensityRgb(
-				theme,
-				light
-					? expanded
-						? [29, 78, 216]
-						: [56, 78, 108]
-					: expanded
-						? [145, 195, 248]
-						: [148, 168, 196],
-				text,
-			);
+			const icon = status === "error"
+				? theme.fg("error", TOOL_DIAMOND)
+				: expanded && status === "success"
+					? paintDensityRgb(theme, light ? [37, 99, 235] : [97, 175, 239], TOOL_DIAMOND)
+					: paintDensityRgb(theme, light ? [112, 128, 152] : [92, 110, 136], TOOL_DIAMOND);
+			const title = status === "error"
+				? theme.fg("error", expanded ? theme.bold(text) : text)
+				: expanded
+					? theme.bold(paintDensityRgb(theme, light ? [24, 48, 82] : [172, 194, 222], text))
+					: paintDensityRgb(theme, light ? [68, 86, 112] : [136, 154, 178], text);
+			const detail = target ? ` ${paintTarget(target, expanded)}` : "";
+			return `${icon} ${title}${detail}`;
 		},
 		dim(text: string): string {
 			return paintDensityRgb(theme, light ? [124, 140, 164] : [84, 100, 124], text);
@@ -323,31 +424,62 @@ function durationFromState(state: RowState, running: boolean): string | undefine
 	return formatDensityDuration(elapsed);
 }
 
-function singleLineText(raw: string, maxChars = 120): string {
-	const cleaned = normalizeLineEndings(stripTerminalSequences(raw))
-		.split("\n")
-		.map((l) => l.trim())
-		.filter(Boolean);
-	if (cleaned.length === 0) return "";
-	const first = cleaned[0]!;
-	const joined = cleaned.length > 1 ? `${first} …` : first;
-	return joined.length > maxChars ? `${joined.slice(0, maxChars - 1).trimEnd()}…` : joined;
-}
-
-function summarizeCodemodeSource(args: ToolArgs): string {
-	const code = typeof args.code === "string" ? normalizeLineEndings(stripTerminalSequences(args.code)) : "";
-	if (!code.trim()) return "";
-	const lines = code
-		.split("\n")
-		.map((line) => line.trim())
-		.filter((line) => line.length > 0 && !line.startsWith("//"));
-	const first = lines[0] ?? "";
-	if (!first) return "";
-	return first.length > 72 ? `${first.slice(0, 71).trimEnd()}…` : first;
-}
-
 export function isCommandLikeTool(name: string): boolean {
 	return name === "bash" || name === "powershell" || name === "codemode";
+}
+
+/**
+ * Переносит полную shell-команду с префиксом `$ ` без обрезки многоточием `…`,
+ * сохраняя логические переносы строк и все флаги/аргументы.
+ */
+function formatWrappedShellCommandRows(
+	rawCommand: string,
+	pal: DensityPalette,
+	rail: string,
+	avail: number,
+): string[] {
+	const cleaned = normalizeLineEndings(stripTerminalSequences(rawCommand)).trimEnd();
+	if (!cleaned) return [];
+	const wrapWidth = Math.max(1, avail - 2);
+	const out: string[] = [];
+	const logicalLines = cleaned.split("\n");
+	for (let lineIdx = 0; lineIdx < logicalLines.length; lineIdx++) {
+		const logical = logicalLines[lineIdx]!;
+		const chunks = logical.length > 0 ? wrapTextWithAnsi(logical, wrapWidth) : [""];
+		for (let chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
+			const prefix = lineIdx === 0 && chunkIdx === 0 ? "$ " : "  ";
+			out.push(`${rail}${pal.target(`${prefix}${chunks[chunkIdx]!}`, true)}`);
+		}
+	}
+	return out;
+}
+
+function expandedCommandRows(name: string, args: ToolArgs, pal: DensityPalette, rail: string, width: number): string[] {
+	if ((name === "bash" || name === "powershell") && typeof args.command === "string") {
+		return formatWrappedShellCommandRows(args.command, pal, rail, Math.max(1, width - 5));
+	}
+	if (name === "codemode" && typeof args.code === "string" && args.code.trim()) {
+		return [...(renderCodeView(args.code, "script.js", pal.theme, { rail })?.render(width) ?? [])];
+	}
+	return [];
+}
+
+function renderNonGraphicImages(
+	result: AgentToolResult<unknown>,
+	pal: DensityPalette,
+	rail: string,
+	avail: number,
+): string[] {
+	const imgBlocks = result.content.filter(
+		(item): item is { type: "image"; data: string; mimeType: string } =>
+			item?.type === "image" &&
+			typeof (item as { data?: unknown }).data === "string" &&
+			typeof (item as { mimeType?: unknown }).mimeType === "string",
+	);
+	return imgBlocks.flatMap(({ data, mimeType }) =>
+		wrapTextWithAnsi(imageFallback(mimeType, getImageDimensions(data, mimeType) ?? undefined), avail)
+			.map((line) => `${rail}${pal.dim(line)}`),
+	);
 }
 
 function formatParentheticalMeta(
@@ -379,82 +511,15 @@ function formatParentheticalMeta(
 		return ` ${pal.dim("(")}${added}${pal.dim(" ")}${removed}${durSuffix}${pal.dim(")")}`;
 	}
 
+	const resolvedNested = liveNestedSummary ?? densityMeta?.nestedSummary;
+	/* Для codemode с агрегатом вложенных вызовов не шумим внутренним числом строк JSON-вывода. */
+	const suppressInternalLineCount = name === "codemode" && Boolean(resolvedNested);
 	const parts: string[] = [];
-	if (densityMeta?.lineSummary) parts.push(densityMeta.lineSummary);
+	if (densityMeta?.lineSummary && !suppressInternalLineCount) parts.push(densityMeta.lineSummary);
 	if (duration) parts.push(duration);
 	const base = parts.length > 0 ? ` ${pal.dim(`(${parts.join(" · ")})`)}` : "";
-	const resolvedNested = liveNestedSummary ?? densityMeta?.nestedSummary;
 	const nested = resolvedNested ? `${pal.dim(" · ")}${resolvedNested}` : "";
 	return base + nested;
-}
-
-function buildHeaderParts(
-	name: string,
-	args: ToolArgs,
-	status: RowStatus,
-): { verb: string; target: string } {
-	const path = pathOf(args);
-	const running = status === "running";
-	const failed = status === "error";
-
-	switch (name) {
-		case "read":
-			return {
-				verb: failed ? "Failed read" : running ? "Reading" : "Read",
-				target: path,
-			};
-		case "grep": {
-			const pat = typeof args.pattern === "string" ? singleLineText(args.pattern, 60) : "…";
-			return {
-				verb: failed ? "Failed grep" : running ? "Searching" : "Searched",
-				target: path ? `/${pat}/ in ${path}` : `/${pat}/`,
-			};
-		}
-		case "find": {
-			const pat = typeof args.pattern === "string" ? singleLineText(args.pattern, 60) : "…";
-			return {
-				verb: failed ? "Failed find" : running ? "Finding" : "Found",
-				target: path ? `${pat} in ${path}` : pat,
-			};
-		}
-		case "ls":
-			return {
-				verb: failed ? "Failed ls" : running ? "Listing" : "Listed",
-				target: path || ".",
-			};
-		case "edit":
-			return {
-				verb: failed ? "Failed to edit" : running ? "Editing" : "Edited",
-				target: path,
-			};
-		case "write":
-			return {
-				verb: failed ? "Failed to write" : running ? "Writing" : "Wrote",
-				target: path,
-			};
-		case "bash":
-		case "powershell": {
-			const rawCmd = typeof args.command === "string" ? singleLineText(args.command, 100) : "";
-			return {
-				verb: failed ? "Failed" : running ? "Running" : "Ran",
-				target: rawCmd || name,
-			};
-		}
-		case "codemode": {
-			const snippet = summarizeCodemodeSource(args);
-			return {
-				verb: failed ? "Failed" : running ? "Running" : "Ran",
-				target: snippet ? `codemode ${snippet}` : "codemode",
-			};
-		}
-		default: {
-			const argText = summarizeCustomArguments(args);
-			return {
-				verb: failed ? `Failed ${name}` : running ? `Calling ${name}` : name,
-				target: argText,
-			};
-		}
-	}
 }
 
 class DensityLiveLines implements Component {
@@ -468,7 +533,9 @@ class DensityLiveLines implements Component {
 
 	render(width: number): string[] {
 		if (width <= 0) return [];
-		const safeWidth = Math.max(1, width);
+		const outer = computeOuterCanvasMargin(width);
+		const leftPad = outer + 1;
+		const safeWidth = Math.max(1, width - leftPad - outer);
 		const pal = densityPalette(this.fallbackTheme);
 		const key = `${pal.key}|${this.computeKey(safeWidth, pal)}`;
 		if (!this.cache || this.cache.key !== key || this.cache.width !== safeWidth) {
@@ -481,12 +548,44 @@ class DensityLiveLines implements Component {
 				),
 			};
 		}
-		return this.cache.lines;
+		return this.cache.lines.map((line) => `${" ".repeat(leftPad)}${line}`);
 	}
 
 	invalidate(): void {
 		this.cache = undefined;
 	}
+}
+
+function pendingDiffLines(name: string, args: ToolArgs): CodeDiffLine[] {
+	const rows: CodeDiffLine[] = [];
+	const append = (value: unknown, kind: "add" | "remove", hunk: number) => {
+		if (typeof value !== "string" || value === "") return;
+		for (const [index, content] of normalizeLineEndings(value).replace(/\n$/u, "").split("\n").entries()) {
+			rows.push({ kind, content, lineNumber: index + 1, hunk });
+		}
+	};
+	if (name === "write") append(args.content, "add", 0);
+	if (name === "edit") {
+		const edits = Array.isArray(args.edits) ? args.edits : [args];
+		for (const [hunk, edit] of edits.entries()) {
+			if (!edit || typeof edit !== "object") continue;
+			append(edit.oldText, "remove", hunk);
+			append(edit.newText, "add", hunk);
+		}
+	}
+	return rows;
+}
+
+function expandedCallArguments(name: string, args: ToolArgs, status: RowStatus): ToolArgs {
+	const omitted = new Set(["toolSummary", "toolAction"]);
+	/* Команды, скрипты и успешные правки имеют собственное представление ниже заголовка. */
+	if (name === "bash" || name === "powershell") omitted.add("command");
+	if (name === "codemode") omitted.add("code");
+	if (status !== "error") {
+		if (name === "write") omitted.add("content");
+		if (name === "edit") for (const key of ["edits", "oldText", "newText"]) omitted.add(key);
+	}
+	return Object.fromEntries(Object.entries(args).filter(([key]) => !omitted.has(key)));
 }
 
 export function renderDensityCall(options: {
@@ -497,9 +596,23 @@ export function renderDensityCall(options: {
 	getStatus: () => RowStatus;
 	syncRunning: (running: boolean) => void;
 	getNestedSummary?: () => string | undefined;
+	getStepSummary?: () => string | undefined;
+	cwd?: string;
 }): Component {
-	const { name, args, theme, state, getStatus, syncRunning, getNestedSummary } = options;
+	const { name, args, theme, state, getStatus, syncRunning, getNestedSummary, getStepSummary, cwd } = options;
 	syncRunning(getStatus() === "running");
+
+	const resolveHeader = (status: RowStatus, expanded: boolean) =>
+		buildStepHeaderParts({
+			name,
+			args,
+			status,
+			rawPath: pathOf(args),
+			stepSummary: getStepSummary?.(),
+			cwd,
+			expanded,
+			summarizeCustomArgs: summarizeCustomArguments,
+		});
 
 	return new DensityLiveLines(
 		() => {
@@ -508,13 +621,15 @@ export function renderDensityCall(options: {
 			const expanded = state.expanded === true;
 			const elapsedBucket = status === "running" ? String(getAnimationElapsedMs()) : "settled";
 			const d = state.density;
-			const { verb, target } = buildHeaderParts(name, args, status);
+			const stepSummary = getStepSummary?.() ?? "";
+			const { verb, target } = resolveHeader(status, expanded);
 			const liveNested = getNestedSummary?.() ?? d?.nestedSummary ?? "";
 			return [
 				status,
 				expanded ? "1" : "0",
 				d ? "1" : "0",
 				elapsedBucket,
+				stepSummary,
 				verb,
 				target,
 				state.durationMs ?? "",
@@ -528,24 +643,37 @@ export function renderDensityCall(options: {
 		(width, pal) => {
 			const status = getStatus();
 			const expanded = state.expanded === true;
-			const diamond = pal.diamond(status, expanded);
-			const { verb, target } = buildHeaderParts(name, args, status);
-			const styledVerb = pal.title(verb, status, expanded);
-			const styledTarget = target ? ` ${pal.target(target, expanded)}` : "";
+			const { verb, target } = resolveHeader(status, expanded);
 			const meta = formatParentheticalMeta(pal, status, state, name, getNestedSummary?.());
-			const head = ` ${diamond} ${styledVerb}${styledTarget}${meta}`;
-			const lines = [truncateToWidth(head, width, "…")];
+			const head = ` ${pal.heading(verb, status, expanded, target)}${meta}`;
+			const lines =
+				expanded && visibleWidth(head) > width
+					? wrapTextWithAnsi(head, Math.max(1, width - 3)).map((chunk, idx) =>
+							idx === 0 ? chunk : `   ${chunk}`,
+						)
+					: [truncateToWidth(head, width, "…")];
+			if (!expanded && getActiveHostRuntime()?.isFullscreen) lines[0] = markSelectionChrome(lines[0]!);
+
+			const rail = pal.rail("   │ ");
+			const avail = Math.max(1, width - 5);
+
+			/* Если команда раскрыта ещё до прихода первого partial-результата, сразу показываем полную команду / скрипт. */
+			if (expanded && !state.density && isCommandLikeTool(name)) {
+				lines.push(...expandedCommandRows(name, args, pal, rail, width));
+			}
 
 			if (status === "running" && isCommandLikeTool(name) && !state.density) {
-				const avail = Math.max(1, width - 5);
 				const bar = paintDensityWaveGlyph(pal.theme, pal.light, 1, "▎");
 				lines.push(`   ${bar} ${pal.dim(truncateToWidth("Running…", avail, "…"))}`);
 			}
 
-			if (expanded && !isCommandLikeTool(name) && name !== "read" && name !== "edit" && name !== "write" && name !== "grep" && name !== "find" && name !== "ls") {
-				if (Object.keys(args).length > 0) {
-					lines.push(...renderArguments(args, pal.theme, pal.rail("   │ ")).render(width));
+			if (expanded) {
+				if (status === "running" && (name === "edit" || name === "write")) {
+					const preview = renderTailDiff(pendingDiffLines(name, args), pathOf(args), pal.theme, rail);
+					if (preview) lines.push(...preview.render(width));
 				}
+				const details = expandedCallArguments(name, args, status);
+				if (Object.keys(details).length > 0) lines.push(...renderArguments(details, pal.theme, rail).render(width));
 			}
 			return lines;
 		},
@@ -623,6 +751,7 @@ export function renderDensityResult(options: {
 	author?: (expanded: boolean) => Component | undefined;
 	nestedSummary?: string;
 	previousWriteContent?: string;
+	showImages?: boolean;
 }): Component {
 	const {
 		name,
@@ -639,6 +768,7 @@ export function renderDensityResult(options: {
 		author,
 		nestedSummary,
 		previousWriteContent,
+		showImages = true,
 	} = options;
 
 	const cmdLike = isCommandLikeTool(name);
@@ -666,9 +796,12 @@ export function renderDensityResult(options: {
 			? countDiffChangesFromResult(name, args, result, previousWriteContent)
 			: undefined;
 
+	const hasImages = hasImageContent(result);
 	let lineSummary: string | undefined;
 	if (!isPartial && !isError) {
-		if (cmdLike) {
+		if (hasImages) {
+			lineSummary = formatImageResultSummary(result);
+		} else if (cmdLike) {
 			const count = extractedCmd?.lines.length ?? 0;
 			lineSummary = count > 0 ? `${count} ${count === 1 ? "line" : "lines"}` : undefined;
 		} else if (name !== "edit" && name !== "write") {
@@ -691,7 +824,8 @@ export function renderDensityResult(options: {
 			const density = getDensity();
 			const expanded = state.expanded === true;
 			const elapsedBucket = running ? String(getAnimationElapsedMs()) : "settled";
-			return `${density}|${expanded ? "1" : "0"}|${running ? "1" : "0"}|${elapsedBucket}|${nestedSummary ?? ""}`;
+			const imgCap = getCapabilities().images ?? "none";
+			return `${density}|${expanded ? "1" : "0"}|${running ? "1" : "0"}|${elapsedBucket}|${nestedSummary ?? ""}|${imgCap}|${showImages ? "1" : "0"}`;
 		},
 		(width, pal) => {
 			const running = isPartial && canRun();
@@ -702,14 +836,17 @@ export function renderDensityResult(options: {
 
 			if (running) {
 				if (!cmdLike) return [];
+				const cmdHeaderRows = expanded ? expandedCommandRows(name, args, pal, rail, width) : [];
 				const lines = extractedCmd?.lines ?? [];
 				if (lines.length === 0) {
 					const bar = paintDensityWaveGlyph(pal.theme, pal.light, 1, "▎");
-					return [`   ${bar} ${pal.dim(truncateToWidth("Running…", avail, "…"))}`];
+					return [...cmdHeaderRows, `   ${bar} ${pal.dim(truncateToWidth("Running…", avail, "…"))}`];
 				}
-				const sliced = expanded
-					? { head: lines, omitted: 0, tail: [] }
-					: sliceHeadTailPreview(lines);
+				if (expanded) {
+					const renderedOut = renderOutput(lines.join("\n"), pal.theme, isError, rail);
+					return [...cmdHeaderRows, ...(renderedOut?.render(width) ?? [])];
+				}
+				const sliced = sliceHeadTailPreview(lines);
 				const entries: Array<{ text: string; dim?: boolean }> = [
 					...sliced.head.map((t) => ({ text: t })),
 					...(sliced.omitted > 0 ? [{ text: "…", dim: true }] : []),
@@ -725,15 +862,21 @@ export function renderDensityResult(options: {
 			}
 
 			if (!expanded) {
+				if (hasImages && !isError) {
+					/* На графических терминалах (Kitty/iTerm2) ToolExecutionComponent монтирует нативный Image ниже. */
+					if (getCapabilities().images && showImages) return [];
+					return renderNonGraphicImages(result, pal, rail, avail);
+				}
+
 				if ((name === "edit" || name === "write") && !isError) {
-					if (density === "compact") return [];
+					if (density === "balanced" || density === "compact" || density === "grouped") return [];
 					const allLines = diffInfo?.lines ?? [];
 					const hasContext = allLines.some((line) => line.kind === "context");
 					const contextual = hasContext ? trimDiffContext(allLines, 2) : allLines;
 					if (contextual.length === 0) return [];
 					const maxPreview = 12;
 					const fullPreview =
-						renderCodexDiff(contextual, pathOf(args), pal.theme, rail)?.render(width) ?? [];
+						renderTailDiff(contextual, pathOf(args), pal.theme, rail)?.render(width) ?? [];
 					if (fullPreview.length > maxPreview) {
 						return [...fullPreview.slice(0, maxPreview), `${rail}${pal.dim("…")}`];
 					}
@@ -765,44 +908,42 @@ export function renderDensityResult(options: {
 				return [];
 			}
 
-			if (author) {
-				try {
-					const comp = author(true);
-					if (comp) {
-						const rendered = railComponent(comp, pal.theme, rail).render(width);
-						if (rendered.length > 0) return [...rendered];
-					}
-				} catch {
-					/* При сбое стороннего рендерера падаем обратно на текстовый вывод. */
+			/* Приоритет нативных раскрытых представлений для read, edit, write, bash, powershell и codemode
+			   выше внешних обёрток registerToolRenderer, чтобы провайдеры не скрывали $ <command> и diff. */
+			if (hasImages && !isError) {
+				const outRows = expandedCommandRows(name, args, pal, rail, width);
+				if (!getCapabilities().images || !showImages) {
+					outRows.push(...renderNonGraphicImages(result, pal, rail, avail));
 				}
+				const textOut = renderOutput(output, pal.theme, false, rail);
+				if (textOut) outRows.push(...textOut.render(width));
+				return outRows;
 			}
 
-			if (name === "read" && !isError && isReadTextResult(result)) {
-				const { body, footer } = splitReadFooter(output);
-				const view = renderCodeView(body, pathOf(args), pal.theme, {
-					startLine: readStartLine(args.offset),
-					footer,
-					rail,
-				});
-				if (view) return [...view.render(width)];
+			if (name === "read") {
+				if (!isError && isReadTextResult(result)) {
+					const { body, footer } = splitReadFooter(output);
+					const view = renderCodeView(body, pathOf(args), pal.theme, {
+						startLine: readStartLine(args.offset),
+						footer,
+						rail,
+					});
+					if (view) return [...view.render(width)];
+				}
+				return [...(renderOutput(output, pal.theme, isError, rail)?.render(width) ?? [])];
 			}
 
-			if ((name === "edit" || name === "write") && !isError) {
-				const allLines = diffInfo?.lines ?? [];
-				const fullDiff = renderCodexDiff(allLines, pathOf(args), pal.theme, rail);
-				if (fullDiff) return [...fullDiff.render(width)];
+			if (name === "edit" || name === "write") {
+				if (!isError) {
+					const allLines = diffInfo?.lines ?? [];
+					const fullDiff = renderTailDiff(allLines, pathOf(args), pal.theme, rail);
+					if (fullDiff) return [...fullDiff.render(width)];
+				}
+				return [...(renderOutput(output, pal.theme, isError, rail)?.render(width) ?? [])];
 			}
 
 			if (cmdLike) {
-				const outRows: string[] = [];
-				if (name === "codemode" && typeof args.code === "string" && args.code.trim()) {
-					const codeView = renderCodeView(args.code, "script.js", pal.theme, { rail });
-					if (codeView) outRows.push(...codeView.render(width));
-				} else if ((name === "bash" || name === "powershell") && typeof args.command === "string" && args.command.includes("\n")) {
-					for (const cmdLine of normalizeLineEndings(args.command).split("\n")) {
-						outRows.push(`${rail}${pal.target(`$ ${cmdLine}`, true)}`);
-					}
-				}
+				const outRows = expandedCommandRows(name, args, pal, rail, width);
 				const nestedCallLines = name === "codemode" ? formatCodemodeCallLines(detailsCalls) : [];
 				const lines = extractedCmd?.lines ?? [];
 				const linesAlreadyAreCalls =
@@ -811,7 +952,9 @@ export function renderDensityResult(options: {
 					lines.every((line, idx) => line === nestedCallLines[idx]);
 				if (nestedCallLines.length > 0 && !linesAlreadyAreCalls) {
 					for (const callLine of nestedCallLines) {
-						outRows.push(`${rail}${pal.dim(truncateToWidth(callLine, avail, "…"))}`);
+						for (const wrappedCall of wrapTextWithAnsi(callLine, Math.max(1, avail))) {
+							outRows.push(`${rail}${pal.dim(wrappedCall)}`);
+						}
 					}
 				}
 				if (lines.length > 0) {
@@ -822,6 +965,18 @@ export function renderDensityResult(options: {
 					outRows.push(`${rail}${pal.dim("(no output)")}`);
 				}
 				return outRows;
+			}
+
+			if (author) {
+				try {
+					const comp = author(true);
+					if (comp) {
+						const rendered = railComponent(comp, pal.theme, rail).render(width);
+						if (rendered.length > 0) return [...rendered];
+					}
+				} catch {
+					/* При сбое стороннего рендерера падаем обратно на текстовый вывод. */
+				}
 			}
 
 			return [...(renderOutput(output, pal.theme, isError, rail)?.render(width) ?? [])];

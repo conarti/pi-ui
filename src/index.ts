@@ -1,19 +1,30 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Editor, isKeyRelease } from "@earendil-works/pi-tui";
 import { registerAskUserFeature } from "./features/ask-user/index.ts";
-import { mountComposer, setActiveComposerEditor } from "./features/chrome/composer.ts";
+import {
+	getActiveComposerEditor,
+	mountComposer,
+	setActiveComposerEditor,
+} from "./features/chrome/composer.ts";
+import {
+	closeActiveComposerPopover,
+	openComposerPopover,
+} from "./features/chrome/composer-popovers.ts";
+import { installExtensionWidgetMargins, resetMidTurnQueueUi } from "./features/chrome/mid-turn-queue.ts";
+import { disposeShortcutsBar, mountShortcutsBar, syncShortcutsBar } from "./features/chrome/shortcuts-bar.ts";
 import { registerComposerWorkingAnimation } from "./features/chrome/working-indicator.ts";
-import { mountSessionHeader } from "./features/chrome/header.ts";
+import { createPinnedSessionHeaderSlot, mountSessionHeader } from "./features/chrome/header.ts";
 import { registerCommandPaletteFeature } from "./features/command-palette/index.ts";
-import { showContextInspector } from "./features/context-inspector/index.ts";
+import { registerContextInspectorFeature } from "./features/context-inspector/index.ts";
 import { createOutlineRailSlot, registerOutlineCommands } from "./features/outline-rail/index.ts";
 import {
 	applyModeTools,
 	cycleSessionMode,
-	registerPlanStudioFeature,
+	registerPlanApprovalFeature,
 	setSessionMode,
 	updatePlanWidget,
-} from "./features/plan-studio/index.ts";
-import { showPlanStudio } from "./features/plan-studio/studio-overlay.ts";
+} from "./features/plan-approval/index.ts";
+import { showPlanApproval } from "./features/plan-approval/approval-overlay.ts";
 import {
 	bindStickyExpandKey,
 	getStickyConfig,
@@ -24,22 +35,89 @@ import { registerToolCallsFeature } from "./features/tool-calls/index.ts";
 import { registerPromptChipsFeature } from "./features/prompt-chips/index.ts";
 import { registerPromptSuggestionFeature } from "./features/prompt-suggestion/index.ts";
 import { registerQuotesFeature } from "./features/quotes/index.ts";
+import { registerSlotArbitrationFeature } from "./features/slot-arbitration/index.ts";
 import { registerTranscriptFeature } from "./features/transcript/index.ts";
-import { acquireHostRuntime, disposeActiveHostRuntime } from "./shared/host-runtime.ts";
-import { installKeyboardLayoutSupport } from "./shared/keyboard-layout.ts";
-import { getSessionWorkflow } from "./shared/session-workflow.ts";
+import { acquireHostRuntime, disposeActiveHostRuntime, getActiveHostRuntime, getFocusedHostComponent } from "./shared/host-runtime.ts";
+import { t } from "./shared/i18n.ts";
+import { installKeyboardLayoutSupport, matchesLayoutChord } from "./shared/keyboard-layout.ts";
+import { hasBlockingModalOverlay } from "./shared/modal-card.ts";
+import { dispatchLocalShortcut } from "./shared/slot-arbitration.ts";
+import { loadPiUiUserConfig, updatePiUiUserConfig } from "./shared/pi-ui-config.ts";
+import {
+	getSessionWorkflow,
+	syncThinkingCycleKeybinding,
+} from "./shared/session-workflow.ts";
 import { requestRender, resetUiActionBridge } from "./shared/ui-action-bridge.ts";
 import { TranscriptTurnIndex } from "./shared/turn-index.ts";
 
-export default function conartiPiUi(pi: ExtensionAPI): void {
-	installKeyboardLayoutSupport(pi);
+function registerUnifiedConfigCommands(pi: ExtensionAPI): void {
+	const toggleChoices = ["on", "off", "status"] as const;
+	pi.registerCommand("shortcuts-bar", {
+		description: t("shortcutsBar.command"),
+		getArgumentCompletions: (prefix) => {
+			const typed = prefix.trimStart().toLowerCase();
+			const items = toggleChoices
+				.filter((choice) => choice.startsWith(typed) && choice !== typed.trimEnd())
+				.map((choice) => ({ value: choice, label: choice }));
+			return items.length > 0 ? items : null;
+		},
+		handler: async (args, ctx) => {
+			const arg = args.trim().toLowerCase();
+			if (arg === "status") {
+				const current = loadPiUiUserConfig().showShortcutsBar;
+				ctx.ui.notify(
+					t("shortcutsBar.status", { state: current ? t("state.on") : t("state.off") }),
+					"info",
+				);
+				return;
+			}
+			if (arg !== "" && arg !== "on" && arg !== "off") {
+				ctx.ui.notify(t("shortcutsBar.usage"), "warning");
+				return;
+			}
+			const current = loadPiUiUserConfig().showShortcutsBar;
+			const next = arg === "on" ? true : arg === "off" ? false : !current;
+			const updated = updatePiUiUserConfig({ showShortcutsBar: next });
+			syncShortcutsBar();
+			requestRender();
+			ctx.ui.notify(
+				t("shortcutsBar.toggled", {
+					state: updated.showShortcutsBar ? t("state.on") : t("state.off"),
+				}),
+				"info",
+			);
+		},
+	});
+}
 
-	// 0. Acquire shared Host Runtime once at session_start before feature listeners bind
-	pi.on("session_start", async (_event, ctx) => {
-		await acquireHostRuntime(ctx);
+export default function conartiPiUi(pi: ExtensionAPI): void {
+	/* Устанавливаем динамический арбитраж слотов до регистрации остальных подсистем (ADR-0007) */
+	registerSlotArbitrationFeature(pi);
+
+	/* Синхронизируем app.thinking.cycle -> alt+t до чтения keybindings.json в InteractiveMode */
+	syncThinkingCycleKeybinding();
+	installKeyboardLayoutSupport(pi, (data) => {
+		const tui = getActiveHostRuntime()?.tui;
+		if (!tui || !(getFocusedHostComponent(tui) instanceof Editor) || hasBlockingModalOverlay(tui) || isKeyRelease(data)) return false;
+		for (const chord of ["ctrl+l", "alt+t"] as const) {
+			if (!matchesLayoutChord(data, chord)) continue;
+			void dispatchLocalShortcut(chord);
+			return true;
+		}
+		return false;
 	});
 
-	/* 1. Карточки транскрипта, волновая анимация, Prompt Chips и цитаты */
+	/* 0. Получаем общий Host Runtime один раз при session_start до подписки фич */
+	pi.on("session_start", async (_event, ctx) => {
+		const synced = syncThinkingCycleKeybinding();
+		const runtime = await acquireHostRuntime(ctx);
+		if (synced) {
+			runtime?.keybindings?.reload?.();
+		}
+	});
+
+	/* 1. Карточки транскрипта, поля виджетов, волновая анимация, Prompt Chips и цитаты */
+	installExtensionWidgetMargins();
 	registerTranscriptFeature(pi);
 	registerComposerWorkingAnimation(pi);
 	registerPromptChipsFeature(pi);
@@ -52,44 +130,58 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 	registerAskUserFeature(pi);
 
 	/* 4. Режим планирования с построчными комментариями и защита вызовов тулов */
-	registerPlanStudioFeature(pi);
+	registerPlanApprovalFeature(pi);
 
-	/* 5. Command Palette (Ctrl+K / /palette) и фоновые Prompt Suggestion после модальных хуков */
+	/* 5. Command Palette (Ctrl+K / /palette), телеметрия + Context Inspector, конфиг-команды и Prompt Suggestion */
 	registerCommandPaletteFeature(pi);
+	registerContextInspectorFeature(pi);
+	registerUnifiedConfigCommands(pi);
 	registerPromptSuggestionFeature(pi);
 
 	pi.registerFlag("plan", {
-		description: "Запустить сессию сразу в режиме Plan",
+		description: t("sessionMode.flag.plan"),
 		type: "boolean",
 		default: false,
 	});
 
-	pi.registerShortcut("alt+m", {
-		description: "Переключить режим (Code / Plan / Auto-Safe)",
+	pi.registerShortcut("shift+tab", {
+		description: t("sessionMode.shortcut.cycle"),
 		handler: async (ctx) => cycleSessionMode(pi, ctx),
 	});
 
+	pi.registerShortcut("ctrl+l", {
+		description: t("composer.popover.modelTitle"),
+		handler: async (ctx) => openComposerPopover(pi, ctx, "model"),
+	});
+	pi.registerShortcut("alt+t", {
+		description: t("composer.popover.thinkingTitle"),
+		handler: async (ctx) => openComposerPopover(pi, ctx, "thinking"),
+	});
+	pi.registerShortcut("alt+m", {
+		description: t("sessionMode.shortcut.cycle"),
+		handler: async (ctx) => openComposerPopover(pi, ctx, "mode"),
+	});
+
 	pi.registerShortcut("ctrl+alt+p", {
-		description: "Plan Mode / открыть Plan Studio",
+		description: t("sessionMode.shortcut.planApproval"),
 		handler: async (ctx) => {
 			const wf = getSessionWorkflow();
-			if (wf.hasPlan()) await showPlanStudio(pi, ctx);
-			else setSessionMode(pi, ctx, wf.mode === "plan" ? "code" : "plan");
+			if (wf.hasPlan()) await showPlanApproval(pi, ctx);
+			else setSessionMode(pi, ctx, wf.mode === "plan" ? "always-approve" : "plan");
 		},
 	});
 
-	pi.registerCommand("context", {
-		description: "Визуальный инспектор контекста, токенов и буфера компакта",
-		handler: async (_args, ctx) => {
-			await showContextInspector(pi, ctx);
-		},
-	});
-
-	// 5. Fullscreen viewport shell: StickyPromptBar (top) + native ScrollView scrollbar + OutlineRail (right)
+	/* 6. Оболочка fullscreen viewport: StickyPromptBar (сверху) и OutlineRail (справа) */
 	let activeStickyBar: StickyPromptBar | undefined;
 	let disposeShell: (() => void) | undefined;
 	let unsubscribeStickyKey: (() => void) | undefined;
 
+	pi.registerShortcut("alt+s", {
+		description: t("sticky.shortcut.expand"),
+		handler: async () => {
+			if (activeStickyBar?.config.enabled && activeStickyBar.getActivePrompt()) activeStickyBar.toggleExpanded();
+		},
+	});
 	registerStickyPromptCommands(pi, () => activeStickyBar);
 	registerOutlineCommands(pi, () => requestRender());
 
@@ -125,12 +217,12 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 		}
 		mountSessionHeader(pi, ctx);
 		mountComposer(pi, ctx);
+		mountShortcutsBar(pi, ctx);
 		updatePlanWidget(pi, ctx);
 
 		const hostRuntime = await acquireHostRuntime(ctx);
+		if (ctx.mode === "tui" && ctx.hasUI) unsubscribeStickyKey = bindStickyExpandKey(ctx);
 		disposeShell = hostRuntime?.mountViewportSlots((shell) => {
-			unsubscribeStickyKey?.();
-			unsubscribeStickyKey = undefined;
 
 			const turnIndex = new TranscriptTurnIndex({
 				shell,
@@ -139,24 +231,20 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 
 			const stickyBar = new StickyPromptBar(shell, turnIndex, getStickyConfig());
 			activeStickyBar = stickyBar;
-			const unbindKey = bindStickyExpandKey(ctx, shell, stickyBar);
-			unsubscribeStickyKey = unbindKey;
 
 			const origStickyDispose = stickyBar.dispose.bind(stickyBar);
 			stickyBar.dispose = () => {
-				unbindKey();
-				if (unsubscribeStickyKey === unbindKey) {
-					unsubscribeStickyKey = undefined;
-				}
 				if (activeStickyBar === stickyBar) {
 					activeStickyBar = undefined;
 				}
 				origStickyDispose();
 			};
 
+			const pinnedHeader = createPinnedSessionHeaderSlot(pi, ctx);
 			const outlineRail = createOutlineRailSlot(ctx, shell, turnIndex);
 
 			return {
+				pinnedHeader,
 				topSlot: stickyBar,
 				rightRail: outlineRail,
 			};
@@ -164,12 +252,16 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", () => {
+		closeActiveComposerPopover();
+		resetMidTurnQueueUi();
+		disposeShortcutsBar();
 		getSessionWorkflow().endAgentTurn();
 		unsubscribeStickyKey?.();
 		unsubscribeStickyKey = undefined;
 		disposeShell?.();
 		disposeShell = undefined;
 		activeStickyBar = undefined;
+		getActiveComposerEditor()?.dispose();
 		setActiveComposerEditor(undefined);
 		disposeActiveHostRuntime();
 		resetUiActionBridge();

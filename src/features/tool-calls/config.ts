@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { loadExplicitToolDensity, loadPiUiUserConfig } from "../../shared/pi-ui-config.ts";
 import {
 	DISPLAY_MODES,
 	DISPLAY_STYLES,
@@ -20,7 +21,7 @@ type JsonObject = Record<string, unknown>;
 export const DEFAULT_CONFIG: CompactToolsConfig = {
 	mode: "normal",
 	style: "density",
-	density: "detailed",
+	density: "balanced",
 	tools: [...SUPPORTED_TOOLS],
 	auto_compact: {
 		read: true,
@@ -138,14 +139,15 @@ export function mergeConfig(base: CompactToolsConfig, value: unknown, path: stri
 		return base;
 	}
 	const mode = value.mode === undefined ? base.mode : (parseChoice<DisplayMode>(value.mode, DISPLAY_MODES, "mode", path) ?? base.mode);
-	const rawStyle = value.style === undefined ? undefined : parseChoice<DisplayStyle>(value.style, DISPLAY_STYLES, "style", path);
+	const storedStyle = value.style === "claude" ? "classic-rows" : value.style === "codex" ? "exploration-tail" : value.style;
+	const rawStyle = storedStyle === undefined ? undefined : parseChoice<DisplayStyle>(storedStyle, DISPLAY_STYLES, "style", path);
 	const rawDensity = value.density === undefined ? undefined : parseChoice<ToolDensity>(value.density, TOOL_DENSITIES, "density", path);
 	let style: DisplayStyle = base.style;
 	let density: ToolDensity = base.density;
 	if (rawStyle !== undefined) {
-		if (rawStyle === "detailed" || rawStyle === "diff-focus" || rawStyle === "compact") {
+		if ((TOOL_DENSITIES as readonly string[]).includes(rawStyle)) {
 			style = "density";
-			density = rawStyle;
+			density = rawStyle as ToolDensity;
 		} else {
 			style = rawStyle;
 		}
@@ -180,8 +182,17 @@ function readJson(path: string): unknown {
 }
 
 export function loadConfig(cwd?: string, projectTrusted = false): CompactToolsConfig {
+	const piUiDensity = loadPiUiUserConfig().toolDensity;
+	const baseConfig: CompactToolsConfig = {
+		...DEFAULT_CONFIG,
+		density: piUiDensity,
+	};
 	const globalPath = join(getAgentDir(), CONFIG_FILE);
-	const globalConfig = mergeConfig(DEFAULT_CONFIG, readJson(globalPath), globalPath);
+	const legacyGlobal = mergeConfig(baseConfig, readJson(globalPath), globalPath);
+	const explicitDensity = loadExplicitToolDensity();
+	const globalConfig: CompactToolsConfig = explicitDensity && legacyGlobal.style !== "off"
+		? { ...legacyGlobal, style: "density", density: explicitDensity }
+		: legacyGlobal;
 	if (!cwd || !projectTrusted) return globalConfig;
 	const projectPath = join(cwd, CONFIG_DIR_NAME, CONFIG_FILE);
 	return mergeConfig(globalConfig, readJson(projectPath), projectPath);

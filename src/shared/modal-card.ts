@@ -1,6 +1,8 @@
 import type { ExtensionContext, KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import {
 	CURSOR_MARKER,
+	Input,
+	isKeyRelease,
 	matchesKey,
 	renderFakeCursor,
 	truncateToWidth,
@@ -9,16 +11,20 @@ import {
 	type OverlayOptions,
 	type TUI,
 	type TuiMouseEvent,
+	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 import {
 	fgRgb,
 	getThemeSurfacePalette,
+	paintThemeSurfaceRow,
+	renderCloseButton,
 	renderPill,
 	type HitBox,
 	type PillVariant,
 	type RgbTuple,
 	type ThemeSurfacePalette,
 } from "./ansi.ts";
+import { createBracketedPasteTracker, matchesLayoutChord } from "./keyboard-layout.ts";
 import { claimHover } from "./runtime-hooks.ts";
 
 export { getThemeSurfacePalette, type PillVariant, type RgbTuple, type ThemeSurfacePalette };
@@ -117,7 +123,11 @@ export interface SingleLineInput {
 	getValue(): string;
 	setValue(next: string): void;
 	clear(): void;
+	isCursorAtStart(): boolean;
+	isCursorAtEnd(): boolean;
+	handlePaste(data: string): SingleLineInputResult | undefined;
 	handleInput(data: string): SingleLineInputResult;
+	handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined;
 	render(opts: {
 		theme: Theme;
 		focused: boolean;
@@ -128,65 +138,195 @@ export interface SingleLineInput {
 
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
+function firstSingleLineGrapheme(text: string): string {
+	for (const seg of graphemeSegmenter.segment(text)) {
+		return seg.segment;
+	}
+	return text[0] ?? " ";
+}
+
+/**
+ * Однострочный ввод поверх хостового `Input` с поддержкой навигации (`←/→`, `Home/End`, `Alt+←/→`),
+ * вставки, Undo/Redo (`Ctrl+Z` / `Ctrl+Shift+Z` / `Ctrl+Y`) и явного блочного курсора `CURSOR_MARKER + renderFakeCursor`.
+ */
 export function createSingleLineInput(initialValue = ""): SingleLineInput {
-	let value = initialValue;
+	const input = new Input({ prompt: "", placeholder: "" });
+	input.setValue(initialValue);
+
+	interface InputSnapshot {
+		readonly value: string;
+		readonly cursor: number;
+	}
+
+	const getCursorPos = (): number => {
+		const raw = (input as unknown as { cursor?: number }).cursor;
+		return typeof raw === "number" ? raw : input.getValue().length;
+	};
+	const setCursorPos = (pos: number): void => {
+		const clamped = Math.max(0, Math.min(input.getValue().length, pos));
+		(input as unknown as { cursor: number }).cursor = clamped;
+	};
+
+	const undoStack: InputSnapshot[] = [];
+	const redoStack: InputSnapshot[] = [];
+
+	const captureSnapshot = (): InputSnapshot => ({
+		value: input.getValue(),
+		cursor: getCursorPos(),
+	});
+
+	const restoreSnapshot = (snap: InputSnapshot): void => {
+		input.setValue(snap.value);
+		setCursorPos(snap.cursor);
+	};
+
+	const pasteTracker = createBracketedPasteTracker();
+	let pendingPasteStart = "";
+	const forwardInput = (data: string): SingleLineInputResult => {
+		const before = captureSnapshot();
+		input.handleInput(data);
+		const changed = input.getValue() !== before.value;
+		if (changed) {
+			undoStack.push(before);
+			if (undoStack.length > 100) undoStack.shift();
+			redoStack.length = 0;
+		}
+		return { changed, handled: changed || getCursorPos() !== before.cursor };
+	};
+	const handlePaste = (data: string): SingleLineInputResult | undefined => {
+		const hadPendingStart = pendingPasteStart.length > 0;
+		if (hadPendingStart) {
+			data = pendingPasteStart + data;
+			pendingPasteStart = "";
+			pasteTracker.reset();
+		}
+		if (data === "\x1b" && !pasteTracker.isInPaste) return undefined;
+		const segments = pasteTracker.split(data);
+		const trailing = segments.at(-1)?.trailingStartPrefixLength ?? 0;
+		if (!trailing && !hadPendingStart && !segments.some((segment) => segment.inPaste)) return undefined;
+
+		/* Хостовый Input буферизует тело вставки, но ожидает начальный маркер одним фрагментом. */
+		let changed = false;
+		for (const segment of segments) {
+			const prefix = trailing ? segment.trailingStartPrefixLength : 0;
+			const text = prefix ? segment.text.slice(0, -prefix) : segment.text;
+			if (text) changed = forwardInput(text).changed || changed;
+			if (prefix) pendingPasteStart = segment.text.slice(-prefix);
+		}
+		return { handled: true, changed };
+	};
 
 	return {
 		getValue() {
-			return value;
+			return input.getValue();
 		},
 		setValue(next: string) {
-			value = next;
+			input.setValue(next);
+			setCursorPos(next.length);
+			undoStack.length = 0;
+			redoStack.length = 0;
 		},
 		clear() {
-			value = "";
+			input.setValue("");
+			setCursorPos(0);
+			undoStack.length = 0;
+			redoStack.length = 0;
 		},
+		isCursorAtStart() {
+			return getCursorPos() <= 0;
+		},
+		isCursorAtEnd() {
+			return getCursorPos() >= input.getValue().length;
+		},
+		handlePaste,
 		handleInput(data: string): SingleLineInputResult {
-			if (matchesKey(data, "ctrl+u")) {
-				const changed = value.length > 0;
-				value = "";
-				return { handled: true, changed, cleared: true };
-			}
-			if (matchesKey(data, "backspace")) {
-				if (value.length === 0) return { handled: true, changed: false };
-				const segments = [...graphemeSegmenter.segment(value)];
-				segments.pop();
-				value = segments.map((s) => s.segment).join("");
-				return { handled: true, changed: true };
-			}
-			if (data.length >= 1 && !data.startsWith("\x1b")) {
-				// Filter out control characters (e.g. Enter, Tab, DEL)
-				const clean = data.replace(/[\x00-\x1f\x7f]/g, "");
-				if (clean.length > 0) {
-					value += clean;
-					return { handled: true, changed: true };
-				}
-			}
-			return { handled: false, changed: false };
-		},
-		render(opts): string {
-			const palette = getThemeSurfacePalette(opts.theme);
-			const marker = opts.focused ? CURSOR_MARKER : "";
-			const cursor = renderFakeCursor(" ");
-			if (!value) {
-				const placeholder = opts.placeholder ? opts.theme.fg("dim", opts.placeholder) : "";
-				return truncateToWidth(`${marker}${cursor}${placeholder}`, Math.max(2, opts.maxWidth), "…");
+			if (
+				!data || isKeyRelease(data) ||
+				matchesKey(data, "enter") ||
+				matchesKey(data, "return") ||
+				matchesKey(data, "escape") ||
+				matchesKey(data, "up") ||
+				matchesKey(data, "down") ||
+				matchesKey(data, "tab") ||
+				matchesKey(data, "shift+tab") ||
+				matchesKey(data, "pageUp") ||
+				matchesKey(data, "pageDown")
+			) {
+				return { handled: false, changed: false };
 			}
 
-			const availText = Math.max(1, opts.maxWidth - 1);
-			let shown = value;
-			if (visibleWidth(shown) > availText) {
-				const segments = [...graphemeSegmenter.segment(shown)].map((s) => s.segment);
-				let tail = "";
-				for (let i = segments.length - 1; i >= 0; i--) {
-					const candidate = segments[i]! + tail;
-					if (visibleWidth(`…${candidate}`) > availText) break;
-					tail = candidate;
-				}
-				shown = `…${tail}`;
+			if (matchesLayoutChord(data, "ctrl+shift+z") || matchesLayoutChord(data, "ctrl+y")) {
+				const next = redoStack.pop();
+				if (!next) return { handled: true, changed: false };
+				undoStack.push(captureSnapshot());
+				const before = input.getValue();
+				restoreSnapshot(next);
+				return { handled: true, changed: input.getValue() !== before };
 			}
-			const styledText = fgRgb(palette.inputText, shown);
-			return `${styledText}${marker}${cursor}`;
+
+			if (matchesLayoutChord(data, "ctrl+z")) {
+				const prev = undoStack.pop();
+				if (!prev) return { handled: true, changed: false };
+				redoStack.push(captureSnapshot());
+				const before = input.getValue();
+				restoreSnapshot(prev);
+				return { handled: true, changed: input.getValue() !== before };
+			}
+
+			if (matchesKey(data, "ctrl+u")) {
+				const before = input.getValue();
+				if (before.length > 0) {
+					undoStack.push(captureSnapshot());
+					redoStack.length = 0;
+					input.setValue("");
+					setCursorPos(0);
+				}
+				return { handled: true, changed: before.length > 0, cleared: true };
+			}
+
+			const result = forwardInput(data);
+			if (result.handled) return result;
+			const isEditKey =
+				matchesKey(data, "backspace") ||
+				matchesKey(data, "delete") ||
+				matchesKey(data, "left") ||
+				matchesKey(data, "right") ||
+				matchesKey(data, "home") ||
+				matchesKey(data, "end") ||
+				matchesKey(data, "ctrl+a") ||
+				matchesKey(data, "ctrl+e") ||
+				matchesKey(data, "ctrl+w") ||
+				matchesKey(data, "ctrl+k") ||
+				matchesKey(data, "alt+left") ||
+				matchesKey(data, "alt+right") ||
+				matchesKey(data, "alt+b") ||
+				matchesKey(data, "alt+f");
+			return { handled: isEditKey, changed: false };
+		},
+		handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+			return input.handleMouse(event);
+		},
+		render(opts): string {
+			const safeWidth = Math.max(2, opts.maxWidth);
+			const value = input.getValue();
+			if (!value) {
+				const marker = opts.focused ? CURSOR_MARKER : "";
+				const placeholder = opts.placeholder
+					? truncateToWidth(opts.placeholder, safeWidth, "…")
+					: "";
+				if (!placeholder) {
+					return `${marker}${renderFakeCursor(" ")}`;
+				}
+				const head = firstSingleLineGrapheme(placeholder);
+				const rest = placeholder.slice(head.length);
+				const cursor = renderFakeCursor(opts.theme.fg("dim", head));
+				return `${marker}${cursor}${rest ? opts.theme.fg("dim", rest) : ""}`;
+			}
+
+			input.focused = opts.focused;
+			const rendered = input.render(safeWidth)[0] ?? "";
+			const palette = getThemeSurfacePalette(opts.theme);
+			return fgRgb(palette.inputText, rendered);
 		},
 	};
 }
@@ -256,17 +396,25 @@ export function createModalCard(): ModalCardController {
 			const dimBorder = (s: string) => theme.fg("borderMuted", s);
 
 			const closable = spec.closable !== false && typeof spec.onClose === "function";
-			const closeGlyph = hoveredId === "top-close"
-				? fgRgb(palette.danger, "✕")
-				: theme.fg("muted", "✕");
+			const closeGlyph = renderCloseButton(theme, hoveredId === "top-close");
+			const closeW = visibleWidth(closeGlyph);
 
-			// Build top border while guaranteeing the top-right close glyph stays visible and right-aligned
-			const metaPart = spec.headerMeta ? `${spec.headerMeta}  ` : "";
+			/* Сборка верхней рамки с гарантией видимости кнопки [×] справа */
+			let metaPart = spec.headerMeta ? `${spec.headerMeta}  ` : "";
+			if (closable && metaPart) {
+				const maxMetaW = Math.max(0, safeWidth - 9 - closeW);
+				if (maxMetaW < 4) {
+					metaPart = "";
+				} else if (visibleWidth(metaPart) > maxMetaW) {
+					const trimmedMeta = truncateToWidth(spec.headerMeta!, Math.max(1, maxMetaW - 2), "…");
+					metaPart = trimmedMeta ? `${trimmedMeta}  ` : "";
+				}
+			}
 			const rightContent = closable ? `${metaPart}${closeGlyph}` : (spec.headerMeta ?? "");
 			const rightPart = rightContent ? ` ${rightContent} ` : "";
 			const rightWidth = visibleWidth(rightPart);
 
-			// Reserve "╭─" (2) + rightPart + "╮" (1) + at least 1 border dash
+			/* Резервируем "╭─" (2) + rightPart + "╮" (1) + минимум 1 тире рамки */
 			const maxLeftWidth = Math.max(2, safeWidth - 3 - rightWidth - (rightWidth > 0 ? 1 : 0));
 			const leftTitle = truncateToWidth(` ${spec.title} `, maxLeftWidth, "…");
 			const leftWidth = visibleWidth(leftTitle);
@@ -277,11 +425,10 @@ export function createModalCard(): ModalCardController {
 
 			if (closable && spec.onClose) {
 				const closeCol = visibleWidth(topPrefix) + 1 + visibleWidth(metaPart);
-				const closeW = visibleWidth(closeGlyph);
 				closeHit = {
 					id: "top-close",
-					xStart: Math.max(0, closeCol - 1),
-					xEnd: Math.min(safeWidth - 1, closeCol + closeW + 1),
+					xStart: Math.max(0, closeCol),
+					xEnd: Math.min(safeWidth - 1, closeCol + closeW),
 					y: 0,
 					onClick: spec.onClose,
 				};
@@ -322,7 +469,7 @@ export function createModalCard(): ModalCardController {
 						});
 						const pillW = visibleWidth(rendered);
 
-						// Wrap to next footer row when adding this pill would exceed innerWidth
+						/* Переносим пилюлю на следующую строку футера при нехватке ширины */
 						if (currentRowWidth > 0 && currentRowWidth + gapW + pillW > innerWidth) {
 							renderedRows.push(currentRowText);
 							rowIdx++;
@@ -360,7 +507,7 @@ export function createModalCard(): ModalCardController {
 			}
 
 			out.push(`${bColor("╰")}${bColor("─".repeat(Math.max(0, safeWidth - 2)))}${bColor("╯")}`);
-			return out;
+			return out.map((row) => paintThemeSurfaceRow(theme, row, safeWidth, palette.popupSurfaceBg, true));
 		},
 		handleMouse(event: TuiMouseEvent): ModalCardMouseOutcome {
 			const findHit = (x: number, y: number): HitBox | undefined => {

@@ -55,6 +55,16 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		return dir;
 	}
 
+	function allocateEnabledAgentDir(prefix = "pi-ui-sug-enabled-"): string {
+		const dir = allocateTempDir(prefix);
+		writeFileSync(
+			join(dir, "pi-ui.json"),
+			`${JSON.stringify({ promptSuggestions: true }, null, 2)}\n`,
+			"utf8",
+		);
+		return dir;
+	}
+
 	afterEach(async () => {
 		if (harness) {
 			await harness.dispose();
@@ -112,7 +122,43 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		await harness.pressKey("\x15");
 
 		await harness.submitInput("/suggestions status");
-		expect(harness.screen().text()).toContain("Использование: /suggestions [on|off]");
+		expect(harness.screen().text()).toContain("Usage: /suggestions [on|off]");
+	});
+
+	it("disabling Prompt Suggestions in the Command Palette revokes the live token opt-in", async () => {
+		const agentDir = allocateEnabledAgentDir();
+		harness = await createInteractiveHarness({
+			agentDir,
+			width: 100,
+			height: 28,
+			responses: [fauxAssistantMessage("Reply after opting out.")],
+			suggestionResponses: [fauxAssistantMessage("Should not run")],
+		});
+
+		await harness.pressKey("\x0b");
+		await harness.typeText("disable prompt suggestions");
+		expect(harness.screen().text()).toContain("Prompt Suggestion: disable");
+		await harness.pressKey("\r");
+		expect(loadPiUiUserConfig().promptSuggestions).toBe(false);
+		await harness.submitInput("No background work please");
+		await harness.flush();
+		expect(harness.suggestionCalls).toHaveLength(0);
+	});
+
+	it("fires zero background Prompt Suggestion calls on fresh installs without explicit opt-in", async () => {
+		harness = await createInteractiveHarness({
+			width: 90,
+			height: 26,
+			responses: [fauxAssistantMessage("Fresh install reply.")],
+			suggestionResponses: [fauxAssistantMessage("Should not run")],
+		});
+
+		await harness.submitInput("Hello fresh install");
+		await new Promise<void>((resolve) => setTimeout(resolve, 35));
+		expect(harness.calls).toHaveLength(1);
+		expect(harness.suggestionCalls).toHaveLength(0);
+		expect(harness.screen().text()).toContain(COMPOSER_PLACEHOLDER);
+		expect(harness.screen().text()).not.toContain("Should not run");
 	});
 
 	it("predicts Prompt Suggestion in background reusing prompt-cache prefix, renders dimmed inside rounded composer frame with narrow truncation, and never keeps working indicator active", async () => {
@@ -122,6 +168,7 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		});
 
 		harness = await createInteractiveHarness({
+			agentDir: allocateEnabledAgentDir(),
 			width: 84,
 			height: 26,
 			thinkingLevel: "high",
@@ -182,8 +229,8 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		expect(readyScreen.text()).not.toContain(COMPOSER_PLACEHOLDER);
 		const sugHit = readyScreen.findText("Запусти полный набор");
 		expect(sugHit).toBeDefined();
-		expect(readyScreen.cellAt(sugHit!.row, 0)?.char).toBe("│");
-		expect(readyScreen.cellAt(sugHit!.row, readyScreen.width - 1)?.char).toBe("│");
+		expect(readyScreen.cellAt(sugHit!.row, 2)?.char).toBe("│");
+		expect(readyScreen.cellAt(sugHit!.row, readyScreen.width - 3)?.char).toBe("│");
 		expect(readyScreen.cellAt(sugHit!.row, sugHit!.col + 1)?.fg).toEqual(dimFgColor);
 
 		await harness.resize(44, 26);
@@ -191,9 +238,9 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		const narrowHit = narrowScreen.findText("Запусти полный");
 		expect(narrowHit).toBeDefined();
 		const narrowRow = narrowScreen.rowText(narrowHit!.row);
-		expect(narrowRow.startsWith("│ › Запусти")).toBe(true);
-		expect(narrowRow.endsWith("… │")).toBe(true);
-		expect(narrowScreen.cellAt(narrowHit!.row, narrowScreen.width - 1)?.char).toBe("│");
+		expect(narrowRow.startsWith("  │ › Запусти")).toBe(true);
+		expect(narrowRow.endsWith("… │  ")).toBe(true);
+		expect(narrowScreen.cellAt(narrowHit!.row, narrowScreen.width - 3)?.char).toBe("│");
 
 		harness.session.setThinkingLevel("off");
 		await harness.resize(84, 26);
@@ -204,6 +251,7 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 
 	it("silently ignores errored, multiline, empty, sentinel, and >100-char prediction responses without error toasts", async () => {
 		harness = await createInteractiveHarness({
+			agentDir: allocateEnabledAgentDir(),
 			width: 90,
 			height: 26,
 			responses: [
@@ -244,6 +292,7 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		});
 
 		harness = await createInteractiveHarness({
+			agentDir: allocateEnabledAgentDir(),
 			width: 90,
 			height: 26,
 			settings: {
@@ -425,6 +474,7 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 
 	it("accepts Prompt Suggestion on Tab or Right arrow with Ctrl+Z and tui.editor.undo reversal, clearing the stored suggestion", async () => {
 		harness = await createInteractiveHarness({
+			agentDir: allocateEnabledAgentDir(),
 			width: 92,
 			height: 26,
 			responses: [
@@ -485,6 +535,7 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		const tinyPngBytes = Uint8Array.from(Buffer.from(tinyPngBase64, "base64"));
 
 		harness = await createInteractiveHarness({
+			agentDir: allocateEnabledAgentDir(),
 			width: 96,
 			height: 28,
 			settings: {
@@ -520,12 +571,15 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		expect(harness.screen().text()).not.toContain("Обнови снапшоты тестов");
 
 		await harness.pressKey("\x7f");
+		await harness.pressKey("\x7f");
 		expect(harness.screen().text()).toContain("Обнови снапшоты тестов");
 
 		await harness.pressKey("\x16");
 		await waitForCondition(() => harness!.screen().text().includes("[🖼 Image #1]"));
 		expect(harness.screen().text()).not.toContain("Обнови снапшоты тестов");
 
+		/* Первое нажатие Backspace удаляет автоматически подставленный пробел, второе — сам чип */
+		await harness.pressKey("\x7f");
 		await harness.pressKey("\x7f");
 		expect(harness.screen().text()).toContain("Обнови снапшоты тестов");
 
@@ -533,6 +587,7 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		expect(harness.screen().text()).toContain("[❝ Quote #1 · 1 line]");
 		expect(harness.screen().text()).not.toContain("Обнови снапшоты тестов");
 
+		await harness.pressKey("\x7f");
 		await harness.pressKey("\x7f");
 		expect(harness.screen().text()).toContain("Обнови снапшоты тестов");
 
@@ -636,6 +691,7 @@ export default function (pi) {
 					: [DEFAULT_EXTENSION_ENTRY, externalEntry];
 
 			harness = await createInteractiveHarness({
+				agentDir: allocateEnabledAgentDir(),
 				width: 92,
 				height: 26,
 				loadDefaultExtension: false,
@@ -771,6 +827,7 @@ export default function (pi) {
 					: [DEFAULT_EXTENSION_ENTRY, renamedEntry];
 
 			harness = await createInteractiveHarness({
+				agentDir: allocateEnabledAgentDir(),
 				width: 92,
 				height: 26,
 				loadDefaultExtension: false,
@@ -821,17 +878,17 @@ describe("Prompt Suggestion configuration, sanitization, and external superseder
 		}
 	});
 
-	it("resolves getAgentDir dynamically, defaults promptSuggestions to true, survives malformed JSON, and preserves symlinks and sibling keys", () => {
+	it("resolves getAgentDir dynamically, defaults promptSuggestions to false, survives malformed JSON, and preserves symlinks and sibling keys", () => {
 		expect(getPiUiConfigPath()).toBe(join(tempRoot, "agent-a", "pi-ui.json"));
 		expect(loadPiUiUserConfig()).toEqual(DEFAULT_PI_UI_USER_CONFIG);
-		expect(loadPiUiUserConfig().promptSuggestions).toBe(true);
+		expect(loadPiUiUserConfig().promptSuggestions).toBe(false);
 
 		const secondDir = join(tempRoot, "agent-b");
 		process.env.PI_CODING_AGENT_DIR = secondDir;
 		expect(getPiUiConfigPath()).toBe(join(secondDir, "pi-ui.json"));
 
-		updatePiUiUserConfig({ promptSuggestions: false });
-		expect(loadPiUiUserConfig().promptSuggestions).toBe(false);
+		updatePiUiUserConfig({ promptSuggestions: true });
+		expect(loadPiUiUserConfig().promptSuggestions).toBe(true);
 
 		writeFileSync(getPiUiConfigPath(), "{broken json", "utf8");
 		expect(loadPiUiUserConfig()).toEqual(DEFAULT_PI_UI_USER_CONFIG);

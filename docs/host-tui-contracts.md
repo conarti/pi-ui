@@ -24,7 +24,7 @@ Verified runtime behaviors in `@earendil-works/pi-tui` and `@earendil-works/pi-c
 1. **`TuiAltScreen.doRender()` order & symmetric margin grid**:
    - A fixed 3-row session header (`[blank, content, blank]`) mounts statically at `fullscreenLayoutRoot` index `0` outside `ScrollView` (suppressing the inner `headerContainer` inside `ScrollView.documentContainer`) so `viewportHeight` remains constant during scrolling and `Sticky Prompt` anchors cleanly at `y = 3`.
    - `renderLayoutFrame()` builds the layout tree (`{ root, width, height, lines, primaryScrollView, renderCache }`), where each box node holds `{ component, rect, clip, children, scrollView?, scrollContentLines?, layer }`. Walk `root.children` recursively to locate `node.scrollView === scroll`.
-   - Suppress the host's native blocky scrollbar and `Jump to latest message` banner (`over-scrollbar`) so full-bleed cards stay aligned across `x = 2 .. width - 3` (dialogue content axis `x = 4`) without a 1-column jump when scrollback overflows; composite `Outline Rail` inside the right 2-column margin (`width - 2 .. width - 1`) alongside centered `▲`/`▼` scroll indicators.
+   - Suppress the host's native blocky scrollbar and `Jump to latest message` banner (`over-scrollbar`) so full-bleed cards stay aligned across `x = 2 .. width - 3` (outer frames such as `Composer`, `Tool Calls`, and `Modal Card` span `[2 .. width - 3]`, while inner dialogue prose, right-aligned timestamps on `User Prompt` / `Response Metrics`, and custom `above`/`below` editor widgets align to `[4 .. width - 5]`) without a 1-column jump when scrollback overflows; composite `Outline Rail` inside the right 2-column margin (`width - 2 .. width - 1`) alongside centered `▲`/`▼` scroll indicators.
    - `compositeScrollToEndIndicator` and `compositeOverlays` execute **before** `applySelection(screen, nextLayout)`.
    - Mask selection cells across composited `Sticky Prompt` rows, the active `Outline Rail` block (`[upY .. downY]` at `width - 2 .. width - 1`), and visible `renderedOverlayLayouts` rects so underlying transcript selections never invert-highlight chrome or `Hover Popup` surfaces.
 
@@ -40,9 +40,10 @@ Verified runtime behaviors in `@earendil-works/pi-tui` and `@earendil-works/pi-c
 
 ## Inline Terminal Images Under Composited Chrome
 
-- **Kitty (`\x1b_G...\x1b\\`) and iTerm2 (`\x1b]1337;File=...\x07`)**:
+- **Kitty (`\x1b_G...\x1b\\`), iTerm2 (`\x1b]1337;File=...\x07`), and half-block thumbnails (`renderImage`)**:
   - Strip inline image sequences on rows fully covered by `Sticky Prompt` before compositing text over them.
   - For multi-row Kitty placements partially covered by `Sticky Prompt`, relocate the placement anchor to the first uncovered row (`stickyBottom`) with adjusted `y` / `h` / `r` crop parameters so uncovered bottom rows remain visible during scrolling.
+  - `@earendil-works/pi-tui`'s half-block `▀` fallback emits `\x1b[49m` (default background) on uncovered half-rows; pass elevated `popupSurfaceBg` through `paintThemeSurfaceRow` across every thumbnail row inside popups.
 
 ## Custom Composer Frame (`CustomEditor`)
 
@@ -51,7 +52,11 @@ Verified runtime behaviors in `@earendil-works/pi-tui` and `@earendil-works/pi-c
   - Guard minimum wrap width at narrow terminal columns (`maxWidth >= 2`) so wide graphemes never recurse in `Editor.wordWrapLine`.
   - Paint top, side, and bottom borders via internal state rather than relying on `this.borderColor`, because `InteractiveMode.updateEditorBorderColor()` overwrites `editor.borderColor` on thinking-level and mode transitions.
 
-## Multi-Layout Keyboard Input
+## Multi-Layout Keyboard & Modified Pointer Input
+
+- **Modified link clicks (`Cmd+Click` / `Ctrl+Click`)**:
+  - Emit native OSC 8 hyperlinks (`https://...`, `file://...`) when `getCapabilities().hyperlinks` is true, and preserve SGR bit `128` (`event.super`) in `TuiAltScreen.prototype.createMouseEvent`.
+  - xterm.js-based hosts (`Herdr`, `VS Code`) encode macOS `Cmd+Click` (`metaKey`) as SGR bit `8` (`event.alt === true`); treat `event.alt || event.ctrl || event.super || event.meta` on link hitboxes as direct open while keeping plain click for `LinkTargetPopup`.
 
 - **Dispatch order**:
   - `ctx.ui.onTerminalInput` listeners run inside `TuiBase.handleTerminalInput` before `CustomEditor.handleInput` (`onExtensionShortcut` -> editor keybindings). Returning `{ data }` rewrites the sequence for all downstream shortcut matchers.
@@ -60,10 +65,24 @@ Verified runtime behaviors in `@earendil-works/pi-tui` and `@earendil-works/pi-c
   - When Kitty CSI-u includes `:baseLayoutKey` (`\x1b[codepoint:shifted:base;modu`), trust `:baseLayoutKey` before consulting macOS `Option`-composed character tables so non-US physical layouts (`Russian`, `RussianWin`, `QWERTZ`) never misroute chords.
   - Rewrite Cyrillic codepoints and `Option`-composed symbols only when modifier bits (`Alt`, `Ctrl`, `Super`), `ESC` prefixes, or registered `alt+<letter>` Option chords apply, preserving plain printable text entry.
 
+## Session queue, prompt text fan-out, renderer ownership, and summary indexing
+
+- **Six host surfaces consume stored/queued user prompt text**: when Pi expands `/skill:<name>` into `<skill name="...">...</skill>` XML or serializes `[Image #N: /path]` and `Prompt Chips`, reconstruct clean pills/text across all six consumers: (1) `UserMessageComponent` (`user-prompt.ts`), (2) `Sticky Prompt` and `Outline Rail` (`turn-index.ts`), (3) `Steer`/`FollowUp` queue strip display and `[Edit · Alt+↑]` / `handleDequeue` editor restore (`mid-turn-queue.ts`), (4) `/tree` (`TreeList.getEntryDisplayText` plus `customType === "skill"` entries), (5) `/fork` (`UserMessageSelectorComponent`) and `/resume` (`SessionSelectorComponent`), and (6) `CustomEditor.addToHistory` / branch draft `setText` (`composer.ts`).
+- Pi's `app.message.dequeue` normally joins both queues' texts and drops image attachments. The queue strip intercepts `InteractiveMode.handleDequeue` to restore the first visible item using the same attachment-aware path as its `Edit` action.
+- Pi stores the renderer callback on each custom message or entry component. Return a dispatching callback for a contended renderer so an existing component resolves its new owner on rebuild. Do not reinstall singleton factories whose owner and factory are unchanged; Pi's editor setter reconstructs the editor and resets the caret.
+- `SessionManager.getEntries()` filters and copies all entries, even if only one was appended. Seed the step-summary index once, then update it after a successful `appendCustomEntry` without fetching the history again.
+
+## Referential Transcript & Config Render Caching (`ADR-0008`)
+
+- **Preserve `Component` and `string[]` reference identity (`===`)**:
+  - `@earendil-works/pi-tui`'s `Container.renderChildLines` short-circuits $O(N)$ transcript line-array concatenation only when every child `Component` reference and its returned `string[]` reference stay identical across frames (`docs/adr/0008-referential-transcript-render-caching.md`).
+  - Completed transcript components (`ToolGroupController`, `ResponseMetricsRowComponent`, `UserMessageComponent`, `SkillInvocationMessageComponent`, `Markdown.prototype.render`, `ThinkingBlock`) must return cached `Component` and `string[]` references keyed by `(width, theme, hover/copy/expanded, getPiUiConfigVersion(), registry.version)` and treat returned `string[]` arrays as immutable.
+  - Wrap synchronous TUI render passes in `withPiUiConfigRenderPass` (`src/shared/pi-ui-config.ts`) and never import `node:fs` inside UI render/component modules (enforced by `scripts/check-standards.mjs`).
+
 ## Real `InteractiveMode` Test Harness & Banned Host Fakes (`ADR-0006`)
 
 - **Real-host acquisition & test seam**:
   - `acquireHostRuntime(ctx)` acquires the live host TUI exclusively through Pi's `ctx.ui.custom` contract (no `setHostRuntimeAdapter` test-adapter seam in production code).
   - UI and extension integration tests boot real `InteractiveMode` + `createAgentSessionRuntime` + `registerFauxProvider` + `VirtualTerminal` (`tests/harness/interactive-harness.ts`) so `this.ui` `Proxy` wrapping, `createChatViewport` hierarchy, `ExtensionRunner` reserved-shortcut filtering, `switchTuiMode`, and `/reload` execute identically to live Pi.
 - **Mechanically banned patterns (`scripts/check-standards.mjs`)**:
-  - `npm run lint` rejects `as unknown as TUI` / `.asTui()` casts, private `.overlayStack` reads, direct `.handleMouse(` / `.handleMouse?.(` calls in integration suites, and any reintroduction of deleted fake-host modules (`fake-tui`, `fake-theme`, `extension-harness`) or `setHostRuntimeAdapter` / `HostRuntimeAdapter`.
+  - `npm run lint` enforces host `pi` version parity (`EXPECTED_PI_HOST_VERSION` in `scripts/resolve-host-pi.mjs`) and rejects `as unknown as TUI` / `.asTui()` casts, private `.overlayStack` or `.hasOverlayEntries` reads, non-standard `✕` close glyphs in `src/`, direct `.handleMouse(` / `.handleMouse?.(` calls in integration suites, and any reintroduction of deleted fake-host modules (`fake-tui`, `fake-theme`, `extension-harness`) or `setHostRuntimeAdapter` / `HostRuntimeAdapter`.

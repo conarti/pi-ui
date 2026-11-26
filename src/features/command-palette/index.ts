@@ -1,5 +1,4 @@
 import {
-	ExtensionRunner,
 	type ExtensionAPI,
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
@@ -15,8 +14,9 @@ import {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
-import { bgRgb, fgRgb } from "../../shared/ansi.ts";
+import { blueBgRgb, fgRgb } from "../../shared/ansi.ts";
 import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
+import { t } from "../../shared/i18n.ts";
 import {
 	createBracketedPasteTracker,
 	matchesLayoutChord,
@@ -28,13 +28,27 @@ import {
 	hasBlockingModalOverlay,
 	openModalCard,
 } from "../../shared/modal-card.ts";
-import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
+import {
+	loadPiUiUserConfig,
+	TIMESTAMP_DISPLAY_MODES,
+	TOOL_DENSITY_PRESETS,
+	updatePiUiUserConfig,
+} from "../../shared/pi-ui-config.ts";
+import { syncShortcutsBar } from "../chrome/shortcuts-bar.ts";
+import { notifyLiveToolDensityChange } from "../tool-calls/command.ts";
+import { claimHover } from "../../shared/runtime-hooks.ts";
+import { COMMAND_PALETTE_CHORD, dispatchLocalShortcut } from "../../shared/slot-arbitration.ts";
 import { getSessionWorkflow, MODE_META } from "../../shared/session-workflow.ts";
 import { requestRender, runAppAction } from "../../shared/ui-action-bridge.ts";
-import { showContextInspector } from "../context-inspector/index.ts";
+import {
+	invalidateResponseMetricsRows,
+	showContextInspector,
+} from "../context-inspector/index.ts";
 import { getOutlineSettings } from "../outline-rail/index.ts";
-import { setSessionMode } from "../plan-studio/index.ts";
-import { showPlanStudio } from "../plan-studio/studio-overlay.ts";
+import { setSessionMode } from "../plan-approval/index.ts";
+import { showPlanApproval } from "../plan-approval/approval-overlay.ts";
+import { showSlotArbitrationModal } from "../slot-arbitration/index.ts";
+import { setPromptSuggestionsEnabled } from "../prompt-suggestion/index.ts";
 import { getStickyConfig } from "../sticky-prompt/index.ts";
 
 interface PaletteItem {
@@ -50,11 +64,11 @@ interface PaletteItem {
 function fuzzyMatch(query: string, target: string): boolean {
 	if (!query) return true;
 	const q = query.toLowerCase().trim();
-	const t = target.toLowerCase();
-	if (t.includes(q)) return true;
+	const tStr = target.toLowerCase();
+	if (tStr.includes(q)) return true;
 	let qi = 0;
-	for (let i = 0; i < t.length && qi < q.length; i++) {
-		if (t[i] === q[qi]) qi++;
+	for (let i = 0; i < tStr.length && qi < q.length; i++) {
+		if (tStr[i] === q[qi]) qi++;
 	}
 	return qi === q.length;
 }
@@ -64,6 +78,7 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 	const wf = getSessionWorkflow();
 	const stickyCfg = getStickyConfig();
 	const outlineCfg = getOutlineSettings();
+	const userCfg = loadPiUiUserConfig();
 
 	const runAction = (actionId: string) => {
 		runAppAction(actionId);
@@ -72,212 +87,429 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 	const items: PaletteItem[] = [
 		{
 			id: "mode-plan",
-			group: "Режим",
+			group: t("palette.group.mode"),
 			icon: "◈",
-			label: wf.mode === "plan" ? "Выключить Plan Mode → Code" : "Включить Plan Mode (планирование без воды)",
-			hint: "Alt+M",
-			keywords: "plan mode план планирование",
-			run: () => setSessionMode(pi, ctx, wf.mode === "plan" ? "code" : "plan"),
+			label: wf.mode === "plan" ? t("palette.item.planModeOff") : t("palette.item.planModeOn"),
+			hint: "Shift+Tab",
+			keywords: "plan mode always-approve planning",
+			run: () => setSessionMode(pi, ctx, wf.mode === "plan" ? "always-approve" : "plan"),
 		},
 		{
-			id: "plan-studio",
-			group: "Режим",
+			id: "plan-approval",
+			group: t("palette.group.mode"),
 			icon: "📋",
 			label:
 				wf.planLines.length > 0
-					? `Открыть Plan Studio (${wf.planLines.length} стр., комментарии к строкам)`
-					: "Открыть Plan Studio",
+					? t("palette.item.planApprovalWithLines", { count: wf.planLines.length })
+					: t("palette.item.planApproval"),
 			hint: "/plan",
-			keywords: "plan studio review comments ревью комментарии план",
-			run: () => showPlanStudio(pi, ctx),
+			keywords: "plan approval review comments",
+			run: () => showPlanApproval(pi, ctx),
 		},
 		{
-			id: "mode-safe",
-			group: "Режим",
+			id: "mode-auto",
+			group: t("palette.group.mode"),
 			icon: "🛡",
-			label: wf.mode === "safe" ? "Выключить Auto-Safe → Code" : "Включить Auto-Safe (подтверждение правок/риска)",
-			hint: "/mode safe",
-			keywords: "auto safe confirm локальные модели безопасность",
-			run: () => setSessionMode(pi, ctx, wf.mode === "safe" ? "code" : "safe"),
+			label: wf.mode === "auto" ? t("palette.item.autoModeOff") : t("palette.item.autoModeOn"),
+			hint: "/auto",
+			keywords: "auto mode confirm permission always-approve",
+			run: () => setSessionMode(pi, ctx, wf.mode === "auto" ? "always-approve" : "auto"),
 		},
 		{
 			id: "context",
-			group: "Контекст",
+			group: t("palette.group.context"),
 			icon: "◐",
-			label: "Инспектор контекста и токенов",
+			label: t("palette.item.contextInspector"),
 			hint: "/context",
-			keywords: "context tokens usage cost контекст токены",
+			keywords: "context tokens usage cost inspector",
 			run: () => showContextInspector(pi, ctx),
 		},
 		{
 			id: "compact",
-			group: "Контекст",
+			group: t("palette.group.context"),
 			icon: "⚡",
-			label: "Сжать историю диалога (Compact)",
+			label: t("palette.item.compact"),
 			hint: "/compact",
-			keywords: "compact compress сжать контекст",
+			keywords: "compact compress context history",
 			run: () => {
 				if (!ctx.isIdle()) {
-					ctx.ui.notify("Дождись завершения генерации перед сжатием", "warning");
+					ctx.ui.notify(t("palette.compactBusy"), "warning");
 					return;
 				}
-				ctx.ui.notify("Сжимаю контекст…", "info");
+				ctx.ui.notify(t("palette.compactStarted"), "info");
 				ctx.compact({
-					onComplete: () => ctx.ui.notify("Контекст сжат ✓", "info"),
-					onError: (e) => ctx.ui.notify(`Ошибка сжатия: ${e.message}`, "error"),
+					onComplete: () => ctx.ui.notify(t("palette.compactDone"), "info"),
+					onError: (e) => ctx.ui.notify(t("palette.compactError", { message: e.message }), "error"),
 				});
 			},
 		},
 		{
 			id: "toggle-sticky",
-			group: "Интерфейс",
+			group: t("palette.group.ui"),
 			icon: "📌",
-			label: `Закреплённый промпт сверху: ${stickyCfg.enabled ? "выключить" : "включить"}`,
+			label: t("palette.item.stickyToggle", {
+				action: stickyCfg.enabled ? t("palette.action.disable") : t("palette.action.enable"),
+			}),
 			hint: "/sticky",
-			keywords: "sticky header prompt закрепленный промпт",
+			keywords: "sticky header prompt top",
 			run: () => {
 				stickyCfg.enabled = !stickyCfg.enabled;
 				requestRender();
-				ctx.ui.notify(`Sticky prompt: ${stickyCfg.enabled ? "включён" : "выключен"}`, "info");
+				ctx.ui.notify(
+					t("sticky.toggled", { state: stickyCfg.enabled ? t("state.on") : t("state.off") }),
+					"info",
+				);
 			},
 		},
 		{
 			id: "toggle-outline",
-			group: "Интерфейс",
+			group: t("palette.group.ui"),
 			icon: "☰",
-			label: `Навигация по репликам справа: ${outlineCfg.enabled ? "скрыть" : "показать"}`,
+			label: t("palette.item.outlineToggle", {
+				action: outlineCfg.enabled ? t("palette.action.hide") : t("palette.action.show"),
+			}),
 			hint: "Ctrl+Alt+O",
-			keywords: "outline rail timeline навигация справа",
+			keywords: "outline rail navigation turns",
 			run: () => {
 				outlineCfg.enabled = !outlineCfg.enabled;
 				requestRender();
-				ctx.ui.notify(`Навигация справа: ${outlineCfg.enabled ? "показана" : "скрыта"}`, "info");
+				ctx.ui.notify(
+					t("outline.toggled", { state: outlineCfg.enabled ? t("state.shown") : t("state.hidden") }),
+					"info",
+				);
+			},
+		},
+		{
+			id: "cycle-tool-density",
+			group: t("palette.group.settings"),
+			icon: "▤",
+			label: t("palette.item.densityCycle", { current: userCfg.toolDensity }),
+			hint: "/density",
+			keywords: "tool density balanced compact grouped diff-focus detailed",
+			run: () => {
+				const cur = loadPiUiUserConfig().toolDensity;
+				const next =
+					TOOL_DENSITY_PRESETS[(TOOL_DENSITY_PRESETS.indexOf(cur) + 1) % TOOL_DENSITY_PRESETS.length]!;
+				updatePiUiUserConfig({ toolDensity: next });
+				notifyLiveToolDensityChange(next);
+				requestRender();
+				ctx.ui.notify(t("config.updated", { setting: "Tool Density", value: next }), "info");
+			},
+		},
+		{
+			id: "toggle-prompt-suggestions",
+			group: t("palette.group.settings"),
+			icon: "✦",
+			label: t("palette.item.suggestionsToggle", {
+				action: userCfg.promptSuggestions
+					? t("palette.action.disable")
+					: t("palette.action.enable"),
+			}),
+			hint: "/suggestions",
+			keywords: "prompt suggestions follow-up background tokens",
+			run: () => {
+				const next = setPromptSuggestionsEnabled(!loadPiUiUserConfig().promptSuggestions);
+				ctx.ui.notify(
+					t("suggestions.toggled", { state: next ? t("state.on") : t("state.off") }),
+					"info",
+				);
+			},
+		},
+		{
+			id: "toggle-shortcuts-bar",
+			group: t("palette.group.settings"),
+			icon: "⌨",
+			label: t("palette.item.shortcutsBarToggle", {
+				action: userCfg.showShortcutsBar
+					? t("palette.action.hide")
+					: t("palette.action.show"),
+			}),
+			hint: "/shortcuts-bar",
+			keywords: "shortcuts bar hints footer",
+			run: () => {
+				const next = !loadPiUiUserConfig().showShortcutsBar;
+				updatePiUiUserConfig({ showShortcutsBar: next });
+				syncShortcutsBar();
+				requestRender();
+				ctx.ui.notify(
+					t("shortcutsBar.toggled", { state: next ? t("state.on") : t("state.off") }),
+					"info",
+				);
+			},
+		},
+		{
+			id: "slot-arbitration",
+			group: t("palette.group.settings"),
+			icon: "⇄",
+			label: t("palette.item.slots"),
+			hint: "/slots",
+			keywords: "slots arbitration extensions owners footer header editor working command shortcut",
+			run: () => showSlotArbitrationModal(ctx, undefined, "manage"),
+		},
+		{
+			id: "toggle-response-metrics",
+			group: t("palette.group.settings"),
+			icon: "⏱",
+			label: t("palette.item.responseMetricsToggle", {
+				action: userCfg.responseMetrics
+					? t("palette.action.disable")
+					: t("palette.action.enable"),
+			}),
+			keywords: "response metrics latency throughput duration",
+			run: () => {
+				const next = !loadPiUiUserConfig().responseMetrics;
+				updatePiUiUserConfig({ responseMetrics: next });
+				invalidateResponseMetricsRows();
+				ctx.ui.notify(
+					t("config.updated", {
+						setting: "Response Metrics",
+						value: next ? t("state.on") : t("state.off"),
+					}),
+					"info",
+				);
+			},
+		},
+		{
+			id: "toggle-copy-on-select",
+			group: t("palette.group.settings"),
+			icon: "⎘",
+			label: t("palette.item.copyOnSelectToggle", {
+				action: userCfg.copyOnSelect
+					? t("palette.action.disable")
+					: t("palette.action.enable"),
+			}),
+			keywords: "copy on select clipboard selection",
+			run: () => {
+				const next = !loadPiUiUserConfig().copyOnSelect;
+				updatePiUiUserConfig({ copyOnSelect: next });
+				requestRender();
+				ctx.ui.notify(
+					t("config.updated", {
+						setting: "Copy on Select",
+						value: next ? t("state.on") : t("state.off"),
+					}),
+					"info",
+				);
+			},
+		},
+		{
+			id: "cycle-timestamps",
+			group: t("palette.group.settings"),
+			icon: "🕒",
+			label: t("palette.item.timestampsCycle", { current: userCfg.timestamps }),
+			keywords: "timestamps datetime time off",
+			run: () => {
+				const cur = loadPiUiUserConfig().timestamps;
+				const next =
+					TIMESTAMP_DISPLAY_MODES[
+						(TIMESTAMP_DISPLAY_MODES.indexOf(cur) + 1) % TIMESTAMP_DISPLAY_MODES.length
+					]!;
+				updatePiUiUserConfig({ timestamps: next });
+				invalidateResponseMetricsRows();
+				ctx.ui.notify(t("config.updated", { setting: "Timestamps", value: next }), "info");
+			},
+		},
+		{
+			id: "toggle-outline-timestamps",
+			group: t("palette.group.settings"),
+			icon: "🕒",
+			label: t("palette.item.outlineTimestampsToggle", {
+				action: userCfg.outlineTimestamps
+					? t("palette.action.disable")
+					: t("palette.action.enable"),
+			}),
+			hint: "/outline timestamps",
+			keywords: "outline rail timestamps date time prompts menu",
+			run: () => {
+				const next = !loadPiUiUserConfig().outlineTimestamps;
+				updatePiUiUserConfig({ outlineTimestamps: next });
+				requestRender();
+				ctx.ui.notify(
+					t("config.updated", {
+						setting: "Outline Timestamps",
+						value: next ? t("state.on") : t("state.off"),
+					}),
+					"info",
+				);
+			},
+		},
+		{
+			id: "toggle-mid-turn-enter",
+			group: t("palette.group.settings"),
+			icon: "↵",
+			label: t("palette.item.midTurnEnterCycle", { current: userCfg.midTurnEnter }),
+			keywords: "mid turn enter queue steer composer",
+			run: () => {
+				const next = loadPiUiUserConfig().midTurnEnter === "queue" ? "steer" : "queue";
+				updatePiUiUserConfig({ midTurnEnter: next });
+				requestRender();
+				ctx.ui.notify(t("config.updated", { setting: "Mid-turn Enter", value: next }), "info");
+			},
+		},
+		{
+			id: "toggle-ai-working-status",
+			group: t("palette.group.settings"),
+			icon: "✧",
+			label: t("palette.item.aiWorkingStatusToggle", {
+				action: userCfg.aiWorkingStatus
+					? t("palette.action.disable")
+					: t("palette.action.enable"),
+			}),
+			keywords: "ai working status background llm",
+			run: () => {
+				const next = !loadPiUiUserConfig().aiWorkingStatus;
+				updatePiUiUserConfig({ aiWorkingStatus: next });
+				requestRender();
+				ctx.ui.notify(
+					t("config.updated", {
+						setting: "AI Working Status",
+						value: next ? t("state.on") : t("state.off"),
+					}),
+					"info",
+				);
 			},
 		},
 		{
 			id: "model-select",
-			group: "Модель",
+			group: t("palette.group.model"),
 			icon: "✦",
-			label: `Выбрать модель (${ctx.model?.name || ctx.model?.id || "current"})`,
+			label: t("palette.item.modelSelect", {
+				model: ctx.model?.name || ctx.model?.id || "current",
+			}),
 			hint: "Ctrl+L",
-			keywords: "model select provider модель",
+			keywords: "model select provider",
 			run: () => runAction("app.model.select"),
 		},
 		{
 			id: "thinking-cycle",
-			group: "Модель",
+			group: t("palette.group.model"),
 			icon: "⚡",
-			label: `Уровень рассуждений (сейчас: ${pi.getThinkingLevel()})`,
-			hint: "Shift+Tab",
-			keywords: "thinking reasoning effort рассуждения",
+			label: t("palette.item.thinkingCycle", { level: pi.getThinkingLevel() }),
+			hint: "Alt+T",
+			keywords: "thinking reasoning effort level",
 			run: () => runAction("app.thinking.cycle"),
 		},
 		{
 			id: "thinking-toggle",
-			group: "Вид",
+			group: t("palette.group.view"),
 			icon: "💭",
-			label: "Свернуть / развернуть блоки Thinking",
+			label: t("palette.item.thinkingToggle"),
 			hint: "Ctrl+T",
-			keywords: "thinking toggle hide show мысли",
+			keywords: "thinking toggle hide show",
 			run: () => runAction("app.thinking.toggle"),
 		},
 		{
 			id: "tools-toggle",
-			group: "Вид",
+			group: t("palette.group.view"),
 			icon: "🔧",
-			label: "Свернуть / развернуть вывод инструментов",
+			label: t("palette.item.toolsToggle"),
 			hint: "Ctrl+O",
-			keywords: "tools expand collapse тулзы вывод",
+			keywords: "tools expand collapse output",
 			run: () => runAction("app.tools.expand"),
 		},
 		{
 			id: "theme-one-blue",
-			group: "Тема",
+			group: t("palette.group.theme"),
 			icon: "🎨",
-			label: "Тема: One Blue Pro (под Ghostty One Dark, без фиолетового)",
-			keywords: "theme blue one dark тема синяя",
+			label: t("palette.item.themeOneBluePro"),
+			keywords: "theme blue one dark slate",
 			run: () => {
 				ctx.ui.setTheme("one-blue-pro");
-				ctx.ui.notify("Тема: One Blue Pro", "info");
+				ctx.ui.notify(t("palette.themeApplied", { name: "One Blue Pro" }), "info");
 			},
 		},
 		{
 			id: "theme-nordic-ocean",
-			group: "Тема",
+			group: t("palette.group.theme"),
 			icon: "🌊",
-			label: "Тема: Nordic Ocean (глубокий арктический синий)",
-			keywords: "theme nordic ocean nightfox тема океан синяя",
+			label: t("palette.item.themeNordicOcean"),
+			keywords: "theme nordic ocean arctic blue",
 			run: () => {
 				ctx.ui.setTheme("nordic-ocean");
-				ctx.ui.notify("Тема: Nordic Ocean", "info");
+				ctx.ui.notify(t("palette.themeApplied", { name: "Nordic Ocean" }), "info");
 			},
 		},
 		{
 			id: "theme-midnight-cobalt",
-			group: "Тема",
+			group: t("palette.group.theme"),
 			icon: "🌌",
-			label: "Тема: Midnight Cobalt (контрастный электрик-синий)",
-			keywords: "theme midnight cobalt electric тема кобальт",
+			label: t("palette.item.themeMidnightCobalt"),
+			keywords: "theme midnight cobalt electric blue",
 			run: () => {
 				ctx.ui.setTheme("midnight-cobalt");
-				ctx.ui.notify("Тема: Midnight Cobalt", "info");
+				ctx.ui.notify(t("palette.themeApplied", { name: "Midnight Cobalt" }), "info");
 			},
 		},
 		{
 			id: "theme-one-blue-light",
-			group: "Тема",
+			group: t("palette.group.theme"),
 			icon: "☀",
-			label: "Тема: One Blue Light (светлая синяя)",
-			keywords: "theme light blue светлая тема",
+			label: t("palette.item.themeOneBlueLight"),
+			keywords: "theme light blue bright",
 			run: () => {
 				ctx.ui.setTheme("one-blue-light");
-				ctx.ui.notify("Тема: One Blue Light", "info");
+				ctx.ui.notify(t("palette.themeApplied", { name: "One Blue Light" }), "info");
 			},
 		},
 		{
 			id: "session-new",
-			group: "Сессия",
+			group: t("palette.group.session"),
 			icon: "＋",
-			label: "Новая сессия",
+			label: t("palette.item.sessionNew"),
 			hint: "Ctrl+N",
-			keywords: "new clear session новая сессия очистить",
+			keywords: "new clear session",
 			run: () => runAction("app.session.new"),
 		},
 		{
 			id: "session-resume",
-			group: "Сессия",
+			group: t("palette.group.session"),
 			icon: "↺",
-			label: "Открыть историю сессий",
+			label: t("palette.item.sessionResume"),
 			hint: "Ctrl+R",
-			keywords: "resume history sessions история сессии",
+			keywords: "resume history sessions",
 			run: () => runAction("app.session.resume"),
 		},
 		{
 			id: "session-tree",
-			group: "Сессия",
+			group: t("palette.group.session"),
 			icon: "⎇",
-			label: "Дерево ветвлений диалога",
+			label: t("palette.item.sessionTree"),
 			hint: "Ctrl+Alt+T",
-			keywords: "tree branches дерево ветки",
+			keywords: "tree branches session",
 			run: () => runAction("app.session.tree"),
 		},
 		{
 			id: "session-fork",
-			group: "Сессия",
+			group: t("palette.group.session"),
 			icon: "⑂",
-			label: "Ответвить диалог с выбранной реплики",
+			label: t("palette.item.sessionFork"),
 			hint: "Ctrl+Alt+F",
-			keywords: "fork branch ответвить форк",
+			keywords: "fork branch session",
 			run: () => runAction("app.session.fork"),
 		},
 	];
 
-	const ownedCommands = new Set(["palette", "context", "plan", "mode", "sticky", "outline", "quote", "quotes"]);
+	const ownedCommands = new Set([
+		"palette",
+		"context",
+		"plan",
+		"auto",
+		"always-approve",
+		"mode",
+		"sticky",
+		"outline",
+		"quote",
+		"quotes",
+		"density",
+		"suggestions",
+		"shortcuts-bar",
+		"slots",
+	]);
 	for (const cmd of pi.getCommands()) {
 		if (ownedCommands.has(cmd.name)) continue;
 		items.push({
 			id: `cmd:${cmd.name}`,
-			group: cmd.source === "skill" ? "Скилл" : "Команда",
+			group: cmd.source === "skill" ? t("palette.group.skill") : t("palette.group.command"),
 			icon: cmd.source === "skill" ? "⚡" : "›",
 			label: `/${cmd.name}${cmd.description ? ` — ${cmd.description}` : ""}`,
 			keywords: `${cmd.name} ${cmd.description ?? ""}`,
@@ -324,14 +556,14 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 						theme,
 						focused: Boolean(comp.focused),
 						maxWidth: Math.max(8, innerWidth - 3),
-						placeholder: "Поиск команд, режимов, тем, тулзов, скиллов…",
+						placeholder: t("palette.searchPlaceholder"),
 					});
 					const searchRow = truncateToWidth(` ${searchPrompt}${inputRendered}`, innerWidth, "…");
 
 					const body: string[] = [searchRow, theme.fg("borderMuted", "─".repeat(innerWidth))];
 
 					if (filtered.length === 0) {
-						body.push(theme.fg("muted", "  Ничего не найдено"));
+						body.push(theme.fg("muted", t("palette.empty")));
 					} else {
 						const slice = filtered.slice(scrollOffset, scrollOffset + maxVisible);
 						let renderRowIdx = 3;
@@ -364,9 +596,9 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 							fullRow += pad;
 
 							if (isSelected) {
-								fullRow = bgRgb(palette.selectedRowBg, fullRow);
+								fullRow = blueBgRgb(theme, palette.selectedRowBg, fullRow);
 							} else if (isHovered) {
-								fullRow = bgRgb(palette.hoveredRowBg, fullRow);
+								fullRow = blueBgRgb(theme, palette.hoveredRowBg, fullRow);
 							}
 
 							rowMap.set(renderRowIdx, itemIndex);
@@ -377,11 +609,11 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 
 					const modeMeta = MODE_META[wf.mode];
 					const modeRgb =
-						wf.mode === "plan" ? palette.warning : wf.mode === "safe" ? palette.info : palette.accent;
-					const footer = `${fgRgb(modeRgb, `${modeMeta.icon} ${modeMeta.label}`)}  ${theme.fg("dim", "·  ↑↓ / колесо выбор  ·  Enter / клик запуск  ·  Esc закрыть")}`;
+						wf.mode === "plan" ? palette.warning : wf.mode === "auto" ? palette.info : palette.accent;
+					const footer = `${fgRgb(modeRgb, `${modeMeta.icon} ${modeMeta.label}`)}  ${theme.fg("dim", t("palette.footerHint"))}`;
 
 					return card.render(width, theme, {
-						title: fgRgb(palette.accentBright, theme.bold("⌘ Command Palette")),
+						title: fgRgb(palette.accentBright, theme.bold(t("palette.title"))),
 						headerMeta: theme.fg("muted", `${filtered.length}`),
 						onClose: () => done(null),
 						bodyLines: body,
@@ -390,6 +622,14 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 					});
 				},
 				handleInput(data: string): void {
+					const pasted = searchInput.handlePaste(data);
+					if (pasted) {
+						if (pasted.changed) {
+							selectedIdx = 0;
+							scrollOffset = 0;
+						}
+						return;
+					}
 					const filtered = getFiltered();
 					if (matchesKey(data, "escape") || matchesKey(data, "ctrl+k")) {
 						done(null);
@@ -463,39 +703,19 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 	}
 }
 
-function installCtrlKDiagnosticFilter(): void {
-	const proto = (ExtensionRunner as unknown as { prototype?: object } | undefined)?.prototype;
-	if (!proto) return;
-
-	/* Убираем ctrl+k из карты шорткатов ExtensionRunner, чтобы хост не выводил предупреждение о конфликте с deleteToLineEnd */
-	hookMethod(proto, "getShortcuts", "commandPalette.filterCtrlKConflict", (self, args, original) => {
-		const extensions = (self as { extensions?: Array<{ shortcuts?: Map<string, { description?: string }> }> })
-			.extensions;
-		if (Array.isArray(extensions)) {
-			for (const ext of extensions) {
-				const ctrlK = ext.shortcuts?.get("ctrl+k");
-				if (ctrlK?.description?.includes("Command Palette")) {
-					ext.shortcuts?.delete("ctrl+k");
-				}
-			}
-		}
-		return original.apply(self, args);
-	});
-}
-
 export function registerCommandPaletteFeature(pi: ExtensionAPI): void {
-	installCtrlKDiagnosticFilter();
 	let unsubscribeInput: (() => void) | undefined;
+	const dispatchPaletteShortcut = () => dispatchLocalShortcut(COMMAND_PALETTE_CHORD);
 
-	pi.registerShortcut("ctrl+k", {
-		description: "Открыть Command Palette (@conarti/pi-ui)",
+	pi.registerShortcut(COMMAND_PALETTE_CHORD, {
+		description: t("palette.shortcut"),
 		handler: async (ctx) => {
 			await showCommandPalette(pi, ctx);
 		},
 	});
 
 	pi.registerCommand("palette", {
-		description: "Открыть центральное меню команд (Ctrl+K)",
+		description: t("palette.command"),
 		handler: async (_args, ctx) => {
 			await showCommandPalette(pi, ctx);
 		},
@@ -512,7 +732,7 @@ export function registerCommandPaletteFeature(pi: ExtensionAPI): void {
 			Boolean(seq) &&
 			!isKeyRelease(seq) &&
 			!isKeyRepeat(seq) &&
-			(matchesKey(seq, "ctrl+k") || matchesLayoutChord(seq, "ctrl+k"));
+			(matchesKey(seq, COMMAND_PALETTE_CHORD) || matchesLayoutChord(seq, COMMAND_PALETTE_CHORD));
 
 		const resolveCtrlKDisposition = (): "passthrough" | "consume" | "open" => {
 			const hostTui = getActiveHostRuntime()?.tui;
@@ -544,7 +764,7 @@ export function registerCommandPaletteFeature(pi: ExtensionAPI): void {
 				const disposition = resolveCtrlKDisposition();
 				if (disposition === "passthrough") return undefined;
 				if (disposition === "open") {
-					void showCommandPalette(pi, ctx);
+					void dispatchPaletteShortcut();
 				}
 				return { consume: true };
 			}
@@ -568,14 +788,14 @@ export function registerCommandPaletteFeature(pi: ExtensionAPI): void {
 			}
 			if (!forwarded) {
 				if (disposition === "open") {
-					void showCommandPalette(pi, ctx);
+					void dispatchPaletteShortcut();
 				}
 				return { consume: true };
 			}
 			if (disposition === "open") {
 				queueMicrotask(() => {
 					if (resolveCtrlKDisposition() === "open") {
-						void showCommandPalette(pi, ctx);
+						void dispatchPaletteShortcut();
 					}
 				});
 			}

@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import {
 	convertToPng,
 	InteractiveMode,
@@ -15,17 +15,21 @@ import {
 	type TUI,
 } from "@earendil-works/pi-tui";
 import {
+	isCoveredByRenderedOverlay,
 	ViewportChromeCompositor,
 	type FullscreenShellContext,
 	type MountedViewportSlots,
 } from "./fullscreen-layout.ts";
+import { buildEditorOpenCommand } from "./link-targets.ts";
 import { hasBlockingModalOverlay } from "./modal-card.ts";
+import { loadPiUiUserConfig, withPiUiConfigRenderPass } from "./pi-ui-config.ts";
 import {
 	beginHoverMovePass,
 	finishHoverMovePass,
 	hookMethod,
 	registerRuntimeClipboardSink,
 } from "./runtime-hooks.ts";
+import { stripSelectionCopyMetadata } from "./selection-copy.ts";
 import { setRequestRender } from "./ui-action-bridge.ts";
 
 export type { FullscreenShellContext, MountedViewportSlots };
@@ -44,11 +48,25 @@ export interface HostClipboardProvider {
 	writeText?(text: string): void | Promise<void>;
 }
 
+export interface ExternalOpenResult {
+	readonly ok: boolean;
+	readonly error?: string;
+}
+
+export interface HostExternalOpener {
+	openUrl(url: string): Promise<ExternalOpenResult>;
+	openPath(
+		filePath: string,
+		options?: { readonly line?: number; readonly column?: number },
+	): Promise<ExternalOpenResult>;
+}
+
 interface AcquiredHostTui {
 	tui: TUI;
 	keybindings?: KeybindingsManager;
 	theme?: () => Theme;
 	clipboard?: HostClipboardProvider;
+	externalOpener?: HostExternalOpener;
 }
 
 export interface HostRuntimeHandle {
@@ -56,6 +74,7 @@ export interface HostRuntimeHandle {
 	readonly tui: TUI;
 	readonly keybindings: KeybindingsManager | undefined;
 	readonly clipboard: HostClipboardProvider;
+	readonly externalOpener: HostExternalOpener;
 	readonly isFullscreen: boolean;
 	readonly scroll: ScrollView | undefined;
 	readonly chatContainer: Container | undefined;
@@ -87,6 +106,7 @@ interface InternalHostRuntimeHandle extends HostRuntimeHandle {
 interface RuntimeSlot {
 	active?: InternalHostRuntimeHandle;
 	clipboard?: HostClipboardProvider;
+	externalOpener?: HostExternalOpener;
 }
 
 function getTransientHoverDismissers(): Map<string, () => void> {
@@ -153,6 +173,10 @@ function getCompositorMap(): WeakMap<object, ViewportChromeCompositor> {
 	return g[COMPOSITOR_MAP_KEY]!;
 }
 
+export function getFocusedHostComponent(tui: TUI | undefined): Component | null | undefined {
+	return (tui as (TUI & { getFocusedComponent?: () => Component | null }) | undefined)?.getFocusedComponent?.();
+}
+
 /**
  * Разворачивает Proxy-ссылку `InteractiveMode` (`this.ui`) до текущего рендерера (`this.renderer`),
  * чтобы `WeakMap` и проверки идентичности совпадали с `self` внутри прототипных хуков `TuiAltScreen`.
@@ -178,6 +202,14 @@ export function setHostClipboardProvider(clipboard: HostClipboardProvider | unde
 
 export function getHostClipboardProvider(): HostClipboardProvider | undefined {
 	return getRuntimeSlot().clipboard;
+}
+
+export function setHostExternalOpener(opener: HostExternalOpener | undefined): void {
+	getRuntimeSlot().externalOpener = opener;
+}
+
+export function getHostExternalOpener(): HostExternalOpener | undefined {
+	return getRuntimeSlot().externalOpener;
 }
 
 export function getActiveHostRuntime(): HostRuntimeHandle | undefined {
@@ -270,8 +302,27 @@ function installViewportChromeHooks(): void {
 		);
 	}
 
-	const altProto = (TuiAltScreen as unknown as { prototype?: object } | undefined)?.prototype;
+	const altProto = (TuiAltScreen as unknown as { prototype?: Record<string, unknown> } | undefined)?.prototype;
 	if (!altProto) return;
+
+	const tuiProto = Object.getPrototypeOf(altProto) as Record<string, unknown> | null;
+	if (tuiProto && typeof tuiProto.doRender === "function") {
+		hookMethod(
+			tuiProto,
+			"doRender",
+			"viewport.configRenderPass",
+			(self, args, original) => withPiUiConfigRenderPass(() => original.apply(self, args)),
+		);
+	}
+
+	if (Object.hasOwn(altProto, "doRender") && typeof altProto.doRender === "function") {
+		hookMethod(
+			altProto,
+			"doRender",
+			"viewport.altConfigRenderPass",
+			(self, args, original) => withPiUiConfigRenderPass(() => original.apply(self, args)),
+		);
+	}
 
 	hookMethod(
 		altProto,
@@ -308,12 +359,15 @@ function installViewportChromeHooks(): void {
 		"compositeScrollToEndIndicator",
 		"viewport.passthroughEndIndicator",
 		(self, args, original) => {
-			const base = original.apply(self, args) as string[];
 			const compositor = getCompositorMap().get(self);
-			if (!compositor) return base;
+			if (!compositor) return original.apply(self, args) as string[];
+			/* Подавляем нативный баннер «Jump to latest message» хоста и рисуем компактный кликабельный ▼ */
+			self.scrollToEndIndicatorRect = undefined;
+			const screen = args[0] as string[];
 			const layout = args[1] as { root?: any } | undefined;
 			const width = Number(args[2] ?? self.terminal?.columns ?? 80);
-			return compositor.compositeFrame(base, layout, width);
+			/* Метки остаются в строках документа для выделения, но не отправляются в терминал. */
+			return compositor.compositeFrame(screen, layout, width).map(stripSelectionCopyMetadata);
 		},
 		["pi.grok-ui.hook.chat.timelineComposite"],
 	);
@@ -358,14 +412,94 @@ function installViewportChromeHooks(): void {
 		"dispatchMouseToLayout",
 		"viewport.blockChromeWheelPassthrough",
 		(self, args, original) => {
-			const event = args[0] as { type?: string; screenX?: number; screenY?: number } | undefined;
+			const event = args[0] as
+				| {
+						type?: string;
+						screenX?: number;
+						screenY?: number;
+						wheelDelta?: number;
+						button?: string;
+						shift?: boolean;
+						alt?: boolean;
+						ctrl?: boolean;
+				  }
+				| undefined;
 			if (event?.type === "wheel" && typeof event.screenX === "number" && typeof event.screenY === "number") {
+				const topmostModal = (
+					self as { getTopmostVisibleOverlay?: () => { component?: Component } | undefined }
+				).getTopmostVisibleOverlay?.();
+				if (topmostModal) {
+					const modalLayouts = (
+						self as {
+							renderedOverlayLayouts?: ReadonlyArray<{
+								entry: { component?: Component };
+								col: number;
+								row: number;
+								width: number;
+								height: number;
+							}>;
+						}
+					).renderedOverlayLayouts;
+					const layout = modalLayouts?.find((item) => item.entry === topmostModal);
+					const modalComp = topmostModal.component as
+						| { handleMouse?: (ev: unknown) => { handled?: boolean; render?: boolean } | undefined }
+						| undefined;
+					if (layout && typeof modalComp?.handleMouse === "function") {
+						const res = modalComp.handleMouse({
+							...event,
+							x: event.screenX - layout.col,
+							y: event.screenY - layout.row,
+							width: layout.width,
+							height: layout.height,
+						});
+						if (res?.render) {
+							self.requestRender?.();
+						}
+					}
+					return undefined;
+				}
+
+				if (!isCoveredByRenderedOverlay(self, event.screenX, event.screenY)) {
+					dismissTransientHoverPopups();
+				}
+
 				const compositor = getCompositorMap().get(self);
 				if (compositor?.isChromeHit(self, event.screenX, event.screenY)) {
 					return undefined;
 				}
 			}
 			return original.apply(self, args);
+		},
+	);
+
+	hookMethod(
+		altProto,
+		"routeWheel",
+		"viewport.wheelOverscrollContain",
+		(self, args, original) => {
+			const topmostModal = (
+				self as { getTopmostVisibleOverlay?: () => unknown }
+			).getTopmostVisibleOverlay?.();
+			if (topmostModal) {
+				/* overscroll = "contain": колесо при открытой модальной карточке не прокручивает ScrollView под ней */
+				return undefined;
+			}
+			dismissTransientHoverPopups();
+			return original.apply(self, args);
+		},
+	);
+
+	hookMethod(
+		altProto,
+		"createMouseEvent",
+		"viewport.preserveSuperMouseModifier",
+		(self, args, original) => {
+			const ev = original.apply(self, args) as Record<string, unknown> | undefined;
+			const button = Number(args[1] ?? 0);
+			if (ev && typeof ev === "object" && (button & 128) !== 0) {
+				ev.super = true;
+			}
+			return ev;
 		},
 	);
 
@@ -531,6 +665,98 @@ export function resolveActiveClipboardProvider(): HostClipboardProvider {
 	return getActiveHostRuntime()?.clipboard ?? getHostClipboardProvider() ?? defaultHostClipboardProvider;
 }
 
+const ALLOWED_EXTERNAL_URL_SCHEMES = new Set(["http:", "https:", "mailto:"]);
+
+function execOpenTarget(target: string): Promise<ExternalOpenResult> {
+	const command =
+		process.platform === "darwin"
+			? "open"
+			: process.platform === "win32"
+				? "cmd.exe"
+				: "xdg-open";
+	const args =
+		process.platform === "win32" ? ["/c", "start", "", target] : [target];
+	return new Promise((resolve) => {
+		execFile(command, args, { timeout: 5000 }, (err) => {
+			if (err) {
+				resolve({ ok: false, error: err.message });
+				return;
+			}
+			resolve({ ok: true });
+		});
+	});
+}
+
+let externalEditorRunning = false;
+
+async function runTerminalEditor(command: string, args: readonly string[]): Promise<ExternalOpenResult> {
+	if (externalEditorRunning) return { ok: false, error: "An external editor is already running" };
+	const runtime = getActiveHostRuntime();
+	const tui = runtime?.tui;
+	externalEditorRunning = true;
+	/* Интерактивный редактор читает тот же терминал: хост должен снять raw mode и обработчики ввода. */
+	try {
+		tui?.stop();
+		return await new Promise<ExternalOpenResult>((resolve) => {
+			const child = spawn(command, args, { stdio: "inherit" });
+			child.once("error", (error) => resolve({ ok: false, error: error.message }));
+			child.once("close", (code, signal) => resolve(code === 0
+				? { ok: true }
+				: { ok: false, error: `Editor exited with ${signal ?? code}` }));
+		});
+	} catch (error) {
+		return { ok: false, error: error instanceof Error ? error.message : String(error) };
+	} finally {
+		externalEditorRunning = false;
+		if (tui && getActiveHostRuntime() === runtime) {
+			tui.start();
+			if (runtime?.isFullscreen) enablePointerMotionTracking(tui, true);
+			tui.requestRender(true);
+		}
+	}
+}
+
+export const defaultHostExternalOpener: HostExternalOpener = {
+	async openUrl(rawUrl: string): Promise<ExternalOpenResult> {
+		const trimmed = rawUrl.trim();
+		if (!trimmed) return { ok: false, error: "Empty URL" };
+		try {
+			const parsed = new URL(trimmed);
+			if (!ALLOWED_EXTERNAL_URL_SCHEMES.has(parsed.protocol.toLowerCase())) {
+				return { ok: false, error: `Unsupported URL scheme: ${parsed.protocol}` };
+			}
+		} catch {
+			return { ok: false, error: "Invalid URL" };
+		}
+		return await execOpenTarget(trimmed);
+	},
+
+	async openPath(
+		filePath: string,
+		options?: { readonly line?: number; readonly column?: number },
+	): Promise<ExternalOpenResult> {
+		const trimmed = filePath.trim();
+		if (!trimmed) return { ok: false, error: "Empty file path" };
+		const editorCmd = buildEditorOpenCommand(
+			process.env.VISUAL || process.env.EDITOR,
+			trimmed,
+			options,
+		);
+		if (editorCmd) {
+			return await runTerminalEditor(editorCmd.command, editorCmd.args);
+		}
+		return await execOpenTarget(trimmed);
+	},
+};
+
+export function resolveActiveExternalOpener(): HostExternalOpener {
+	return (
+		getActiveHostRuntime()?.externalOpener ??
+		getHostExternalOpener() ??
+		defaultHostExternalOpener
+	);
+}
+
 export function installViewportScrollDismissHooks(
 	namespace: string,
 	isActive: () => boolean,
@@ -548,6 +774,71 @@ export function installViewportScrollDismissHooks(
 		});
 	}
 
+	installPrimaryScrollDismissHooks(namespace, isActive, onDismiss);
+}
+
+/** Подключает общий жизненный цикл Hover Popup, открытого кликом или наведением по строке транскрипта. */
+export function installClickedHoverPopupDismissHooks(
+	namespace: string,
+	getPopup: () => Component | undefined,
+	onDismiss: () => void,
+): (trigger?: { readonly x: number; readonly y: number }) => void {
+	installPrimaryScrollDismissHooks(namespace, () => Boolean(getPopup()), onDismiss);
+	let opened = 0;
+	let triggerPoint: { x: number; y: number } | undefined;
+	let enteredPopup = false;
+	hookMethod(TuiAltScreen.prototype, "handleMouseEvent", `${namespace}.pointerDismiss`, (self, args, original) => {
+		const popup = getPopup();
+		const raw = args[0] as { button: number; x: number; y: number; release: boolean };
+		const move = !raw.release && (raw.button & 35) === 35;
+		const release = raw.release && (raw.button & 32) === 0;
+		if (!popup || (!move && !release) || !isSameHostTui(self, getActiveHostRuntime()?.tui)) {
+			return original.apply(self, args);
+		}
+		const layouts = (self as {
+			renderedOverlayLayouts?: readonly { entry: { component?: Component }; row: number; col: number; width: number; height: number }[];
+		}).renderedOverlayLayouts;
+		const rect = layouts?.find((layout) => layout.entry.component === popup);
+		const inside = Boolean(
+			rect &&
+				raw.x >= rect.col &&
+				raw.x < rect.col + rect.width &&
+				raw.y >= rect.row &&
+				raw.y < rect.row + rect.height,
+		);
+		if (inside) {
+			enteredPopup = true;
+		}
+		const before = opened;
+		const result = original.apply(self, args);
+		if (!inside && opened === before && getPopup() === popup) {
+			const inCorridorToPopup = Boolean(
+				move &&
+					!enteredPopup &&
+					rect &&
+					triggerPoint &&
+					raw.x >= Math.min(triggerPoint.x - 4, rect.col) - 1 &&
+					raw.x <= Math.max(triggerPoint.x + 12, rect.col + rect.width) &&
+					raw.y >= Math.min(triggerPoint.y, rect.row) &&
+					raw.y <= Math.max(triggerPoint.y, rect.row + rect.height - 1),
+			);
+			if (!inCorridorToPopup) {
+				onDismiss();
+				self.requestRender?.();
+			}
+		}
+		return result;
+	});
+	return (trigger) => {
+		opened += 1;
+		if (trigger) {
+			triggerPoint = { x: trigger.x, y: trigger.y };
+		}
+		enteredPopup = false;
+	};
+}
+
+export function installPrimaryScrollDismissHooks(namespace: string, isActive: () => boolean, onDismiss: () => void): void {
 	const scrollProto = (ScrollView as unknown as { prototype?: object } | undefined)?.prototype;
 	if (scrollProto) {
 		for (const methodName of ["scrollTo", "scrollBy", "scrollToStart", "scrollToEnd"] as const) {
@@ -702,7 +993,7 @@ async function acquireHostTuiFromExtensionUi(
  */
 export async function acquireHostRuntime(
 	ctx: ExtensionContext,
-	options?: { clipboard?: HostClipboardProvider },
+	options?: { clipboard?: HostClipboardProvider; externalOpener?: HostExternalOpener },
 ): Promise<HostRuntimeHandle | undefined> {
 	const slot = getRuntimeSlot();
 	if (slot.active && slot.active.ctx === ctx) {
@@ -717,6 +1008,7 @@ export async function acquireHostRuntime(
 	const { tui, keybindings } = acquired;
 	const theme = acquired.theme ?? (() => ctx.ui.theme);
 	const explicitClipboard = options?.clipboard ?? acquired.clipboard;
+	const explicitExternalOpener = options?.externalOpener ?? acquired.externalOpener;
 
 	const resolveFullscreenLayout = (): {
 		renderer: TUI;
@@ -776,6 +1068,10 @@ export async function acquireHostRuntime(
 			return;
 		}
 
+		(renderer as { setCopyOnSelect?: (enabled: boolean) => void }).setCopyOnSelect?.(
+			loadPiUiUserConfig().copyOnSelect,
+		);
+
 		if (!registeredSlotBuilder || !keybindings) {
 			healLegacyTranscriptPatches(scroll);
 			enablePointerMotionTracking(renderer);
@@ -810,7 +1106,7 @@ export async function acquireHostRuntime(
 		const slots = registeredSlotBuilder(shellCtx);
 		currentViewportSlots = slots;
 
-		const compositor = new ViewportChromeCompositor(tui, scroll, slots);
+		const compositor = new ViewportChromeCompositor(tui, scroll, slots, layoutHost.layoutRoot, theme);
 		activeCompositor = compositor;
 		mountedRenderer = renderer;
 		getCompositorMap().set(renderer, compositor);
@@ -825,6 +1121,9 @@ export async function acquireHostRuntime(
 		keybindings,
 		get clipboard() {
 			return explicitClipboard ?? slot.clipboard ?? defaultHostClipboardProvider;
+		},
+		get externalOpener() {
+			return explicitExternalOpener ?? slot.externalOpener ?? defaultHostExternalOpener;
 		},
 		get isFullscreen() {
 			syncRendererState();

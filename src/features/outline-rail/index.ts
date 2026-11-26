@@ -1,13 +1,18 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { visibleWidth, type OverlayHandle, type OverlayOptions } from "@earendil-works/pi-tui";
+import { isKeyRelease, matchesKey, visibleWidth, type OverlayHandle, type OverlayOptions } from "@earendil-works/pi-tui";
 import type { FullscreenShellContext } from "../../shared/fullscreen-layout.ts";
 import {
 	getActiveHostRuntime,
+	installPrimaryScrollDismissHooks,
 	registerTransientHoverDismisser,
 } from "../../shared/host-runtime.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
+import { t } from "../../shared/i18n.ts";
+import { loadPiUiUserConfig, updatePiUiUserConfig } from "../../shared/pi-ui-config.ts";
+import { extractSkillInvocations } from "../../shared/skill-tags.ts";
+import { formatTranscriptTimestamp } from "../../shared/transcript-timestamp.ts";
 import type { IndexedTurn, TranscriptTurnIndex } from "../../shared/turn-index.ts";
-import { reconstructTurnPromptText } from "../prompt-chips/registry.ts";
+import { getActivePromptChipRegistry, reconstructTurnPromptText } from "../prompt-chips/registry.ts";
 import {
 	OutlinePreviewPopup,
 	OutlineRailComponent,
@@ -78,34 +83,43 @@ export function createOutlineRailSlot(
 		const termCols = shell.tui.terminal?.columns ?? 80;
 		const termRows = shell.tui.terminal?.rows ?? 30;
 		const viewportRows = shell.scroll.viewportHeight || termRows;
-		const maxCardW = Math.max(10, termCols - RAIL_WIDTH - 5);
+		const maxCardW = Math.max(10, termCols - RAIL_WIDTH - 4);
 		const maxText = Math.max(
 			6,
 			Math.min(40, maxCardW - 4, Math.floor((termCols - RAIL_WIDTH - 2) * 0.55)),
 		);
 
-		const entries = ctx.sessionManager?.getEntries?.() ?? ctx.sessionManager?.getBranch?.();
+		const registry = getActivePromptChipRegistry();
+		const entries = registry.hasHydratedEntries()
+			? undefined
+			: (ctx.sessionManager?.getEntries?.() ?? ctx.sessionManager?.getBranch?.());
 		const reconstructed = reconstructTurnPromptText(turn.prompt, {
 			timestamp: turn.timestamp,
 			messageId: turn.id,
 			entries,
 		});
-		const previewSource = reconstructed || turn.title || turn.prompt;
+		const rawPreview = reconstructed || turn.prompt;
+		const previewSource = extractSkillInvocations(rawPreview, { cwd: ctx.cwd }).previewText;
 		const bodyLines = wrapPreviewLines(previewSource, maxText);
-		const timeText = turn.formattedTime ?? "";
+		const cfg = loadPiUiUserConfig();
+		const formattedTime =
+			cfg.outlineTimestamps && cfg.timestamps !== "off"
+				? formatTranscriptTimestamp(turn.timestamp, cfg.timestamps)
+				: "";
+		const minTimeW = formattedTime ? visibleWidth(formattedTime) + 4 : 0;
 		const contentW = Math.max(
 			Math.min(10, maxText),
-			visibleWidth(timeText),
+			minTimeW,
 			...bodyLines.map(visibleWidth),
 		);
 		const cardW = Math.min(maxCardW, contentW + 4);
-		const cardH = (bodyLines.length || 1) + 2 + (timeText ? 1 : 0);
+		const cardH = (bodyLines.length || 1) + 2;
 
 		const maxRow = Math.max(0, Math.min(termRows - cardH, viewportRows - cardH));
-		popup.time = timeText;
+		popup.time = formattedTime;
 		popup.preview = previewSource;
 		popupOptions.width = cardW;
-		popupOptions.col = Math.max(1, termCols - RAIL_WIDTH - 1 - cardW - 1);
+		popupOptions.col = Math.max(1, termCols - RAIL_WIDTH - cardW - 1);
 		popupOptions.row = Math.max(0, Math.min(screenY - Math.floor(cardH / 2), maxRow));
 		popupVisible = true;
 		if (!popupHandle) {
@@ -128,12 +142,21 @@ export function createOutlineRailSlot(
 		},
 	);
 
-	const unregisterHoverDismisser = registerTransientHoverDismisser("outlineRail.preview", () =>
-		hidePopup(true),
-	);
+	const dismiss = () => rail.clearHover(true);
+	const unregisterHoverDismisser = registerTransientHoverDismisser("outlineRail.preview", dismiss);
+	installPrimaryScrollDismissHooks("outlineRail.preview", () => popupVisible, dismiss);
+	const unsubscribeEscape = ctx.ui.onTerminalInput((data) => {
+		if (!popupVisible) return;
+		const blocked = hasBlockingModalOverlay(shell.tui);
+		if (!blocked && (isKeyRelease(data) || !matchesKey(data, "escape"))) return;
+		dismiss();
+		shell.requestRender();
+		return blocked ? undefined : { consume: true };
+	});
 
 	return Object.assign(rail, {
 		dispose() {
+			unsubscribeEscape();
 			unregisterHoverDismisser();
 			hidePopup();
 		},
@@ -143,7 +166,7 @@ export function createOutlineRailSlot(
 export function registerOutlineCommands(pi: ExtensionAPI, requestRender: () => void): void {
 	const toggle = (ctx: ExtensionContext) => {
 		if (ctx.mode !== "tui") {
-			ctx.ui.notify("Навигация по репликам доступна в fullscreen TUI", "warning");
+			ctx.ui.notify(t("outline.fullscreenOnly"), "warning");
 			return;
 		}
 		const settings = getOutlineSettings();
@@ -151,18 +174,41 @@ export function registerOutlineCommands(pi: ExtensionAPI, requestRender: () => v
 		getActiveHostRuntime()?.scroll?.invalidate?.();
 		requestRender();
 		ctx.ui.notify(
-			`Панель навигации справа: ${settings.enabled ? "показана" : "скрыта"}`,
+			t("outline.toggled", { state: settings.enabled ? t("state.shown") : t("state.hidden") }),
 			"info",
 		);
 	};
 
 	pi.registerShortcut("ctrl+alt+o", {
-		description: "Показать / скрыть правую панель навигации по репликам",
+		description: t("outline.shortcut"),
 		handler: async (ctx) => toggle(ctx),
 	});
 
 	pi.registerCommand("outline", {
-		description: "Показать / скрыть правую панель навигации по репликам (Ctrl+Alt+O)",
-		handler: async (_args, ctx) => toggle(ctx),
+		description: t("outline.command"),
+		handler: async (args, ctx) => {
+			const parts = args.trim().toLowerCase().split(/\s+/u).filter(Boolean);
+			if (parts[0] === "timestamps" || parts[0] === "time") {
+				const sub = parts[1];
+				const cur = loadPiUiUserConfig().outlineTimestamps;
+				const next =
+					sub === "on" || sub === "true"
+						? true
+						: sub === "off" || sub === "false"
+							? false
+							: !cur;
+				updatePiUiUserConfig({ outlineTimestamps: next });
+				requestRender();
+				ctx.ui.notify(
+					t("config.updated", {
+						setting: "Outline Timestamps",
+						value: next ? t("state.on") : t("state.off"),
+					}),
+					"info",
+				);
+				return;
+			}
+			toggle(ctx);
+		},
 	});
 }

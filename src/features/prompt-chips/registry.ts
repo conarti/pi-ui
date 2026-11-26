@@ -1,10 +1,20 @@
 import { basename } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
+import { extractSkillInvocations } from "../../shared/skill-tags.ts";
+
+function stripLeadingSkillSlashPrefix(text: string): string {
+	return text.replace(/^(?:\s*\/skill:[^\s]+)+\s*/u, "");
+}
+
+export function isImageContent(part: unknown): part is ImageContent {
+	if (!part || typeof part !== "object") return false;
+	const candidate = part as Partial<ImageContent>;
+	return candidate.type === "image" && typeof candidate.data === "string" && typeof candidate.mimeType === "string";
+}
 
 export type PromptChipKind = "image" | "paste" | "quote";
 export const PROMPT_CHIPS_CUSTOM_ENTRY_TYPE = "conarti-prompt-chips";
-const MAX_PERSISTED_PREVIEW_CHARS = 4000;
 const MAX_STAGED_DRAFTS = 12;
 
 export interface ImagePromptChipData {
@@ -189,6 +199,7 @@ export interface SyncDraftLinesResult {
 }
 
 export interface SerializedImageChip {
+	readonly imageIndex?: number;
 	readonly id: string;
 	readonly kind: "image";
 	readonly number: number;
@@ -249,7 +260,7 @@ interface StagedDraftSnapshot {
 	readonly bindings: ReadonlyMap<string, string>;
 }
 
-const LEGACY_IMAGE_MARKER_RE = /\[Image #(\d+):\s*([^\]]+)\]/g;
+export const IMAGE_MARKER_RE = /\[Image #(\d+)(?::[^\S\n]*([^\]\n]*))?\]/g;
 const IMAGE_PLACEHOLDER_TOKEN_RE = /\[изображение\]/gu;
 /* AgentSession._normalizePromptImages дописывает в конец текста метки вида [Image: original WxH, displayed at ...] или [Image skipped: ...] */
 const TRAILING_IMAGE_PLACEHOLDER_RE =
@@ -278,10 +289,11 @@ function inferImageMimeTypeFromPath(filePath: string): string {
 	return "image/png";
 }
 
+export function serializePromptChip(entry: ImagePromptChipData, number: number): SerializedImageChip;
+export function serializePromptChip(entry: PromptChipEntry, number: number): SerializedPromptChip;
 export function serializePromptChip(
 	entry: PromptChipEntry,
 	number: number,
-	maxPreviewChars?: number,
 ): SerializedPromptChip {
 	const token = formatPromptChipToken(entry, number);
 	switch (entry.kind) {
@@ -307,8 +319,7 @@ export function serializePromptChip(
 				lineCount: entry.lineCount,
 				charCount: entry.charCount,
 				metric: entry.metric,
-				previewText:
-					maxPreviewChars !== undefined ? entry.text.slice(0, maxPreviewChars) : entry.text,
+				previewText: entry.text,
 			};
 		case "quote":
 			return {
@@ -319,8 +330,7 @@ export function serializePromptChip(
 				lineCount: entry.lineCount,
 				charCount: entry.charCount,
 				...(entry.sourceLabel ? { sourceLabel: entry.sourceLabel } : {}),
-				previewText:
-					maxPreviewChars !== undefined ? entry.text.slice(0, maxPreviewChars) : entry.text,
+				previewText: entry.text,
 			};
 	}
 }
@@ -332,9 +342,34 @@ function formatBlockquote(text: string): string {
 		.join("\n");
 }
 
+/* Старые записи хранят обрезанное превью, но также содержат развёрнутый текст всего запроса.
+   Восстанавливаем чип только при однозначном совпадении; уже отброшенные при trim() символы не угадываем. */
+function restoreLegacyPreview(chip: SerializedPromptChip, expandedText: string): SerializedPromptChip {
+	if (chip.kind === "image" || !chip.previewText || chip.previewText.length >= chip.charCount) return chip;
+	const prefix = chip.kind === "quote" ? formatBlockquote(chip.previewText) : chip.previewText;
+	let restored: string | undefined;
+	for (let start = expandedText.indexOf(prefix); start >= 0; start = expandedText.indexOf(prefix, start + 1)) {
+		if (expandedText.length - start < chip.charCount) break;
+		let text: string;
+		if (chip.kind === "paste") {
+			text = expandedText.slice(start, start + chip.charCount);
+		} else {
+			if (start > 0 && expandedText[start - 1] !== "\n") continue;
+			const lines = expandedText.slice(start).split("\n", chip.lineCount);
+			if (lines.length !== chip.lineCount || !lines.every((line) => line === ">" || line.startsWith("> "))) continue;
+			text = lines.map((line) => line.slice(2)).join("\n");
+		}
+		if (text.length !== chip.charCount || text.split("\n").length !== chip.lineCount || !text.startsWith(chip.previewText)) continue;
+		if (restored !== undefined && restored !== text) return chip;
+		restored = text;
+	}
+	return restored === undefined ? chip : { ...chip, previewText: restored };
+}
+
 export class PromptChipRegistry {
 	private nextChipSeq = 1;
 	private nextDraftNumber = 1;
+	private mutationVersion = 1;
 	private readonly sessionVault = new Map<string, PromptChipEntry>();
 	private readonly activeBindings = new Map<string, string>();
 	private readonly historyByBindingKey = new Map<string, string>();
@@ -344,6 +379,31 @@ export class PromptChipRegistry {
 	private readonly submittedByMessageId = new Map<string, PersistedPromptChipsPayload>();
 	private readonly submittedByTimestamp = new Map<string, PersistedPromptChipsPayload>();
 	private readonly submittedByExpanded = new Map<string, PersistedPromptChipsPayload>();
+	private readonly submittedImages = new WeakMap<SerializedImageChip, ImageContent>();
+
+	private associateSubmittedImages(payload: PersistedPromptChipsPayload, images: readonly ImageContent[]): void {
+		const legacyOrder = [...new Set(payload.chips.filter((chip) => chip.kind === "image").map((chip) => chip.id))];
+		/* Старые записи не содержат индексов: изображения чипов добавлялись после остальных вложений. */
+		const legacyOffset = images.length - legacyOrder.length;
+		for (const chip of payload.chips) {
+			if (chip.kind !== "image") continue;
+			const index = chip.imageIndex ?? (legacyOffset >= 0 ? legacyOffset + legacyOrder.indexOf(chip.id) : -1);
+			const image = images[index];
+			if (image) this.submittedImages.set(chip, image);
+		}
+	}
+
+	get version(): number {
+		return this.mutationVersion;
+	}
+
+	hasHydratedEntries(): boolean {
+		return this.lastHydratedLength >= 0;
+	}
+
+	getSubmittedImage(chip: SerializedImageChip): ImageContent | undefined {
+		return this.submittedImages.get(chip);
+	}
 
 	private allocateChipId(): string {
 		const id = `chip-${this.nextChipSeq}`;
@@ -365,6 +425,7 @@ export class PromptChipRegistry {
 		this.activeBindings.set(key, entry.id);
 		this.historyByBindingKey.set(key, entry.id);
 		this.historyByToken.set(token, entry.id);
+		this.mutationVersion += 1;
 		return { entry, number, token };
 	}
 
@@ -440,6 +501,7 @@ export class PromptChipRegistry {
 		this.activeBindings.set(key, entry.id);
 		this.historyByBindingKey.set(key, entry.id);
 		this.historyByToken.set(token, entry.id);
+		this.mutationVersion += 1;
 		return { entry, number, token };
 	}
 
@@ -512,6 +574,7 @@ export class PromptChipRegistry {
 			widthPx: patch.widthPx ?? existing.widthPx,
 			heightPx: patch.heightPx ?? existing.heightPx,
 		});
+		this.mutationVersion += 1;
 	}
 
 	captureUndoSnapshot(): PromptChipUndoSnapshot {
@@ -534,6 +597,7 @@ export class PromptChipRegistry {
 			}
 		}
 		this.nextDraftNumber = Math.max(1, snapshot.nextDraftNumber);
+		this.mutationVersion += 1;
 	}
 
 	syncDraftLines(
@@ -698,7 +762,7 @@ export class PromptChipRegistry {
 		};
 
 		const attachedImages: ImageContent[] = existingImages ? [...existingImages] : [];
-		const seenImageChipIds = new Set<string>();
+		const attachedImageIndices = new Map<string, number>();
 		const serializedChips: SerializedPromptChip[] = [];
 		let anyExpanded = false;
 		let expanded = "";
@@ -713,22 +777,26 @@ export class PromptChipRegistry {
 			}
 
 			anyExpanded = true;
-			serializedChips.push(serializePromptChip(entry, span.number, MAX_PERSISTED_PREVIEW_CHARS));
 			const chunkBefore = inputText.slice(cursor, span.start);
 
 			if (entry.kind === "image") {
-				expanded += `${chunkBefore}[Image #${span.number}: ${entry.filePath}]`;
-				if (entry.base64Data && !seenImageChipIds.has(entry.id)) {
-					seenImageChipIds.add(entry.id);
+				expanded += `${chunkBefore}[Image #${span.number}${entry.filePath ? `: ${entry.filePath}` : ""}]`;
+				if (entry.base64Data && !attachedImageIndices.has(entry.id)) {
+					attachedImageIndices.set(entry.id, attachedImages.length);
 					attachedImages.push({
 						type: "image",
 						data: entry.base64Data,
 						mimeType: entry.mimeType,
 					});
 				}
+				serializedChips.push({
+					...serializePromptChip(entry, span.number),
+					imageIndex: attachedImageIndices.get(entry.id) ?? -1,
+				});
 				cursor = span.end;
 				continue;
 			}
+			serializedChips.push(serializePromptChip(entry, span.number));
 
 			if (entry.kind === "paste") {
 				expanded += chunkBefore + entry.text;
@@ -799,6 +867,18 @@ export class PromptChipRegistry {
 		this.pendingPersistQueue.push(record);
 		this.submittedByExpanded.set(finalExpanded, record);
 		this.submittedByExpanded.set(canonicalizePromptLookupText(finalExpanded), record);
+		this.mutationVersion += 1;
+		const strippedDisplay = stripLeadingSkillSlashPrefix(trimmedInput).trim();
+		const strippedExpanded = stripLeadingSkillSlashPrefix(finalExpanded).trim();
+		if (strippedExpanded && strippedExpanded !== finalExpanded) {
+			const strippedRecord: PersistedPromptChipsPayload = {
+				displayText: strippedDisplay,
+				expandedText: strippedExpanded,
+				chips: serializedChips,
+			};
+			this.submittedByExpanded.set(strippedExpanded, strippedRecord);
+			this.submittedByExpanded.set(canonicalizePromptLookupText(strippedExpanded), strippedRecord);
+		}
 
 		return {
 			transformed: true,
@@ -811,20 +891,39 @@ export class PromptChipRegistry {
 	bindSubmittedMessageTimestamp(
 		messageText: string,
 		timestamp: number | string | undefined,
+		images?: readonly ImageContent[],
 	): PersistedPromptChipsPayload | undefined {
-		const clean = stripTrailingImagePlaceholders(messageText);
-		const canonical = canonicalizePromptLookupText(messageText);
-		const matchesPayload = (r: PersistedPromptChipsPayload): boolean =>
-			r.expandedText === clean || canonicalizePromptLookupText(r.expandedText) === canonical;
+		const skillExtracted = extractSkillInvocations(messageText);
+		const bodyText = skillExtracted.skills.length > 0 ? skillExtracted.userText : messageText;
+		const clean = stripTrailingImagePlaceholders(bodyText);
+		const canonical = canonicalizePromptLookupText(bodyText);
+		const matchesPayload = (r: PersistedPromptChipsPayload): boolean => {
+			const recStripped = stripLeadingSkillSlashPrefix(r.expandedText).trim();
+			return (
+				r.expandedText === clean ||
+				canonicalizePromptLookupText(r.expandedText) === canonical ||
+				(skillExtracted.skills.length > 0 &&
+					(recStripped === clean || canonicalizePromptLookupText(recStripped) === canonical))
+			);
+		};
 		const queued = this.pendingPersistQueue.find(
 			(r) => r.timestamp === undefined && matchesPayload(r),
 		);
 		const target =
 			queued ?? this.submittedByExpanded.get(clean) ?? this.submittedByExpanded.get(canonical);
 		if (!target) return undefined;
+		if (images) this.associateSubmittedImages(target, images);
 
+		const normalizedTarget: PersistedPromptChipsPayload =
+			skillExtracted.skills.length > 0
+				? {
+						...target,
+						displayText: stripLeadingSkillSlashPrefix(target.displayText).trim(),
+						expandedText: clean,
+					}
+				: target;
 		const updated: PersistedPromptChipsPayload =
-			timestamp !== undefined ? { ...target, timestamp } : target;
+			timestamp !== undefined ? { ...normalizedTarget, timestamp } : normalizedTarget;
 		if (queued) {
 			const idx = this.pendingPersistQueue.indexOf(queued);
 			if (idx !== -1) this.pendingPersistQueue[idx] = updated;
@@ -834,6 +933,7 @@ export class PromptChipRegistry {
 		if (timestamp !== undefined) {
 			this.submittedByTimestamp.set(String(timestamp), updated);
 		}
+		this.mutationVersion += 1;
 		return updated;
 	}
 
@@ -841,32 +941,50 @@ export class PromptChipRegistry {
 		messageText: string,
 		timestamp: number | string | undefined,
 	): PersistedPromptChipsPayload | undefined {
-		const clean = stripTrailingImagePlaceholders(messageText);
-		const canonical = canonicalizePromptLookupText(messageText);
-		const idx = this.pendingPersistQueue.findIndex(
-			(r) =>
+		const skillExtracted = extractSkillInvocations(messageText);
+		const bodyText = skillExtracted.skills.length > 0 ? skillExtracted.userText : messageText;
+		const clean = stripTrailingImagePlaceholders(bodyText);
+		const canonical = canonicalizePromptLookupText(bodyText);
+		const idx = this.pendingPersistQueue.findIndex((r) => {
+			const recStripped = stripLeadingSkillSlashPrefix(r.expandedText).trim();
+			return (
 				(timestamp !== undefined && r.timestamp !== undefined && String(r.timestamp) === String(timestamp)) ||
 				r.expandedText === clean ||
-				canonicalizePromptLookupText(r.expandedText) === canonical,
-		);
+				canonicalizePromptLookupText(r.expandedText) === canonical ||
+				(skillExtracted.skills.length > 0 &&
+					(recStripped === clean || canonicalizePromptLookupText(recStripped) === canonical))
+			);
+		});
 		if (idx === -1) return undefined;
 		const base = this.pendingPersistQueue.splice(idx, 1)[0]!;
+		const normalizedBase: PersistedPromptChipsPayload =
+			skillExtracted.skills.length > 0
+				? {
+						...base,
+						displayText: stripLeadingSkillSlashPrefix(base.displayText).trim(),
+						expandedText: clean,
+					}
+				: base;
 		const finalized: PersistedPromptChipsPayload =
-			timestamp !== undefined ? { ...base, timestamp } : base;
+			timestamp !== undefined ? { ...normalizedBase, timestamp } : normalizedBase;
 		this.submittedByExpanded.set(finalized.expandedText, finalized);
 		this.submittedByExpanded.set(canonicalizePromptLookupText(finalized.expandedText), finalized);
 		if (finalized.timestamp !== undefined) {
 			this.submittedByTimestamp.set(String(finalized.timestamp), finalized);
 		}
+		this.mutationVersion += 1;
 		return finalized;
 	}
 
-	private lastHydratedEntries?: readonly unknown[];
+	private lastHydratedFirst?: unknown;
+	private lastHydratedLast?: unknown;
 	private lastHydratedLength = -1;
 
 	restorePersistedEntries(entries: readonly unknown[]): void {
-		this.lastHydratedEntries = entries;
+		this.lastHydratedFirst = entries[0];
+		this.lastHydratedLast = entries[entries.length - 1];
 		this.lastHydratedLength = entries.length;
+		this.mutationVersion += 1;
 		const customByEntryId = new Map<string, PersistedPromptChipsPayload>();
 		let immediatelyPrecedingPayload: PersistedPromptChipsPayload | undefined;
 
@@ -901,7 +1019,7 @@ export class PromptChipRegistry {
 					timestamp: data.timestamp,
 					displayText: data.displayText,
 					expandedText: data.expandedText,
-					chips: data.chips,
+					chips: data.chips.map((chip) => restoreLegacyPreview(chip, data.expandedText!)),
 				};
 				this.submittedByExpanded.set(payload.expandedText, payload);
 				this.submittedByExpanded.set(canonicalizePromptLookupText(payload.expandedText), payload);
@@ -923,6 +1041,9 @@ export class PromptChipRegistry {
 					msgTs !== undefined ? this.submittedByTimestamp.get(String(msgTs)) : undefined;
 				const matched = byParent ?? byMsgTs ?? immediatelyPrecedingPayload;
 				if (matched) {
+					if (Array.isArray(entry.message.content)) {
+						this.associateSubmittedImages(matched, entry.message.content.filter(isImageContent));
+					}
 					if (entry.id !== undefined && entry.id !== null) {
 						this.submittedByMessageId.set(String(entry.id), matched);
 					}
@@ -941,7 +1062,11 @@ export class PromptChipRegistry {
 
 	ensurePersistedEntriesHydrated(entries: readonly unknown[] | undefined): void {
 		if (!entries || entries.length === 0) return;
-		if (this.lastHydratedEntries === entries && this.lastHydratedLength === entries.length) {
+		if (
+			this.lastHydratedLength === entries.length &&
+			this.lastHydratedFirst === entries[0] &&
+			this.lastHydratedLast === entries[entries.length - 1]
+		) {
 			return;
 		}
 		this.restorePersistedEntries(entries);
@@ -1040,9 +1165,9 @@ export class PromptChipRegistry {
 
 		const fallbackChips: SerializedPromptChip[] = [];
 		let rebuilt = clean.includes("[Image #")
-			? clean.replace(LEGACY_IMAGE_MARKER_RE, (_full, numStr: string, rawPath: string) => {
+			? clean.replace(IMAGE_MARKER_RE, (_full, numStr: string, rawPath: string | undefined) => {
 					const number = Number.parseInt(numStr, 10);
-					const chip = buildFallbackImageChip(number, rawPath.trim());
+					const chip = buildFallbackImageChip(number, rawPath?.trim());
 					fallbackChips.push(chip);
 					return chip.token;
 				})
@@ -1085,7 +1210,7 @@ export class PromptChipRegistry {
 					this.historyByBindingKey.get(key);
 				const known = chipId ? this.sessionVault.get(chipId) : undefined;
 				if (known && known.kind === span.kind) {
-					return serializePromptChip(known, span.number, MAX_PERSISTED_PREVIEW_CHARS);
+					return serializePromptChip(known, span.number);
 				}
 				if (span.kind === "image") {
 					return fallbackByNum.get(span.number) ?? {
@@ -1141,8 +1266,10 @@ export class PromptChipRegistry {
 		this.submittedByMessageId.clear();
 		this.submittedByTimestamp.clear();
 		this.submittedByExpanded.clear();
-		this.lastHydratedEntries = undefined;
+		this.lastHydratedFirst = undefined;
+		this.lastHydratedLast = undefined;
 		this.lastHydratedLength = -1;
+		this.mutationVersion += 1;
 	}
 }
 
@@ -1162,11 +1289,26 @@ export function reconstructTurnPromptText(
 		readonly timestamp?: number | string;
 		readonly messageId?: string;
 		readonly entries?: readonly unknown[];
+		readonly cwd?: string;
 	},
 ): string {
 	if (!rawPrompt) return "";
 	const registry = getActivePromptChipRegistry();
 	registry.ensurePersistedEntriesHydrated(options?.entries);
+	const skillExtracted = extractSkillInvocations(rawPrompt, { cwd: options?.cwd });
+	if (skillExtracted.skills.length > 0) {
+		const shortTokens = skillExtracted.skills.map((s) => `/${s.name}`).join(" ");
+		const reconstructedBody = skillExtracted.userText
+			? registry
+					.reconstructSubmittedPrompt(
+						skillExtracted.userText,
+						options?.timestamp,
+						options?.messageId,
+					)
+					.displayText.trim()
+			: "";
+		return reconstructedBody ? `${shortTokens} · ${reconstructedBody}` : shortTokens;
+	}
 	const reconstructed = registry.reconstructSubmittedPrompt(
 		rawPrompt,
 		options?.timestamp,

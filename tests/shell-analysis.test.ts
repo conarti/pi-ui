@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { analyzeShell, classifyShellEffect } from "../src/shared/shell-analysis.ts";
-import { classifyShellCommand, lookKind } from "../src/features/tool-calls/claude.ts";
-import { exploreActions, parseExploreCommand } from "../src/features/tool-calls/codex.ts";
-import { highlightCommand } from "../src/features/tool-calls/codex-rows.ts";
+import { classifyShellCommand, lookKind } from "../src/features/tool-calls/classic-rows.ts";
+import { exploreActions, parseExploreCommand } from "../src/features/tool-calls/exploration-tail.ts";
+import { highlightCommand } from "../src/features/tool-calls/tail-rows.ts";
 import { shellSegments, summarizeShellCommand } from "../src/features/tool-calls/invocation.ts";
 import { loadPackageThemes } from "./harness/index.ts";
 

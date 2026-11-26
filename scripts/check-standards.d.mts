@@ -4,6 +4,7 @@ export interface TestAntiMockViolation {
 }
 
 export function findSingleLineCommentLines(sourceText: string): number[];
+export function findDisallowedCloseGlyphLines(sourceText: string): number[];
 export function findTestAntiMockViolations(
 	sourceText: string,
 	options?: { isPureUnit?: boolean },

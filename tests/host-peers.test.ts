@@ -6,7 +6,13 @@ import { UserMessageComponent, VERSION } from "@earendil-works/pi-coding-agent";
 import { Container, HStack, ScrollView, VStack, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
-import { HOST_PEER_PACKAGES, resolveHostPiPeers } from "../scripts/resolve-host-pi.mjs";
+import {
+	compareSemver,
+	EXPECTED_PI_HOST_VERSION,
+	HOST_PEER_PACKAGES,
+	readHostPiVersion,
+	resolveHostPiPeers,
+} from "../scripts/resolve-host-pi.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -30,10 +36,15 @@ describe("host-provided Pi peer package invariant", () => {
 		}
 	});
 
-	it("suppresses peer auto-installation via .npmrc", () => {
+	it("suppresses peer auto-installation via .npmrc without deprecated pnpm keys", () => {
 		const npmrc = readFileSync(join(REPO_ROOT, ".npmrc"), "utf8");
 		expect(npmrc).toMatch(/^\s*legacy-peer-deps\s*=\s*true\s*$/m);
-		expect(npmrc).toMatch(/^\s*auto-install-peers\s*=\s*false\s*$/m);
+		expect(npmrc).not.toMatch(/auto-install-peers/);
+	});
+
+	it("keeps installed host Pi runtime at or above EXPECTED_PI_HOST_VERSION", () => {
+		const installed = readHostPiVersion();
+		expect(compareSemver(installed, EXPECTED_PI_HOST_VERSION)).toBeGreaterThanOrEqual(0);
 	});
 
 	it("resolves host Pi peer packages and TypeBox cleanly in Vitest", () => {

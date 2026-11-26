@@ -16,7 +16,7 @@ Start every subagent with a fresh context window.
 
 Communication to and from subagents should be sparse. Communicate primarily through **context pointers**: to the spec, tickets, research notes, and previous commits. Write exploration notes and review reports to files on disk and keep subagent completion messages under 250 words (commit SHA, changed files, check summary) so transport limits never truncate handoffs. Don't duplicate information already available via pointers.
 
-**Implementer subagents** should be run in the background where possible for maximum concurrency.
+**Implementer subagents** should be run in the background where possible for maximum concurrency. Supervise background runs directly inside the current session until the final PR is **Ready for review** and CI is green: inspect progress, reap any subagent process that lingers after writing its completion commit/marker, and repair failing checks or CI yourself rather than offloading monitoring to user notifications.
 
 ## Steps
 
@@ -37,6 +37,6 @@ Communication to and from subagents should be sparse. Communicate primarily thro
 
 7. Once all tickets are complete, call the Skill tool with `code-review` on the integration branch. Fix all issues raised by the code review in a single fresh **implementer subagent**.
 
-8. If a draft PR exists, mark it ready for review. Otherwise, resolve each ticket the way the issue tracker closes work, and report the integration branch.
+8. Wait for GitHub CI on the integration branch to pass (fixing any CI-only failures in a fresh **implementer subagent**), then mark the draft PR ready for review (`gh pr ready`) and stop without merging into `main`. If no PR is used, resolve each ticket the way the issue tracker closes work and report the integration branch.
 
 9. Clean up all **implementer subagent** worktrees.

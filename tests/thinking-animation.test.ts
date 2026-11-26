@@ -5,11 +5,20 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { clearRecordedThinkingTimings } from "../src/features/transcript/thinking-block.ts";
+import {
+	clearRecordedThinkingTimings,
+	registerThinkingDisplayProvider,
+	resetGlobalThinkingExpandState,
+} from "../src/features/transcript/thinking-block.ts";
 import { stopAllAnimations } from "../src/shared/animation-scheduler.ts";
+import { getActiveHostRuntime } from "../src/shared/host-runtime.ts";
 import {
 	createAssistantMessageEventStream,
 	createInteractiveHarness,
+	fauxAssistantMessage,
+	fauxText,
+	fauxThinking,
+	findComposerTopRow,
 	type AssistantMessage,
 	type AssistantMessageEventStream,
 	type InteractiveHarness,
@@ -121,6 +130,8 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		}
 		stopAllAnimations();
 		clearRecordedThinkingTimings();
+		resetGlobalThinkingExpandState();
+		registerThinkingDisplayProvider(undefined);
 		while (tempDirs.length > 0) {
 			rmSync(tempDirs.pop()!, { recursive: true, force: true });
 		}
@@ -162,17 +173,17 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		await harness.flush();
 
 		expect(vi.getTimerCount()).toBe(1);
-		expect(harness.screen().text()).toContain("┃ Thinking…");
-		expect(harness.screen().text()).toContain("◆");
+		expect(harness.screen().text()).toContain("✦ Thinking…");
+		expect(harness.screen().text()).toContain("[stop]");
 
-		const spineTopBefore = findGlyphRgb(harness, "Thinking…", "┃");
+		const spineTopBefore = findGlyphRgb(harness, "Thinking…", "✦");
 		const spineRow1Before = findGlyphRgb(harness, "Line one", "▎");
 		const spineRow2Before = findGlyphRgb(harness, "Line two", "▎");
-		const workingDiamondBefore = findGlyphRgb(harness, "Working", "◆");
+		const workingStarBefore = findGlyphRgb(harness, "[stop]", "✦");
 		expect(spineTopBefore).toBeDefined();
 		expect(spineRow1Before).toBeDefined();
 		expect(spineRow2Before).toBeDefined();
-		expect(workingDiamondBefore).toBeDefined();
+		expect(workingStarBefore).toBeDefined();
 		expect(spineRow1Before).not.toEqual(spineRow2Before);
 
 		vi.advanceTimersByTime(33 * 6);
@@ -180,9 +191,9 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		expect(vi.getTimerCount()).toBe(1);
 
 		const spineRow1After = findGlyphRgb(harness, "Line one", "▎");
-		const workingDiamondAfter = findGlyphRgb(harness, "Working", "◆");
+		const workingStarAfter = findGlyphRgb(harness, "[stop]", "✦");
 		expect(spineRow1After).not.toEqual(spineRow1Before);
-		expect(workingDiamondAfter).not.toEqual(workingDiamondBefore);
+		expect(workingStarAfter).not.toEqual(workingStarBefore);
 
 		const done1 = makeStreamMessage(
 			[
@@ -223,7 +234,7 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		await silentTurn.catch(() => {});
 	});
 
-	it("renders streaming Thinking… with at most 3 softly formatted markdown tail lines, applies strongFg to bold spans, and omits bare fence borders", async () => {
+	it("renders streaming Thinking… at x=4 as fence-stripped calm prose with inline code tint inside a 6-line window", async () => {
 		vi.useFakeTimers();
 		const queue = createDeferredStreamQueue();
 		harness = await createInteractiveHarness({
@@ -254,20 +265,21 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 
 		const screen1 = harness.screen();
 		const text1 = screen1.text();
-		expect(text1).toContain("┃ Thinking…");
-		expect(text1).toContain("▎ - Inspect validateSession in auth.ts");
-		expect(text1).toContain("▎ - Check refreshToken expiry window");
-		expect(text1).toContain("▎ - Return 401 when token is stale");
-		expect(text1).not.toContain("First line of earlier context");
-		expect(text1).not.toContain("Second line of earlier context");
+		const hdrPos1 = screen1.findText("✦ Thinking…");
+		expect(hdrPos1).toBeDefined();
+		expect(hdrPos1!.col).toBe(4);
+		expect(text1).toContain("▎ Audit Phase");
+		expect(text1).toContain("▎ First line of earlier context");
+		expect(text1).toContain("▎ · Inspect validateSession in auth.ts");
+		expect(text1).toContain("▎ · Check refreshToken expiry window");
+		expect(text1).toContain("▎ · Return 401 when token is stale");
 		expect(text1).not.toContain("`validateSession`");
 		expect(text1).not.toContain("**auth.ts**");
 
-		const inspectPos = screen1.findText("auth.ts");
-		expect(inspectPos).toBeDefined();
-		const boldCell = screen1.cellAt(inspectPos!.row, inspectPos!.col);
-		expect(boldCell?.bold).toBe(true);
-		expect(boldCell?.fg).toEqual({ kind: "rgb", r: 156, g: 174, b: 200 });
+		const codePos = screen1.findText("validateSession");
+		expect(codePos).toBeDefined();
+		const codeCell = screen1.cellAt(codePos!.row, codePos!.col);
+		expect(codeCell?.fg).toEqual({ kind: "rgb", r: 132, g: 168, b: 206 });
 
 		const md2 = [
 			"Check **auth.ts** exports",
@@ -281,8 +293,8 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 
 		const text2 = harness.screen().text();
 		expect(text2).toContain("▎ Check auth.ts exports");
-		expect(text2).toContain("▎   const tokenValid = true;");
-		expect(text2).toContain("▎   const sessionReady = true;");
+		expect(text2).toContain("▎ const tokenValid = true;");
+		expect(text2).toContain("▎ const sessionReady = true;");
 		expect(text2).not.toContain("```ts");
 
 		const final1 = makeStreamMessage(
@@ -298,7 +310,7 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		await turn1;
 	});
 
-	it("renders completed collapsed Thinking blocks as ❙ › Thought for Xs per block, preserves timings across /reload, and shows ❙ › Thought for historical entries", async () => {
+	it("renders completed collapsed Thinking blocks as ✦ › Thought for Xs per block, preserves timings across /reload, and marks unmeasured historical durations as unknown", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date("2026-11-24T12:00:00Z"));
 		const queue = createDeferredStreamQueue();
@@ -328,9 +340,9 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		});
 
 		const initialText = harness.screen().text();
-		expect(initialText).toContain("❙ › Thought");
+		expect(initialText).toContain("✦ › Thought");
 		expect(initialText).toContain("Restored reply.");
-		expect(initialText).not.toContain("Thought for");
+		expect(initialText).toContain("Thought for ?s");
 		expect(initialText).not.toContain("Historical thought from disk");
 
 		const liveTurn = harness.submitInput("Run two-stage reasoning");
@@ -398,18 +410,18 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		await liveTurn;
 
 		const liveScreenText = harness.screen().text();
-		expect(liveScreenText).toContain("❙ › Thought for 4s");
-		expect(liveScreenText).toContain("❙ › Thought for 2s");
+		expect(liveScreenText).toContain("✦ › Thought for 4s");
+		expect(liveScreenText).toContain("✦ › Thought for 2s");
 		expect(liveScreenText).not.toContain("First reasoning block");
 		expect(liveScreenText).not.toContain("Second reasoning block");
 
 		await harness.reload();
 		const reloadedText = harness.screen().text();
-		expect(reloadedText).toContain("❙ › Thought for 4s");
-		expect(reloadedText).toContain("❙ › Thought for 2s");
+		expect(reloadedText).toContain("✦ › Thought for 4s");
+		expect(reloadedText).toContain("✦ › Thought for 2s");
 	});
 
-	it("toggles Thinking expansion via real mouse clicks with │ ⌄ Thought for Xs, continuous │ guide, hover preservation across text deltas, and /silent hiding", async () => {
+	it("toggles Thinking expansion via row-0 mouse clicks with ✦ ⌄ Thought for Xs, ignores body clicks below row 0, preserves hover across text deltas, and respects /silent", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date("2026-11-24T13:00:00Z"));
 		const queue = createDeferredStreamQueue();
@@ -438,18 +450,24 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 			},
 		});
 
-		const histPos = harness.screen().findText("❙ › Thought");
+		const histPos = harness.screen().findText("✦ › Thought");
 		expect(histPos).toBeDefined();
 		await harness.mouseClick(histPos!.col + 2, histPos!.row);
 		const histExpandedText = harness.screen().text();
-		expect(histExpandedText).toContain("│ ⌄ Thought");
+		expect(histExpandedText).toContain("✦ ⌄ Thought");
 		expect(histExpandedText).toContain("│ Restored historical reasoning");
-		expect(histExpandedText).not.toContain("Thought for");
+		expect(histExpandedText).toContain("Thought for ?s");
+
+		/* Клик по строке тела (y > 0) не сворачивает открытый блок */
+		const histBodyPos = harness.screen().findText("Restored historical reasoning")!;
+		vi.advanceTimersByTime(500);
+		await harness.mouseClick(histBodyPos.col + 2, histBodyPos.row);
+		expect(harness.screen().text()).toContain("│ Restored historical reasoning");
 
 		vi.advanceTimersByTime(500);
-		const histOpenPos = harness.screen().findText("│ ⌄ Thought");
+		const histOpenPos = harness.screen().findText("✦ ⌄ Thought");
 		await harness.mouseClick(histOpenPos!.col + 2, histOpenPos!.row);
-		expect(harness.screen().text()).toContain("❙ › Thought");
+		expect(harness.screen().text()).toContain("✦ › Thought");
 
 		const thinkingMarkdown = [
 			"### Verify Signature",
@@ -484,11 +502,11 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		stream.push({ type: "text_delta", contentIndex: 1, delta: "Token ", partial: pText1 });
 		await harness.flush();
 
-		const liveCollapsedPos = harness.screen().findText("❙ › Thought for 3s");
+		const liveCollapsedPos = harness.screen().findText("✦ › Thought for 3s");
 		expect(liveCollapsedPos).toBeDefined();
-		const spineBeforeHover = findGlyphRgb(harness, "Thought for 3s", "❙");
+		const spineBeforeHover = findGlyphRgb(harness, "Thought for 3s", "✦");
 		await harness.mouseMove(liveCollapsedPos!.col + 2, liveCollapsedPos!.row);
-		const spineHovered = findGlyphRgb(harness, "Thought for 3s", "❙");
+		const spineHovered = findGlyphRgb(harness, "Thought for 3s", "✦");
 		expect(spineHovered).toEqual([97, 175, 239]);
 		expect(spineHovered).not.toEqual(spineBeforeHover);
 
@@ -501,20 +519,20 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		);
 		stream.push({ type: "text_delta", contentIndex: 1, delta: "verified.", partial: pText2 });
 		await harness.flush();
-		expect(findGlyphRgb(harness, "Thought for 3s", "❙")).toEqual([97, 175, 239]);
+		expect(findGlyphRgb(harness, "Thought for 3s", "✦")).toEqual([97, 175, 239]);
 
 		stream.push({ type: "done", reason: "stop", message: pText2 });
 		stream.end(pText2);
 		await turnPromise;
 
 		vi.advanceTimersByTime(500);
-		const clickExpandPos = harness.screen().findText("❙ › Thought for 3s");
+		const clickExpandPos = harness.screen().findText("✦ › Thought for 3s");
 		expect(clickExpandPos).toBeDefined();
 		await harness.mouseClick(clickExpandPos!.col + 2, clickExpandPos!.row);
 
 		const expandedScreen = harness.screen();
 		const expandedText = expandedScreen.text();
-		expect(expandedText).toContain("│ ⌄ Thought for 3s");
+		expect(expandedText).toContain("✦ ⌄ Thought for 3s");
 		expect(expandedText).not.toContain("клик свернуть");
 		expect(expandedText).not.toContain("· клик");
 		expect(expandedText).toContain("│ Verify Signature");
@@ -523,10 +541,10 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		expect(expandedText).not.toContain("**jwt.ts**");
 		expect(expandedText).toContain("const verified = true;");
 
-		const hdrPos = expandedScreen.findText("│ ⌄ Thought for 3s")!;
+		const hdrPos = expandedScreen.findText("✦ ⌄ Thought for 3s")!;
 		const ansPos = expandedScreen.findText("Token verified.")!;
 		expect(ansPos.row).toBeGreaterThan(hdrPos.row + 3);
-		for (let r = hdrPos.row; r < ansPos.row - 1; r += 1) {
+		for (let r = hdrPos.row + 1; r < ansPos.row - 1; r += 1) {
 			const rowText = expandedScreen.rowText(r);
 			if (!rowText.trim()) continue;
 			expect(rowText.trimStart().startsWith("│")).toBe(true);
@@ -540,13 +558,13 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		expect(silentText).not.toContain("parseToken");
 
 		await harness.submitInput("/silent off");
-		expect(harness.screen().text()).toContain("│ ⌄ Thought for 3s");
+		expect(harness.screen().text()).toContain("✦ ⌄ Thought for 3s");
 
 		vi.advanceTimersByTime(500);
-		const clickCollapsePos = harness.screen().findText("│ ⌄ Thought for 3s")!;
+		const clickCollapsePos = harness.screen().findText("✦ ⌄ Thought for 3s")!;
 		await harness.mouseClick(clickCollapsePos.col + 2, clickCollapsePos.row);
 		const recollapsedText = harness.screen().text();
-		expect(recollapsedText).toContain("❙ › Thought for 3s");
+		expect(recollapsedText).toContain("✦ › Thought for 3s");
 		expect(recollapsedText).not.toContain("parseToken");
 	});
 
@@ -596,12 +614,12 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		sLock.push({ type: "start", partial: makeStreamMessage([], { timestamp: tsLock }) });
 		sLock.push({ type: "thinking_start", contentIndex: 0, partial: pEmpty });
 		await harness.flush();
-		expect(harness.screen().text()).toContain("┃ Thinking…");
+		expect(harness.screen().text()).toContain("✦ Thinking…");
 
-		const darkSpineRgb = findGlyphRgb(harness, "Thinking…", "┃");
+		const darkSpineRgb = findGlyphRgb(harness, "Thinking…", "✦");
 		expect(darkSpineRgb).toBeDefined();
 		harness.setTheme("light");
-		const lightSpineRgb = findGlyphRgb(harness, "Thinking…", "┃");
+		const lightSpineRgb = findGlyphRgb(harness, "Thinking…", "✦");
 		expect(lightSpineRgb).toBeDefined();
 		expect(lightSpineRgb).not.toEqual(darkSpineRgb);
 		expect(lightSpineRgb![0]).toBeLessThan(lightSpineRgb![1]);
@@ -628,7 +646,7 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 			partial: pThinkDone,
 		});
 		await harness.flush();
-		expect(harness.screen().text()).toContain("❙ › Thought for 3s");
+		expect(harness.screen().text()).toContain("✦ › Thought for 3s");
 		expect(vi.getTimerCount()).toBe(1);
 
 		vi.advanceTimersByTime(5000);
@@ -642,7 +660,7 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		sLock.push({ type: "done", reason: "stop", message: doneLock });
 		sLock.end(doneLock);
 		await lockTurn;
-		expect(harness.screen().text()).toContain("❙ › Thought for 3s");
+		expect(harness.screen().text()).toContain("✦ › Thought for 3s");
 
 		for (let t = 0; t < 15; t += 1) {
 			const turnP = harness.submitInput(`Streamed turn #${t + 1}`);
@@ -687,10 +705,10 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		await harness.reload();
 		await harness.mouseWheel("up", 40, 10, 40);
 		const topReloaded = harness.screen().text();
-		expect(topReloaded).toContain("❙ › Thought for 3s");
+		expect(topReloaded).toContain("✦ › Thought for 3s");
 	});
 
-	it("keeps ToolRuntime 30 fps diamond alive across turns under compact-tools working: true without 80ms Loader timers and restores ◆ indicator on /compact-tools off", async () => {
+	it("keeps ToolRuntime 30 fps Polaris star alive across turns under compact-tools working: true without 80ms Loader timers and restores ✦ indicator on /compact-tools off", async () => {
 		vi.useFakeTimers();
 		const tempRoot = mkdtempSync(join(tmpdir(), "pi-ui-thinking-working-"));
 		tempDirs.push(tempRoot);
@@ -745,13 +763,13 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 
 		expect(releaseToolGate).toBeDefined();
 		expect(vi.getTimerCount()).toBe(1);
-		const diamondBefore = findGlyphRgb(harness, "gated_probe", "◆");
+		const starBefore = findGlyphRgb(harness, "gated_probe", "✦");
 		vi.advanceTimersByTime(33 * 6);
 		harness.flushFrame();
-		const diamondAfter = findGlyphRgb(harness, "gated_probe", "◆");
-		expect(diamondBefore).toBeDefined();
-		expect(diamondAfter).toBeDefined();
-		expect(diamondAfter).not.toEqual(diamondBefore);
+		const starAfter = findGlyphRgb(harness, "gated_probe", "✦");
+		expect(starBefore).toBeDefined();
+		expect(starAfter).toBeDefined();
+		expect(starAfter).not.toEqual(starBefore);
 
 		releaseToolGate!();
 		releaseToolGate = undefined;
@@ -763,18 +781,328 @@ describe("30 fps breathing animation & refined Thinking blocks (real Interactive
 		expect(vi.getTimerCount()).toBe(0);
 
 		await harness.submitInput("/compact-tools off");
-		const t2 = harness.submitInput("Check restored composer working diamond");
+		const t2 = harness.submitInput("Check restored composer working star");
 		const s2 = await queue.nextStream();
 		s2.push({ type: "start", partial: makeStreamMessage([]) });
 		await harness.flush();
 
 		expect(vi.getTimerCount()).toBe(1);
-		expect(findGlyphRgb(harness, "Working", "◆")).toBeDefined();
+		expect(findGlyphRgb(harness, "[stop]", "✦")).toBeDefined();
 
 		const done2 = makeStreamMessage([{ type: "text", text: "All good." }]);
 		s2.push({ type: "done", reason: "stop", message: done2 });
 		s2.end(done2);
 		await t2;
 		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("restores the measured Thinking duration from session history at the dialogue axis", async () => {
+		harness = await createInteractiveHarness({
+			width: 36,
+			height: 28,
+			responses: [fauxAssistantMessage([fauxThinking("Reasoning to restore"), fauxText("Done.")])],
+		});
+		await harness.submitInput("Check the session");
+		const label = harness.screen().text().match(/✦ › Thought for \d+s/u)?.[0];
+		expect(label).toBeDefined();
+		const history = [...harness.sessionManager.getEntries()];
+		await harness.dispose();
+		harness = await createInteractiveHarness({ width: 36, height: 28, initialEntries: history });
+		expect(harness.screen().findText(label!)?.col).toBe(4);
+	});
+
+	it("renders Working status on Composer top border below above-editor widgets with heading/toolSummary/Drafting transitions and clickable [stop] abort", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-11-26T09:00:00Z"));
+		let releaseTool: (() => void) | undefined;
+		const probeTool = defineTool({
+			name: "analyze_files",
+			label: "Analyze Files",
+			description: "Probe tool with toolSummary",
+			parameters: Type.Object({ toolSummary: Type.Optional(Type.String()) }),
+			async execute() {
+				await new Promise<void>((resolve) => {
+					releaseTool = resolve;
+				});
+				return { content: [{ type: "text", text: "ok" }], details: {} };
+			},
+		});
+
+		const queue = createDeferredStreamQueue();
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 100,
+			height: 32,
+			customTools: [probeTool],
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_start", (_e, ctx) => {
+						ctx.ui.setWidget("probe-above", ["Above widget banner"], { placement: "aboveEditor" });
+					});
+				},
+			],
+			streamSimple: (_m, _c, opts) => queue.handler(opts),
+		});
+		vi.runOnlyPendingTimers();
+
+		const turnP = harness.submitInput("Run status lifecycle check");
+		const s1 = await queue.nextStream();
+		const ts1 = Date.now();
+		s1.push({ type: "start", partial: makeStreamMessage([], { timestamp: ts1 }) });
+		await harness.flush();
+
+		const s0 = harness.screen();
+		const widgetPos = s0.findText("Above widget banner");
+		const stopPos = s0.findText("[stop]");
+		expect(widgetPos).toBeDefined();
+		expect(stopPos).toBeDefined();
+		/* Статус Working встраивается прямо в верхнюю рамку Composer ниже widgetContainerAbove */
+		expect(stopPos!.row).toBe(widgetPos!.row + 1);
+		const workingRow0 = s0.rowText(stopPos!.row);
+		expect(workingRow0).toContain("╭─ ✦ ");
+		expect(workingRow0).not.toContain("esc to interrupt");
+		expect(workingRow0).not.toContain("↓");
+		expect(workingRow0).toContain("╮");
+
+		/* Заголовок из thinking_delta */
+		const thinkMsg = makeStreamMessage(
+			[{ type: "thinking", thinking: "**Auditing parser edge cases**\nChecking tokens" }],
+			{ timestamp: ts1 },
+		);
+		s1.push({ type: "thinking_start", contentIndex: 0, partial: thinkMsg });
+		s1.push({
+			type: "thinking_delta",
+			contentIndex: 0,
+			delta: "**Auditing parser edge cases**\nChecking tokens",
+			partial: thinkMsg,
+		});
+		await harness.flush();
+		expect(harness.screen().rowText(stopPos!.row)).toContain("✦ Auditing parser edge cases…");
+		await harness.resize(36, 32);
+		const narrow = harness.screen();
+		const narrowTopRow = narrow.rowText(findComposerTopRow(harness));
+		expect(narrowTopRow).toContain("╭─ ✦ Auditing");
+		expect(narrowTopRow.indexOf("✦")).toBe(5);
+		await harness.resize(100, 32);
+
+		const callMsg = makeStreamMessage(
+			[
+				{ type: "thinking", thinking: "**Auditing parser edge cases**\nChecking tokens" },
+				{
+					type: "toolCall",
+					id: "af-1",
+					name: "analyze_files",
+					arguments: { toolSummary: "Checking module imports" },
+				},
+			],
+			{ stopReason: "toolUse", timestamp: ts1 },
+		);
+		s1.push({ type: "done", reason: "toolUse", message: callMsg });
+		s1.end(callMsg);
+		await harness.flush();
+		expect(releaseTool).toBeDefined();
+		expect(harness.screen().rowText(stopPos!.row)).toContain("✦ Auditing parser edge cases…");
+		vi.advanceTimersByTime(4600);
+		await harness.flush();
+		expect(harness.screen().rowText(stopPos!.row)).toContain("✦ Checking module imports…");
+
+		/* Завершение инструмента -> Drafting… на финальном тексте */
+		releaseTool!();
+		const s2 = await queue.nextStream();
+		const textPartial = makeStreamMessage([{ type: "text", text: "Final summary..." }], {
+			timestamp: Date.now(),
+		});
+		s2.push({ type: "start", partial: textPartial });
+		s2.push({ type: "text_start", contentIndex: 0, partial: textPartial });
+		s2.push({ type: "text_delta", contentIndex: 0, delta: "Final summary...", partial: textPartial });
+		await harness.flush();
+		expect(harness.screen().rowText(stopPos!.row)).toContain("✦ Drafting…");
+
+		s2.push({ type: "done", reason: "stop", message: textPartial });
+		s2.end(textPartial);
+		await turnP;
+
+		/* Клик по [stop] прерывает активный ход */
+		const abortTurnP = harness.submitInput("Turn to abort via stop button");
+		const sAbort = await queue.nextStream();
+		sAbort.push({ type: "start", partial: makeStreamMessage([]) });
+		await harness.flush();
+
+		const stopHit = harness.screen().findText("[stop]");
+		expect(stopHit).toBeDefined();
+		await harness.mouseClick(stopHit!.col + 2, stopHit!.row);
+		await abortTurnP;
+		expect(harness.screen().findText("[stop]")).toBeUndefined();
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("paginates streaming Thinking in 6-line windows (3-line step), scrolls via wheel with overscroll=contain, expands live mid-stream on row-0 click or Ctrl+T, tracks non-streaming Thought for Xs, and applies ThinkingDisplayProvider without mutating session entries", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-11-26T10:00:00Z"));
+		const queue = createDeferredStreamQueue();
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 100,
+			height: 34,
+			thinkingLevel: "medium",
+			streamSimple: (_m, _c, opts) => queue.handler(opts),
+		});
+		vi.runOnlyPendingTimers();
+
+		/* Предшествующий длинный ответ делает ScrollView прокручиваемым */
+		const seedTurn = harness.submitInput("Seed long transcript");
+		const sSeed = await queue.nextStream();
+		const longReply = Array.from({ length: 24 }, (_, idx) => `Seed transcript line ${idx + 1}`).join("\n");
+		const seedMsg = fauxAssistantMessage([
+			fauxThinking("Single-shot provider thought"),
+			fauxText(longReply),
+		]);
+		sSeed.push({ type: "done", reason: "stop", message: seedMsg });
+		sSeed.end(seedMsg);
+		await seedTurn;
+		/* Даже нестримящий/буферизованный провайдер получает ✦ › Thought for Xs */
+		await harness.mouseWheel("up", 40, 10, 20);
+		expect(harness.screen().text()).toContain("✦ › Thought for 1s");
+		await harness.mouseWheel("down", 40, 10, 30);
+
+		/* Стриминг 12 строк Thinking -> 6-строчное окно, шаг 3, прокрутка колесом без движения ленты */
+		const streamTurn = harness.submitInput("Deep multi-line thought");
+		const sLive = await queue.nextStream();
+		const tsLive = Date.now();
+		const lines = Array.from({ length: 12 }, (_, idx) => `ThoughtStep_${idx + 1}`);
+		const twelveLines = lines.join("\n");
+		const partialLive = makeStreamMessage([{ type: "thinking", thinking: twelveLines }], {
+			timestamp: tsLive,
+		});
+		sLive.push({ type: "start", partial: makeStreamMessage([], { timestamp: tsLive }) });
+		for (const count of [6, 7]) {
+			const thinking = lines.slice(0, count).join("\n");
+			const partial = makeStreamMessage([{ type: "thinking", thinking }], { timestamp: tsLive });
+			if (count === 6) sLive.push({ type: "thinking_start", contentIndex: 0, partial });
+			sLive.push({ type: "thinking_delta", contentIndex: 0, delta: thinking, partial });
+			await harness.flush();
+			const snap = harness.screen();
+			const header = snap.findText("✦ Thinking…")!;
+			for (let row = 1; row <= 6; row++) expect(snap.rowText(header.row + row)).toContain("▎");
+		}
+		sLive.push({ type: "thinking_delta", contentIndex: 0, delta: twelveLines, partial: partialLive });
+		await harness.flush();
+
+		const liveScreen = harness.screen();
+		expect(liveScreen.text()).toContain("+6 lines ›");
+		expect(liveScreen.text()).toContain("ThoughtStep_7");
+		expect(liveScreen.text()).toContain("ThoughtStep_12");
+		expect(liveScreen.text()).not.toContain("ThoughtStep_1\n");
+
+		const scroll = getActiveHostRuntime()!.scroll!;
+		const scrollTopBefore = scroll.scrollTop;
+		const bodyPos = liveScreen.findText("ThoughtStep_10")!;
+		await harness.mouseWheel("up", bodyPos.col + 2, bodyPos.row, 2);
+		const pausedScreen = harness.screen();
+		expect(pausedScreen.text()).toContain("⏸ -");
+		expect(pausedScreen.text()).toContain("ThoughtStep_5");
+		expect(scroll.scrollTop).toBe(scrollTopBefore);
+
+		/* Прокрутка сверх верхнего предела окна остаётся внутри (overscroll = "contain") */
+		await harness.mouseWheel("up", bodyPos.col + 2, bodyPos.row, 10);
+		expect(harness.screen().text()).toContain("ThoughtStep_1");
+		expect(scroll.scrollTop).toBe(scrollTopBefore);
+
+		/* Прокрутка вниз до 0 возвращает живой хвост */
+		await harness.mouseWheel("down", bodyPos.col + 2, bodyPos.row, 15);
+		expect(harness.screen().text()).toContain("+6 lines ›");
+		expect(harness.screen().text()).not.toContain("⏸ -");
+		expect(scroll.scrollTop).toBe(scrollTopBefore);
+
+		/* Живое раскрытие кликом по строке 0 во время стриминга остаётся открытым после хода */
+		const hdrLivePos = harness.screen().findText("✦ Thinking…")!;
+		await harness.mouseClick(hdrLivePos.col + 2, hdrLivePos.row);
+		const expandedLive = harness.screen().text();
+		expect(expandedLive).toContain("✦ ⌄ Thinking…");
+		expect(expandedLive).toContain("ThoughtStep_1");
+		expect(expandedLive).toContain("ThoughtStep_12");
+
+		vi.advanceTimersByTime(2200);
+		const doneLive = makeStreamMessage(
+			[
+				{ type: "thinking", thinking: twelveLines },
+				{ type: "text", text: "Finished live stream." },
+			],
+			{ timestamp: tsLive },
+		);
+		sLive.push({ type: "thinking_end", contentIndex: 0, content: twelveLines, partial: doneLive });
+		sLive.push({ type: "done", reason: "stop", message: doneLive });
+		sLive.end(doneLive);
+		await streamTurn;
+
+		/* Осталось раскрытым после завершения хода; клик и выделение тела ниже строки 0 не сворачивают блок */
+		expect(harness.screen().text()).toContain("✦ ⌄ Thought for 2s");
+		expect(harness.screen().text()).toContain("ThoughtStep_12");
+		const stepBodyPos = harness.screen().findText("ThoughtStep_12")!;
+		await harness.mouseDrag(stepBodyPos.col, stepBodyPos.row, stepBodyPos.col + 8, stepBodyPos.row);
+		expect(harness.screen().text()).toContain("✦ ⌄ Thought for 2s");
+		expect(harness.screen().text()).toContain("ThoughtStep_12");
+
+		/* Глобальный Ctrl+T синхронно переключает все блоки (сброс per-block override) */
+		await harness.pressKey("\x14");
+		expect(harness.screen().text()).toContain("✦ ⌄ Thought for 2s");
+		await harness.pressKey("\x14");
+		expect(harness.screen().text()).toContain("✦ › Thought for 2s");
+		expect(harness.screen().text()).not.toContain("ThoughtStep_12");
+
+		/* Живое раскрытие по Ctrl+T во время стриминга остаётся открытым после хода */
+		vi.advanceTimersByTime(1000);
+		const ctrlTTurn = harness.submitInput("Expand streaming thinking via Ctrl+T");
+		const sCtrlT = await queue.nextStream();
+		const tsCtrlT = Date.now();
+		const ctrlTLines = Array.from({ length: 10 }, (_, idx) => `CtrlTStep_${idx + 1}`).join("\n");
+		const pCtrlT = makeStreamMessage([{ type: "thinking", thinking: ctrlTLines }], {
+			timestamp: tsCtrlT,
+		});
+		sCtrlT.push({ type: "start", partial: makeStreamMessage([], { timestamp: tsCtrlT }) });
+		sCtrlT.push({ type: "thinking_start", contentIndex: 0, partial: pCtrlT });
+		sCtrlT.push({ type: "thinking_delta", contentIndex: 0, delta: ctrlTLines, partial: pCtrlT });
+		await harness.flush();
+		expect(harness.screen().text()).toContain("+6 lines ›");
+		expect(harness.screen().text()).not.toContain("CtrlTStep_1\n");
+
+		await harness.pressKey("\x14");
+		expect(harness.screen().text()).toContain("✦ ⌄ Thinking…");
+		expect(harness.screen().text()).toContain("CtrlTStep_1");
+		expect(harness.screen().text()).toContain("CtrlTStep_10");
+
+		vi.advanceTimersByTime(1500);
+		const doneCtrlT = makeStreamMessage(
+			[
+				{ type: "thinking", thinking: ctrlTLines },
+				{ type: "text", text: "Ctrl+T live stream done." },
+			],
+			{ timestamp: tsCtrlT },
+		);
+		sCtrlT.push({ type: "thinking_end", contentIndex: 0, content: ctrlTLines, partial: doneCtrlT });
+		sCtrlT.push({ type: "done", reason: "stop", message: doneCtrlT });
+		sCtrlT.end(doneCtrlT);
+		await ctrlTTurn;
+		expect(harness.screen().text()).toContain("✦ ⌄ Thought for 2s");
+		expect(harness.screen().text()).toContain("CtrlTStep_10");
+
+		/* ThinkingDisplayProvider подменяет отображаемый текст без мутации записей сессии */
+		registerThinkingDisplayProvider({
+			transformCompleted: (raw) => `TRANSFORMED::${raw}`,
+		});
+		await harness.pressKey("\x14");
+		await harness.pressKey("\x14");
+		expect(harness.screen().text()).toContain("TRANSFORMED::CtrlTStep_1");
+		const storedAssistant = harness.session.messages.find(
+			(m): m is AssistantMessage =>
+				m.role === "assistant" &&
+				Array.isArray(m.content) &&
+				m.content.some((c) => c.type === "thinking" && c.thinking.includes("CtrlTStep_1")),
+		);
+		expect(storedAssistant).toBeDefined();
+		const storedThinking = storedAssistant!.content.find((c) => c.type === "thinking");
+		expect(storedThinking && storedThinking.type === "thinking" ? storedThinking.thinking : "").not.toContain(
+			"TRANSFORMED::",
+		);
 	});
 });

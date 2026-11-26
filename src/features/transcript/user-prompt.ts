@@ -1,21 +1,46 @@
-import { InteractiveMode, UserMessageComponent, type Theme } from "@earendil-works/pi-coding-agent";
 import {
+	InteractiveMode,
+	SessionSelectorComponent,
+	SkillInvocationMessageComponent,
+	TreeSelectorComponent,
+	UserMessageComponent,
+	UserMessageSelectorComponent,
+	type Theme,
+} from "@earendil-works/pi-coding-agent";
+import {
+	Spacer,
 	stripTerminalSequences,
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
 	type TuiMouseEvent,
 } from "@earendil-works/pi-tui";
-import { fgRgb, getActiveGlobalTheme, isLightTheme, paintSurfaceRow, type RgbTuple } from "../../shared/ansi.ts";
+import {
+	getActiveGlobalTheme,
+	getThemeSurfacePalette,
+	paintThemeSurfaceRow,
+	themeFgRgb,
+	type RgbTuple,
+} from "../../shared/ansi.ts";
+import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
+import { t } from "../../shared/i18n.ts";
+import { getPiUiConfigVersion } from "../../shared/pi-ui-config.ts";
 import {
 	claimHover,
 	copyToClipboard,
 	createCopyFeedbackTimerRegistry,
 	hookMethod,
 } from "../../shared/runtime-hooks.ts";
+import {
+	extractSkillInvocations,
+	renderStyledSkillChip,
+	serializeSkillBlockTag,
+	toggleSkillPreviewPopup,
+} from "../../shared/skill-tags.ts";
 import { formatTurnTime, sanitizeTurnText } from "../../shared/turn-index.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
+import { getActivePromptChipRegistry, reconstructTurnPromptText } from "../prompt-chips/registry.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -37,6 +62,7 @@ export interface PromptPillDescriptor {
 	readonly id: string;
 	readonly label: string;
 	readonly onClick?: (screenX: number, screenY: number) => void;
+	readonly onHover?: (screenX: number, screenY: number) => void;
 }
 
 export interface PromptPillFormatContext {
@@ -67,6 +93,7 @@ export interface PromptCardHitBox {
 export interface PromptPillHitTarget extends PromptCardHitBox {
 	readonly id: string;
 	readonly onClick?: (screenX: number, screenY: number) => void;
+	readonly onHover?: (screenX: number, screenY: number) => void;
 }
 
 export interface RenderUserPromptCardOptions {
@@ -136,9 +163,35 @@ function consumePendingUserMessageTimestamp(): number | string | undefined {
 	return current;
 }
 
+interface HostSkillBlock {
+	readonly name?: string;
+	readonly location?: string;
+	readonly content?: string;
+	readonly userMessage?: string;
+}
+
+function readSkillBlock(component: unknown): HostSkillBlock | undefined {
+	if (!component || typeof component !== "object") return undefined;
+	return Reflect.get(component, "skillBlock") as HostSkillBlock | undefined;
+}
+
 function resolveFallbackTimestampFromBranch(self: any): number | string | undefined {
+	const cached = self.__conartiFallbackTsCache as
+		| { resolved: boolean; leafId: string | null | undefined; value: number | string | undefined }
+		| undefined;
 	const runtime = getActiveHostRuntime();
-	const branch = runtime?.ctx?.sessionManager?.getBranch?.();
+	const sm = runtime?.ctx?.sessionManager as
+		| {
+				getBranch?: () => unknown[];
+				getLeafId?: () => string | null;
+		  }
+		| undefined;
+	const leafId = typeof sm?.getLeafId === "function" ? sm.getLeafId() : undefined;
+	if (cached?.resolved && (cached.value !== undefined || (leafId !== undefined && cached.leafId === leafId))) {
+		return cached.value;
+	}
+
+	const branch = sm?.getBranch?.();
 	if (!Array.isArray(branch) || branch.length === 0) return undefined;
 
 	const userEntries: any[] = branch.filter(
@@ -149,17 +202,27 @@ function resolveFallbackTimestampFromBranch(self: any): number | string | undefi
 	if (self.messageId !== undefined) {
 		const byId = userEntries.find((entry: any) => String(entry.id) === String(self.messageId));
 		const ts = byId?.message?.timestamp ?? byId?.timestamp;
-		if (ts !== undefined) return ts;
+		if (ts !== undefined) {
+			self.__conartiFallbackTsCache = { resolved: true, leafId, value: ts };
+			return ts;
+		}
 	}
 
 	const chatRoot = runtime?.scroll?.children[0] ?? runtime?.chatContainer;
 	if (!chatRoot) return undefined;
 
-	const mountedCards: UserMessageComponent[] = [];
+	const mountedCards: Array<UserMessageComponent | SkillInvocationMessageComponent> = [];
 	const collect = (node: any): void => {
 		if (!node) return;
 		if (node instanceof UserMessageComponent) {
 			mountedCards.push(node);
+			return;
+		}
+		if (node instanceof SkillInvocationMessageComponent) {
+			const sb = readSkillBlock(node);
+			if (sb?.name && !sb.userMessage) {
+				mountedCards.push(node);
+			}
 			return;
 		}
 		if (Array.isArray(node.children)) {
@@ -174,7 +237,89 @@ function resolveFallbackTimestampFromBranch(self: any): number | string | undefi
 	const tailOffset = Math.max(0, userEntries.length - mountedCards.length);
 	const entryIdx = cardIdx + tailOffset;
 	const matched = entryIdx >= 0 && entryIdx < userEntries.length ? userEntries[entryIdx] : undefined;
-	return matched?.message?.timestamp ?? matched?.timestamp;
+	const resolvedValue = matched?.message?.timestamp ?? matched?.timestamp;
+	self.__conartiFallbackTsCache = { resolved: true, leafId, value: resolvedValue };
+	return resolvedValue;
+}
+
+function resolvePrecedingSkillTagForUserComponent(self: any): string | undefined {
+	const runtime = getActiveHostRuntime();
+	const chatRoot = runtime?.chatContainer ?? runtime?.scroll?.children[0];
+	const children = (chatRoot as { children?: unknown[] } | undefined)?.children;
+	if (!Array.isArray(children) || children.length === 0) return undefined;
+	const firstChild = children[0];
+	const cached = self.__conartiPrecedingSkillCache as
+		| { firstChild: unknown; value: string | undefined }
+		| undefined;
+	if (cached && cached.firstChild === firstChild) {
+		return cached.value;
+	}
+	const idx = children.indexOf(self);
+	if (idx < 0) return undefined;
+	if (idx === 0) {
+		self.__conartiPrecedingSkillCache = { firstChild, value: undefined };
+		return undefined;
+	}
+	let resolved: string | undefined;
+	for (let i = idx - 1; i >= 0; i -= 1) {
+		const prev = children[i];
+		if (prev instanceof Spacer) continue;
+		if (prev instanceof SkillInvocationMessageComponent) {
+			const sb = readSkillBlock(prev);
+			if (sb?.name) {
+				resolved = serializeSkillBlockTag(sb);
+			}
+		}
+		break;
+	}
+	self.__conartiPrecedingSkillCache = { firstChild, value: resolved };
+	return resolved;
+}
+
+/* Заменяет стилизованные пилюли на неразрывные заглушки той же видимой ширины до wrapTextWithAnsi, чтобы чипы никогда не разрывались по пробелу или «·» */
+function protectPillsForWrap(
+	text: string,
+	pills: readonly PromptPillDescriptor[],
+	maxAtomicWidth: number,
+): { wrappedInput: string; restore: (row: string) => string } {
+	if (pills.length === 0) {
+		return { wrappedInput: text, restore: (row) => row };
+	}
+	const tagged = tagFormattedPillsWithOsc8(text, pills);
+	const placeholders = new Map<string, string>();
+	let counter = 0;
+
+	const wrappedInput = tagged.replace(
+		/\x1b\]8;;conarti-pill:(\d+)\x07([\s\S]*?)\x1b\]8;;\x07/g,
+		(full, idxStr: string, inner: string) => {
+			const w = visibleWidth(inner);
+			if (w < 2 || w > maxAtomicWidth) {
+				return full;
+			}
+			const idTag = counter.toString(36);
+			counter += 1;
+			/* Маркер состоит из PUA-символов + букв без пробелов и знаков переноса, шириной ровно w */
+			const bodyLen = Math.max(0, w - 2 - idTag.length);
+			if (w < idTag.length + 2) {
+				return full;
+			}
+			const token = `\uE001${idTag}${"\uE003".repeat(bodyLen)}\uE002`;
+			placeholders.set(token, `${PILL_OSC8_OPEN_PREFIX}${idxStr}\x07${inner}${PILL_OSC8_CLOSE}`);
+			return token;
+		},
+	);
+
+	if (placeholders.size === 0) {
+		return { wrappedInput: tagged, restore: (row) => row };
+	}
+
+	return {
+		wrappedInput,
+		restore: (row: string) => {
+			if (!row.includes("\uE001")) return row;
+			return row.replace(/\uE001[0-9a-z]+\uE003*\uE002/g, (tok) => placeholders.get(tok) ?? tok);
+		},
+	};
 }
 
 /* Оборачивает стилизованные пилюли во временные OSC 8 маркеры до переноса строк, чтобы не путать их с обычным текстом */
@@ -279,6 +424,7 @@ function extractAndStripPillHits(
 					xStart: prefixWidth + activePill.startCol,
 					xEnd: prefixWidth + col,
 					onClick: desc.onClick,
+					onHover: desc.onHover,
 				});
 			}
 			activePill = undefined;
@@ -309,6 +455,7 @@ function extractAndStripPillHits(
 				xStart: prefixWidth + activePill.startCol,
 				xEnd: prefixWidth + col,
 				onClick: desc.onClick,
+				onHover: desc.onHover,
 			});
 		}
 	}
@@ -340,30 +487,33 @@ export function renderUserPromptCardLines(
 		};
 	}
 
-	const light = isLightTheme(theme);
-	const surfaceRgb: RgbTuple = light
-		? options.hovered
-			? [228, 238, 252]
-			: [237, 243, 252]
-		: options.hovered
-			? [33, 43, 60]
-			: [27, 35, 50];
+	const palette = getThemeSurfacePalette(theme);
+	const light = palette.isLight;
+	const surfaceRgb: RgbTuple = options.hovered ? palette.userCardHoverBg : palette.userCardBg;
 
-	const chevronRgb: RgbTuple = light
-		? options.hovered
-			? [29, 78, 216]
-			: [37, 99, 235]
-		: options.hovered
-			? [125, 207, 255]
-			: [97, 175, 239];
+	const chevronRgb: RgbTuple = options.hovered ? palette.accentBright : palette.accent;
 	const bodyRgb: RgbTuple = light ? [30, 41, 59] : [220, 229, 242];
-	const dimRgb: RgbTuple = light ? [100, 116, 139] : [124, 138, 160];
+	const dimRgb: RgbTuple = palette.codeMetaFg;
+
+	const cwd = getActiveHostRuntime()?.ctx?.cwd ?? process.cwd();
+	const skillExtraction = extractSkillInvocations(cleanRaw, { cwd });
+	const skillDescriptors: PromptPillDescriptor[] = [];
+	const styledSkills: string[] = [];
+	for (const skill of skillExtraction.skills) {
+		const renderedSkill = renderStyledSkillChip(skill.name, theme);
+		styledSkills.push(renderedSkill.styled);
+		skillDescriptors.push({
+			id: skill.id,
+			label: renderedSkill.plainLabel,
+			onClick: (sx, sy) => toggleSkillPreviewPopup(skill, sx, sy),
+		});
+	}
 
 	const formatter = getPromptPillFormatter();
-	let formattedText = cleanRaw;
-	let pillDescriptors: readonly PromptPillDescriptor[] = [];
-	if (formatter) {
-		const res = formatter(cleanRaw, {
+	let formattedUserBody = skillExtraction.userText;
+	let promptChipDescriptors: readonly PromptPillDescriptor[] = [];
+	if (formatter && formattedUserBody) {
+		const res = formatter(formattedUserBody, {
 			theme,
 			isLight: light,
 			surfaceRgb,
@@ -372,29 +522,57 @@ export function renderUserPromptCardLines(
 			surface: options.surface,
 		});
 		if (typeof res === "string") {
-			formattedText = res;
+			formattedUserBody = res;
 		} else {
-			formattedText = res.text;
-			pillDescriptors = res.pills ?? [];
+			formattedUserBody = res.text;
+			promptChipDescriptors = res.pills ?? [];
 		}
 	}
 
-	const leftPad = width >= 32 ? "  " : " ";
-	const rightPad = width >= 32 ? "  " : " ";
-	const firstPrefix = `${leftPad}${fgRgb(chevronRgb, "› ")}`;
+	const pillDescriptors: readonly PromptPillDescriptor[] = [
+		...skillDescriptors,
+		...promptChipDescriptors,
+	];
+	let formattedText: string;
+	if (styledSkills.length > 0 && formattedUserBody) {
+		formattedText = `${styledSkills.join(" ")} ${formattedUserBody}`;
+	} else if (styledSkills.length > 0) {
+		formattedText = styledSkills.join(" ");
+	} else {
+		formattedText = formattedUserBody;
+	}
+
+	const outerPad = computeOuterCanvasMargin(width);
+	const outerMargin = " ".repeat(outerPad);
+	const cardWidth = width - outerPad * 2;
+
+	const leftPad = "  ";
+	const rightPad = "  ";
+	const firstPrefix = `${leftPad}${themeFgRgb(theme, chevronRgb, "› ")}`;
 	const prefixWidth = leftPad.length + 2;
 	const nextPrefix = " ".repeat(prefixWidth);
 
-	/* Фиксированный правый отступ под HH:MM исключает перенос строк при наведении и появлении Copy */
-	const timeGutterWidth = width >= 32 ? 9 : width >= 22 ? 7 : 0;
-	const textAvail = Math.max(4, width - prefixWidth - timeGutterWidth);
+	/* Резервируем фиксированную правую колонку под дату/время и Copy/✓ Copied, чтобы перенос строк не прыгал при наведении */
+	const timeText = options.formattedTime ?? "";
+	const copySlotWidth = options.showCopyBadge ? 8 : 0;
+	const desiredRightSlot = Math.max(visibleWidth(timeText), copySlotWidth);
+	const candidateRightGutter = desiredRightSlot > 0 ? desiredRightSlot + rightPad.length + 1 : 0;
+	const rightGutterWidth =
+		candidateRightGutter > 0 && cardWidth - prefixWidth - candidateRightGutter >= 10
+			? candidateRightGutter
+			: 0;
+	const textAvail = Math.max(4, cardWidth - prefixWidth - rightGutterWidth);
 
-	const taggedText = tagFormattedPillsWithOsc8(formattedText, pillDescriptors);
+	const { wrappedInput, restore: restoreWrappedPills } = protectPillsForWrap(
+		formattedText,
+		pillDescriptors,
+		textAvail,
+	);
 	const wrappedRows: string[] = [];
-	for (const logical of taggedText.split("\n")) {
+	for (const logical of wrappedInput.split("\n")) {
 		const chunks = wrapTextWithAnsi(logical, textAvail);
 		for (const chunk of chunks.length > 0 ? chunks : [""]) {
-			wrappedRows.push(chunk);
+			wrappedRows.push(restoreWrappedPills(chunk));
 		}
 	}
 
@@ -404,53 +582,41 @@ export function renderUserPromptCardLines(
 	if (options.maxContentLines !== undefined && wrappedRows.length > options.maxContentLines) {
 		truncated = true;
 		visibleRows = wrappedRows.slice(0, options.maxContentLines);
+		const hidden = wrappedRows.length - visibleRows.length;
 		const lastIdx = visibleRows.length - 1;
 		if (lastIdx >= 0) {
 			const trimmedLast = visibleRows[lastIdx]!.replace(/\s+$/, "");
-			if (visibleWidth(trimmedLast) + 1 <= textAvail) {
-				visibleRows[lastIdx] = `${trimmedLast}${fgRgb(dimRgb, "…")}`;
+			const foldHint =
+				options.surface === "sticky"
+					? t(hidden === 1 ? "sticky.foldLine" : "sticky.foldLines", { count: hidden })
+					: "…";
+			const hintWidth = visibleWidth(foldHint);
+			const styledHint = themeFgRgb(theme, options.hovered ? chevronRgb : dimRgb, foldHint);
+			if (visibleWidth(trimmedLast) + hintWidth <= textAvail) {
+				visibleRows[lastIdx] = `${trimmedLast}${styledHint}`;
+			} else if (hintWidth < textAvail) {
+				visibleRows[lastIdx] = `${truncateToWidth(trimmedLast, Math.max(1, textAvail - hintWidth), "")}${styledHint}`;
 			} else {
-				visibleRows[lastIdx] = `${truncateToWidth(trimmedLast, Math.max(1, textAvail - 1), "")}${fgRgb(dimRgb, "…")}`;
+				visibleRows[lastIdx] = `${truncateToWidth(trimmedLast, Math.max(1, textAvail - 1), "")}${themeFgRgb(theme, dimRgb, "…")}`;
 			}
 		}
 	}
 
-	const lines: string[] = [];
+	const paintCardRow = (inner: string): string =>
+		`${outerMargin}${paintThemeSurfaceRow(theme, inner, cardWidth, surfaceRgb)}${outerMargin}`;
+
+	/* Симметричный vpad = 1: верхняя и нижняя строки карточки всегда остаются пустыми */
+	const lines: string[] = [paintCardRow("")];
 	let copyHit: PromptCardHitBox | undefined;
-
-	if (options.showCopyBadge && (options.hovered || options.copied) && width >= 20) {
-		const rawLabel = options.copied ? "✓ Copied" : "Copy";
-		const styledLabel = options.copied
-			? fgRgb(light ? [21, 128, 61] : [140, 194, 101], rawLabel)
-			: fgRgb(light ? [71, 85, 105] : [148, 168, 198], rawLabel);
-		const labelWidth = visibleWidth(rawLabel);
-		const padCount = Math.max(0, width - labelWidth - rightPad.length);
-		copyHit = {
-			y: 0,
-			xStart: Math.max(0, padCount - 1),
-			xEnd: Math.min(width - 1, padCount + labelWidth),
-		};
-		lines.push(
-			paintSurfaceRow(
-				`${" ".repeat(padCount)}${styledLabel}${rightPad}`,
-				width,
-				surfaceRgb[0],
-				surfaceRgb[1],
-				surfaceRgb[2],
-			),
-		);
-	} else {
-		lines.push(paintSurfaceRow("", width, surfaceRgb[0], surfaceRgb[1], surfaceRgb[2]));
-	}
-
 	const pillHits: PromptPillHitTarget[] = [];
 
 	for (let i = 0; i < visibleRows.length; i++) {
+		const rowY = i + 1;
 		const prefix = i === 0 ? firstPrefix : nextPrefix;
 		const { cleanedRow, hits } = extractAndStripPillHits(
 			visibleRows[i]!,
-			i + 1,
-			prefixWidth,
+			rowY,
+			outerPad + prefixWidth,
 			pillDescriptors,
 		);
 		if (hits.length > 0) {
@@ -458,23 +624,35 @@ export function renderUserPromptCardLines(
 		}
 		const styledBody = styleBodyPreservingPills(cleanedRow, bodyRgb);
 
-		const timeStr = i === 0 && options.formattedTime && timeGutterWidth > 0 ? options.formattedTime : "";
-		const rightStyled = timeStr ? `${fgRgb(dimRgb, timeStr)}${rightPad}` : "";
+		let rightStyled = "";
+		if (i === 0 && rightGutterWidth > 0) {
+			if (options.showCopyBadge && (options.hovered || options.copied)) {
+				const rawLabel = t(options.copied ? "transcript.prompt.copied" : "transcript.prompt.copy");
+				const labelRgb: RgbTuple = options.copied
+					? palette.success
+					: light
+						? palette.accent
+						: palette.accentBright;
+				const labelWidth = visibleWidth(rawLabel);
+				const labelColInCard = Math.max(prefixWidth, cardWidth - rightPad.length - labelWidth);
+				copyHit = {
+					y: rowY,
+					xStart: Math.max(outerPad, outerPad + labelColInCard - 1),
+					xEnd: Math.min(outerPad + cardWidth - 1, outerPad + labelColInCard + labelWidth),
+				};
+				rightStyled = `${themeFgRgb(theme, labelRgb, rawLabel)}${rightPad}`;
+			} else if (timeText) {
+				rightStyled = `${themeFgRgb(theme, dimRgb, timeText)}${rightPad}`;
+			}
+		}
+
 		const gap = " ".repeat(
-			Math.max(0, width - prefixWidth - visibleWidth(styledBody) - visibleWidth(rightStyled)),
+			Math.max(0, cardWidth - prefixWidth - visibleWidth(styledBody) - visibleWidth(rightStyled)),
 		);
-		lines.push(
-			paintSurfaceRow(
-				`${prefix}${styledBody}${gap}${rightStyled}`,
-				width,
-				surfaceRgb[0],
-				surfaceRgb[1],
-				surfaceRgb[2],
-			),
-		);
+		lines.push(paintCardRow(`${prefix}${styledBody}${gap}${rightStyled}`));
 	}
 
-	lines.push(paintSurfaceRow("", width, surfaceRgb[0], surfaceRgb[1], surfaceRgb[2]));
+	lines.push(paintCardRow(""));
 
 	return {
 		lines,
@@ -517,6 +695,8 @@ export function installUserPromptCards(): void {
 		"rebuild",
 		"transcript.userPromptRebuild",
 		(self, args, original) => {
+			self.__conartiRenderCache = undefined;
+			self.__conartiPrecedingSkillCache = undefined;
 			if (self.timestamp === undefined) {
 				const pendingTs = consumePendingUserMessageTimestamp();
 				if (pendingTs !== undefined) {
@@ -527,6 +707,18 @@ export function installUserPromptCards(): void {
 		},
 	);
 
+	if (typeof proto.invalidate === "function") {
+		hookMethod(
+			proto,
+			"invalidate",
+			"transcript.userPromptInvalidate",
+			(self, args, original) => {
+				self.__conartiRenderCache = undefined;
+				return original.apply(self, args);
+			},
+		);
+	}
+
 	hookMethod(
 		proto,
 		"render",
@@ -534,16 +726,56 @@ export function installUserPromptCards(): void {
 		(self, args) => {
 			const width = args[0] as number;
 			const rawText = String(self.text ?? "").trim();
-			if (!rawText || width < 12) return [];
+			const precedingSkill = resolvePrecedingSkillTagForUserComponent(self);
+			const combinedRaw = precedingSkill
+				? rawText
+					? `${precedingSkill}\n\n${rawText}`
+					: precedingSkill
+				: rawText;
+			if (!combinedRaw || width < 12) return [];
 
 			const theme = getActiveGlobalTheme(self?.theme);
+			const hovered = Boolean(self.__conartiHovered);
+			const copied = Boolean(self.__conartiCopied);
+			const configVersion = getPiUiConfigVersion();
+			const registryVersion = getActivePromptChipRegistry().version;
+
+			const prevCache = self.__conartiRenderCache as
+				| {
+						width: number;
+						combinedRaw: string;
+						theme: Theme;
+						hovered: boolean;
+						copied: boolean;
+						configVersion: number;
+						registryVersion: number;
+						lines: string[];
+						copyHit: PromptCardHitBox | undefined;
+						pillHits: readonly PromptPillHitTarget[];
+				  }
+				| undefined;
+			if (
+				prevCache &&
+				prevCache.width === width &&
+				prevCache.combinedRaw === combinedRaw &&
+				prevCache.theme === theme &&
+				prevCache.hovered === hovered &&
+				prevCache.copied === copied &&
+				prevCache.configVersion === configVersion &&
+				prevCache.registryVersion === registryVersion
+			) {
+				self.__conartiCopyHit = prevCache.copyHit;
+				self.__conartiPillHits = prevCache.pillHits;
+				return prevCache.lines;
+			}
+
 			const effectiveTs = self.timestamp ?? resolveFallbackTimestampFromBranch(self);
 			const formattedTime = formatTurnTime(effectiveTs);
 
-			const rendered = renderUserPromptCardLines(rawText, width, theme, {
+			const rendered = renderUserPromptCardLines(combinedRaw, width, theme, {
 				formattedTime,
-				hovered: Boolean(self.__conartiHovered),
-				copied: Boolean(self.__conartiCopied),
+				hovered,
+				copied,
 				showCopyBadge: true,
 				surface: "transcript",
 				messageId: self.messageId !== undefined ? String(self.messageId) : undefined,
@@ -558,6 +790,18 @@ export function installUserPromptCards(): void {
 				out[0] = OSC133_ZONE_START + out[0];
 				out[out.length - 1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + out[out.length - 1];
 			}
+			self.__conartiRenderCache = {
+				width,
+				combinedRaw,
+				theme,
+				hovered,
+				copied,
+				configVersion,
+				registryVersion,
+				lines: out,
+				copyHit: rendered.copyHit,
+				pillHits: rendered.pillHits,
+			};
 			return out;
 		},
 		["pi.grok-ui.hook.chat.userPromptRender"],
@@ -569,8 +813,13 @@ export function installUserPromptCards(): void {
 		"transcript.userPromptMouse",
 		(self, args) => {
 			const event = args[0] as TuiMouseEvent;
+			const pillHits = (self.__conartiPillHits as readonly PromptPillHitTarget[] | undefined) ?? [];
+			const matchedPill = pillHits.find(
+				(hit) => event.y === hit.y && event.x >= hit.xStart && event.x < hit.xEnd,
+			);
 
 			if (event.type === "move") {
+				matchedPill?.onHover?.(event.screenX, event.screenY);
 				claimHover(self, () => {
 					if (self.__conartiHovered) {
 						self.__conartiHovered = false;
@@ -585,12 +834,8 @@ export function installUserPromptCards(): void {
 			}
 
 			const copyHit = self.__conartiCopyHit as PromptCardHitBox | undefined;
-			const pillHits = (self.__conartiPillHits as readonly PromptPillHitTarget[] | undefined) ?? [];
 			const matchedCopy =
 				copyHit && event.y === copyHit.y && event.x >= copyHit.xStart && event.x <= copyHit.xEnd;
-			const matchedPill = pillHits.find(
-				(hit) => event.y === hit.y && event.x >= hit.xStart && event.x < hit.xEnd,
-			);
 
 			if (event.type === "press" && event.button === "left" && (matchedCopy || matchedPill)) {
 				return { handled: true, render: false };
@@ -598,7 +843,14 @@ export function installUserPromptCards(): void {
 
 			if (event.type === "click" && event.button === "left") {
 				if (matchedCopy) {
-					copyToClipboard(sanitizeTurnText(String(self.text ?? "")).trim());
+					const baseRaw = sanitizeTurnText(String(self.text ?? "")).trim();
+					const precedingSkill = resolvePrecedingSkillTagForUserComponent(self);
+					const combinedRaw = precedingSkill
+						? baseRaw
+							? `${precedingSkill}\n\n${baseRaw}`
+							: precedingSkill
+						: baseRaw;
+					copyToClipboard(extractSkillInvocations(combinedRaw).cleanCopyText);
 					self.__conartiCopied = true;
 					requestRender();
 					userPromptCopyTimers.arm(self, (target) => {
@@ -617,4 +869,259 @@ export function installUserPromptCards(): void {
 		},
 		["pi.grok-ui.hook.chat.userPromptMouse"],
 	);
+
+	/* Поглощаем хостовые баннеры SkillInvocationMessageComponent в кликабельные пилюли Skill Chip */
+	const skillProto = (
+		SkillInvocationMessageComponent as unknown as { prototype?: Record<string, unknown> } | undefined
+	)?.prototype;
+	if (skillProto) {
+		const emptyLines: string[] = [];
+		if (typeof skillProto.invalidate === "function") {
+			hookMethod(
+				skillProto,
+				"invalidate",
+				"transcript.skillInvocationInvalidate",
+				(self, args, original) => {
+					self.__conartiRenderCache = undefined;
+					return original.apply(self, args);
+				},
+			);
+		}
+		hookMethod(
+			skillProto,
+			"render",
+			"transcript.skillInvocationRender",
+			(self, args, original) => {
+				const sb = self?.skillBlock;
+				if (!sb?.name) {
+					return original.apply(self, args);
+				}
+				/* Когда следом идёт UserMessageComponent, карточка пользователя сама рисует пилюлю навыка */
+				if (sb.userMessage) {
+					return emptyLines;
+				}
+				const width = args[0] as number;
+				if (width < 12) return emptyLines;
+				const theme = getActiveGlobalTheme(self?.theme);
+				const hovered = Boolean(self.__conartiHovered);
+				const copied = Boolean(self.__conartiCopied);
+				const configVersion = getPiUiConfigVersion();
+				const syntheticRaw = serializeSkillBlockTag(sb);
+
+				const prevCache = self.__conartiRenderCache as
+					| {
+							width: number;
+							syntheticRaw: string;
+							theme: Theme;
+							hovered: boolean;
+							copied: boolean;
+							configVersion: number;
+							lines: string[];
+							copyHit: PromptCardHitBox | undefined;
+							pillHits: readonly PromptPillHitTarget[];
+					  }
+					| undefined;
+				if (
+					prevCache &&
+					prevCache.width === width &&
+					prevCache.syntheticRaw === syntheticRaw &&
+					prevCache.theme === theme &&
+					prevCache.hovered === hovered &&
+					prevCache.copied === copied &&
+					prevCache.configVersion === configVersion
+				) {
+					self.__conartiCopyHit = prevCache.copyHit;
+					self.__conartiPillHits = prevCache.pillHits;
+					return prevCache.lines;
+				}
+
+				const effectiveTs = self.timestamp ?? resolveFallbackTimestampFromBranch(self);
+				const formattedTime = formatTurnTime(effectiveTs);
+				const rendered = renderUserPromptCardLines(syntheticRaw, width, theme, {
+					formattedTime,
+					hovered,
+					copied,
+					showCopyBadge: true,
+					surface: "transcript",
+					messageId: self.messageId !== undefined ? String(self.messageId) : undefined,
+					timestamp: effectiveTs,
+				});
+				self.__conartiCopyHit = rendered.copyHit;
+				self.__conartiPillHits = rendered.pillHits;
+				const out = rendered.lines;
+				if (out.length > 0) {
+					out[0] = OSC133_ZONE_START + out[0];
+					out[out.length - 1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + out[out.length - 1];
+				}
+				self.__conartiRenderCache = {
+					width,
+					syntheticRaw,
+					theme,
+					hovered,
+					copied,
+					configVersion,
+					lines: out,
+					copyHit: rendered.copyHit,
+					pillHits: rendered.pillHits,
+				};
+				return out;
+			},
+		);
+
+		hookMethod(
+			skillProto,
+			"handleMouse",
+			"transcript.skillInvocationMouse",
+			(self, args) => {
+				const sb = self?.skillBlock;
+				if (!sb?.name || sb.userMessage) return undefined;
+				const event = args[0] as TuiMouseEvent;
+
+				if (event.type === "move") {
+					claimHover(self, () => {
+						if (self.__conartiHovered) {
+							self.__conartiHovered = false;
+							requestRender();
+						}
+					});
+					if (!self.__conartiHovered) {
+						self.__conartiHovered = true;
+						return { handled: true, render: true };
+					}
+					return undefined;
+				}
+
+				const copyHit = self.__conartiCopyHit as PromptCardHitBox | undefined;
+				const pillHits = (self.__conartiPillHits as readonly PromptPillHitTarget[] | undefined) ?? [];
+				const matchedCopy =
+					copyHit && event.y === copyHit.y && event.x >= copyHit.xStart && event.x <= copyHit.xEnd;
+				const matchedPill = pillHits.find(
+					(hit) => event.y === hit.y && event.x >= hit.xStart && event.x < hit.xEnd,
+				);
+
+				if (event.type === "press" && event.button === "left" && (matchedCopy || matchedPill)) {
+					return { handled: true, render: false };
+				}
+
+				if (event.type === "click" && event.button === "left") {
+					if (matchedCopy) {
+						copyToClipboard(`/skill:${String(sb.name).trim()}`);
+						self.__conartiCopied = true;
+						requestRender();
+						userPromptCopyTimers.arm(self, (target) => {
+							target.__conartiCopied = false;
+							requestRender();
+						});
+						return { handled: true, render: true };
+					}
+					if (matchedPill) {
+						matchedPill.onClick?.(event.screenX, event.screenY);
+						return { handled: true, render: true };
+					}
+				}
+				return undefined;
+			},
+		);
+	}
+
+	const modeProto = (InteractiveMode as unknown as { prototype?: object } | undefined)?.prototype;
+	if (modeProto) {
+		hookMethod(
+			modeProto,
+			"showSelector",
+			"transcript.cleanSelectorSkillAndChipPreviews",
+			(self, args, original) => {
+				const [create] = args as [(done: () => void) => { component: any; focus: any; dispose?: () => void }];
+				const wrappedCreate = (done: () => void) => {
+					const created = create(done);
+					const comp = created?.component;
+					const cwd = self?.sessionManager?.getCwd?.() ?? getActiveHostRuntime()?.ctx.cwd ?? process.cwd();
+					const entries = self?.sessionManager?.getEntries?.() ?? [];
+
+					if (comp instanceof UserMessageSelectorComponent) {
+						const msgList = (comp.getMessageList?.() ?? (comp as any).messageList) as unknown as
+							| { messages?: Array<{ id?: unknown; text?: unknown }> }
+							| undefined;
+						if (Array.isArray(msgList?.messages)) {
+							for (const item of msgList.messages) {
+								if (item && typeof item.text === "string") {
+									item.text = reconstructTurnPromptText(item.text, {
+										messageId: item.id !== undefined ? String(item.id) : undefined,
+										entries,
+										cwd,
+									});
+								}
+							}
+						}
+					} else if (comp instanceof TreeSelectorComponent) {
+						const treeList = (comp as any).treeList;
+						if (treeList && typeof treeList.getEntryDisplayText === "function") {
+							const origDisplay = treeList.getEntryDisplayText.bind(treeList);
+							treeList.getEntryDisplayText = (node: any, isSelected: boolean) => {
+								const entry = node?.entry;
+								const theme = getActiveGlobalTheme();
+								if (entry?.type === "message" && entry.message?.role === "user") {
+									const raw = typeof treeList.extractFullContent === "function"
+										? String(treeList.extractFullContent(entry.message.content) ?? "")
+										: "";
+									if (raw) {
+										const clean = reconstructTurnPromptText(raw, {
+											timestamp: entry.message?.timestamp ?? entry.timestamp,
+											messageId: entry.id !== undefined ? String(entry.id) : undefined,
+											entries,
+											cwd,
+										}).replace(/[\n\t]+/g, " ").trim();
+										const row = theme.fg("accent", "user: ") + clean;
+										return isSelected ? theme.bold(row) : row;
+									}
+								} else if (entry?.type === "custom_message" && entry.customType === "skill") {
+									const raw = typeof treeList.extractFullContent === "function"
+										? String(treeList.extractFullContent(entry.content) ?? "")
+										: "";
+									const extracted = extractSkillInvocations(raw, { cwd });
+									if (extracted.skills.length > 0) {
+										const row = theme.fg("accent", "user: ") + extracted.previewText.replace(/[\n\t]+/g, " ").trim();
+										return isSelected ? theme.bold(row) : row;
+									}
+								}
+								return origDisplay(node, isSelected);
+							};
+						}
+						if (treeList && typeof treeList.getEntryCopyText === "function") {
+							const origCopy = treeList.getEntryCopyText.bind(treeList);
+							treeList.getEntryCopyText = (node: any) => {
+								const text = origCopy(node);
+								if (typeof text === "string" && text.includes("<skill")) {
+									const extracted = extractSkillInvocations(text, { cwd });
+									if (extracted.skills.length > 0) return extracted.cleanCopyText;
+								}
+								return text;
+							};
+						}
+					} else if (comp instanceof SessionSelectorComponent) {
+						const sessionList = (comp as any).sessionList;
+						if (sessionList && typeof sessionList.setSessions === "function") {
+							const sanitizeList = (sessions: any[]) => {
+								if (!Array.isArray(sessions)) return;
+								for (const s of sessions) {
+									if (s && !s.name && typeof s.firstMessage === "string" && (s.firstMessage.includes("<skill") || s.firstMessage.includes("[Image #"))) {
+										s.firstMessage = reconstructTurnPromptText(s.firstMessage, { cwd });
+									}
+								}
+							};
+							sanitizeList(sessionList.sessions);
+							const origSetSessions = sessionList.setSessions.bind(sessionList);
+							sessionList.setSessions = (sessions: any[], showCwd: boolean) => {
+								sanitizeList(sessions);
+								return origSetSessions(sessions, showCwd);
+							};
+						}
+					}
+
+					return created;
+				};
+				return original.call(self, wrappedCreate);
+			},
+		);
+	}
 }

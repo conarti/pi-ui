@@ -152,6 +152,20 @@ describe("Prompt Chip pure registry & paste threshold seams", () => {
 		expect(fullTenRegistry.resolveChip("image", 1)?.id).toBe(tenChips[0]!.entry.id);
 	});
 
+	it.each(["current", "legacy"])("replays a full multiline quote from a %s submission", (format) => {
+		const registry = new PromptChipRegistry();
+		const text = `First line\n\n${"long quoted body ".repeat(280).trimEnd()}\nLast line`;
+		const quote = registry.registerQuote(text);
+		const sent = registry.expandDraftForSubmit(`Explain ${quote.token} in context`);
+		const record = sent.record!;
+		const chips = record.chips.map((chip) => format === "legacy" && chip.kind === "quote"
+			? { ...chip, previewText: chip.previewText.slice(0, 4000) }
+			: chip);
+		const reopened = new PromptChipRegistry();
+		reopened.restorePersistedEntries([{ type: "custom", customType: "conarti-prompt-chips", data: { ...record, chips } }]);
+		expect(reopened.reconstructSubmittedPrompt(sent.text).chips).toMatchObject([{ kind: "quote", previewText: text }]);
+	});
+
 	it("expands image, paste, and quote chips on submit (even after submitValue clears draft first), persists/restores steer+followUp records, and reconstructs fallback [Image #N: path] markers", () => {
 		const registry = new PromptChipRegistry();
 		const img = registry.registerImage({

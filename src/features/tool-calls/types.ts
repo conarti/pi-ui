@@ -1,7 +1,16 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { TOOL_DENSITY_PRESETS, type ToolDensityPreset } from "../../shared/pi-ui-config.ts";
 
 export const SUPPORTED_TOOLS = ["read", "write", "edit", "bash", "powershell", "grep", "find", "ls"] as const;
 export const SUPPORTED_TOOL_SET = new Set<string>(SUPPORTED_TOOLS);
+export const CORE_RENDERER_TOOLS = new Set<string>([
+	"read",
+	"edit",
+	"write",
+	"bash",
+	"powershell",
+	"codemode",
+]);
 
 export type CompactToolName = (typeof SUPPORTED_TOOLS)[number];
 export type ShellToolName = "bash" | "powershell";
@@ -10,9 +19,19 @@ export type BuiltInDefinition = ToolDefinition<any, any, any>;
 
 export const DISPLAY_MODES = ["normal", "silent"] as const;
 export type DisplayMode = (typeof DISPLAY_MODES)[number];
-export const TOOL_DENSITIES = ["detailed", "diff-focus", "compact"] as const;
-export type ToolDensity = (typeof TOOL_DENSITIES)[number];
-export const DISPLAY_STYLES = ["density", "detailed", "diff-focus", "compact", "claude", "codex", "off"] as const;
+export const TOOL_DENSITIES = TOOL_DENSITY_PRESETS;
+export type ToolDensity = ToolDensityPreset;
+export const DISPLAY_STYLES = [
+	"density",
+	"balanced",
+	"compact",
+	"grouped",
+	"diff-focus",
+	"detailed",
+	"classic-rows",
+	"exploration-tail",
+	"off",
+] as const;
 export type DisplayStyle = (typeof DISPLAY_STYLES)[number];
 
 export interface CustomToolsConfig {
@@ -62,11 +81,11 @@ export interface RowState {
 	lastResultDurationMs?: number;
 	lastResultOutputPad?: number;
 	lastResultExpandKey?: string;
-	/** What a Codex row's head reads from its result: a command's exit code, an edit's counts. */
-	codex?: {
+	/** Данные результата, которые нужны заголовку строки. */
+	tail?: {
 		exitCode?: number;
 		changes?: { added: number; removed: number };
-		/** Whether the row draws opened at a width: Codex opens only a call whose preview leaves something out. */
+		/** Полный предпросмотр не требует раскрытия. */
 		opens?: (width: number) => boolean;
 	};
 	density?: {

@@ -1,5 +1,6 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
+	sliceByColumn,
 	stripTerminalSequences,
 	truncateToWidth,
 	TuiAltScreen,
@@ -14,8 +15,11 @@ import {
 } from "@earendil-works/pi-tui";
 import {
 	fgRgb,
+	getThemeSurfacePalette,
 	isLightTheme,
-	paintSurfaceRow,
+	paintThemeSurfaceRow,
+	blueBgRgb,
+	themeFgRgb,
 	type RgbTuple,
 } from "../../shared/ansi.ts";
 import {
@@ -29,22 +33,69 @@ import {
 	registerTransientHoverDismisser,
 	unwrapHostTui,
 } from "../../shared/host-runtime.ts";
+import { t } from "../../shared/i18n.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
-import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
+import { loadPiUiUserConfig } from "../../shared/pi-ui-config.ts";
 import {
-	computeSelectionQuotePopupAnchor,
-	normalizeQuoteText,
-} from "./quote-model.ts";
+	claimHover,
+	copyToClipboard,
+	hookMethod,
+} from "../../shared/runtime-hooks.ts";
+import {
+	extractCleanSelectionText,
+	type SelectedTranscriptLine,
+} from "../../shared/selection-copy.ts";
+import { computeSelectionQuotePopupAnchor } from "./quote-model.ts";
 
-export const QUOTE_SELECTION_POPUP_LABEL = "╭ ❝ Цитировать ╮";
-export const QUOTE_SELECTION_POPUP_WIDTH = visibleWidth(QUOTE_SELECTION_POPUP_LABEL);
+export const QUOTE_SELECTION_POPUP_LABEL = t("quotes.selectionPopup.label");
+export const QUOTE_SELECTION_POPUP_WIDTH = visibleWidth(` ${QUOTE_SELECTION_POPUP_LABEL} `);
 export const QUOTE_SELECTION_POPUP_HEIGHT = 1;
+
+type SelectionPopupAction = "copy" | "quote";
+
+interface ActionZone {
+	readonly action: SelectionPopupAction;
+	readonly xStart: number;
+	readonly xEnd: number;
+}
+
+function getManualCopyLabel(): string {
+	return `[${t("quotes.selectionPopup.copy")}]`;
+}
+
+function getQuoteActionLabel(): string {
+	return `[${t("quotes.selectionPopup.quoteAction")}]`;
+}
+
+function getAutoCopiedPrefix(): string {
+	return `${t("quotes.selectionPopup.copied")} · `;
+}
+
+export function computeSelectionPopupWidth(
+	copyOnSelectMode: boolean,
+	copyOnlyMode = false,
+): number {
+	if (copyOnlyMode) {
+		return copyOnSelectMode
+			? visibleWidth(` ${t("quotes.selectionPopup.copied")} `)
+			: visibleWidth(` ${getManualCopyLabel()} `);
+	}
+	const quoteLabel = getQuoteActionLabel();
+	if (copyOnSelectMode) {
+		return visibleWidth(` ${getAutoCopiedPrefix()}${quoteLabel} `);
+	}
+	return visibleWidth(` ${getManualCopyLabel()}  ${quoteLabel} `);
+}
 
 export class QuoteSelectionPopup implements Component {
 	selectedTextSnapshot = "";
-	hovered = false;
-	private pressed = false;
+	copyOnSelectMode = false;
+	copyOnlyMode = false;
+	hoveredAction: SelectionPopupAction | null = null;
+	private pressedAction: SelectionPopupAction | null = null;
 	private triggeredInGesture = false;
+	private zones: readonly ActionZone[] = [];
+	onCopy?: (selectedText: string) => void;
 	onActivate?: (selectedText: string) => void;
 	onDismiss?: () => void;
 
@@ -56,28 +107,49 @@ export class QuoteSelectionPopup implements Component {
 	invalidate(): void {}
 
 	resetGesture(): void {
-		this.hovered = false;
-		this.pressed = false;
+		this.hoveredAction = null;
+		this.pressedAction = null;
 		this.triggeredInGesture = false;
+	}
+
+	private hitAction(x: number, y: number): SelectionPopupAction | null {
+		if (y !== 0) return null;
+		for (const zone of this.zones) {
+			if (x >= zone.xStart && x < zone.xEnd) {
+				return zone.action;
+			}
+		}
+		return null;
+	}
+
+	private triggerAction(action: SelectionPopupAction): void {
+		if (action === "copy") {
+			this.onCopy?.(this.selectedTextSnapshot);
+		} else {
+			this.onActivate?.(this.selectedTextSnapshot);
+		}
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		if (event.type === "move") {
+			const nextAction = this.hitAction(event.x, event.y);
 			claimHover(this, () => {
-				if (this.hovered) {
-					this.hovered = false;
+				if (this.hoveredAction !== null) {
+					this.hoveredAction = null;
 					this.requestRender();
 				}
 			});
-			if (!this.hovered) {
-				this.hovered = true;
+			if (nextAction !== this.hoveredAction) {
+				this.hoveredAction = nextAction;
 				return { handled: true, render: true };
 			}
 			return { handled: true, render: false };
 		}
 
 		if (event.type === "press" && event.button === "left") {
-			this.pressed = true;
+			const hit = this.hitAction(event.x, event.y);
+			this.pressedAction =
+				hit ?? (this.copyOnlyMode ? "copy" : this.copyOnSelectMode ? "quote" : null);
 			this.triggeredInGesture = false;
 			return { handled: true, render: false };
 		}
@@ -88,11 +160,12 @@ export class QuoteSelectionPopup implements Component {
 				event.x < event.width &&
 				event.y >= 0 &&
 				event.y < event.height;
-			const wasPressed = this.pressed;
-			this.pressed = false;
+			const wasPressed = this.pressedAction;
+			this.pressedAction = null;
 			if (wasPressed && inBounds && !this.triggeredInGesture) {
+				const releaseHit = this.hitAction(event.x, event.y) ?? wasPressed;
 				this.triggeredInGesture = true;
-				this.onActivate?.(this.selectedTextSnapshot);
+				this.triggerAction(releaseHit);
 				return { handled: true, render: true };
 			}
 			if (wasPressed && !inBounds) {
@@ -103,10 +176,11 @@ export class QuoteSelectionPopup implements Component {
 		}
 
 		if (event.type === "click" && event.button === "left") {
-			this.pressed = false;
-			if (!this.triggeredInGesture) {
+			const hit = this.hitAction(event.x, event.y) ?? this.pressedAction;
+			this.pressedAction = null;
+			if (hit && !this.triggeredInGesture) {
 				this.triggeredInGesture = true;
-				this.onActivate?.(this.selectedTextSnapshot);
+				this.triggerAction(hit);
 			}
 			return { handled: true, render: true };
 		}
@@ -117,42 +191,76 @@ export class QuoteSelectionPopup implements Component {
 	render(width: number): string[] {
 		const theme = this.getTheme();
 		const light = isLightTheme(theme);
-		const safeWidth = Math.max(4, Math.min(QUOTE_SELECTION_POPUP_WIDTH, width));
+		const palette = getThemeSurfacePalette(theme);
+		const targetWidth = computeSelectionPopupWidth(this.copyOnSelectMode, this.copyOnlyMode);
+		const safeWidth = Math.max(4, Math.min(targetWidth, width));
+		const bg: RgbTuple = palette.popupSurfaceBg;
 
-		const bg: RgbTuple = light
-			? this.hovered
-				? [208, 227, 252]
-				: [226, 238, 252]
-			: this.hovered
-				? [42, 64, 92]
-				: [30, 44, 62];
-		const borderRgb: RgbTuple = light
-			? this.hovered
-				? [37, 99, 235]
-				: [59, 130, 246]
-			: this.hovered
-				? [125, 207, 255]
-				: [92, 138, 198];
-		const quoteRgb: RgbTuple = light
-			? this.hovered
-				? [30, 64, 175]
-				: [29, 78, 216]
-			: this.hovered
-				? [156, 222, 255]
-				: [125, 207, 255];
-		const textRgb: RgbTuple = light
-			? [15, 23, 42]
-			: this.hovered
-				? [240, 248, 255]
-				: [226, 236, 248];
+		const quoteLabel = getQuoteActionLabel();
+		const copyLabel = getManualCopyLabel();
+		const copiedPrefix = getAutoCopiedPrefix();
 
-		if (safeWidth < QUOTE_SELECTION_POPUP_WIDTH) {
-			const clipped = truncateToWidth(QUOTE_SELECTION_POPUP_LABEL, safeWidth, "…");
-			return [paintSurfaceRow(fgRgb(textRgb, clipped), safeWidth, bg[0], bg[1], bg[2])];
+		const paintButton = (label: string, hovered: boolean): string => {
+			if (hovered) {
+				return blueBgRgb(
+					theme,
+					palette.selectedRowBg,
+					themeFgRgb(theme, light ? palette.accent : palette.accentBright, label),
+				);
+			}
+			return themeFgRgb(theme, light ? [15, 23, 42] : [226, 236, 248], label);
+		};
+
+		if (this.copyOnlyMode) {
+			if (this.copyOnSelectMode) {
+				this.zones = [];
+				const copiedOnly = ` ${themeFgRgb(theme, palette.success, t("quotes.selectionPopup.copied"))} `;
+				return [paintThemeSurfaceRow(theme, copiedOnly, safeWidth, bg)];
+			}
+			const copyW = visibleWidth(copyLabel);
+			this.zones = [{ action: "copy", xStart: 1, xEnd: Math.min(safeWidth, 1 + copyW) }];
+			const styledOnlyCopy = paintButton(copyLabel, this.hoveredAction === "copy");
+			return [paintThemeSurfaceRow(theme, ` ${styledOnlyCopy} `, safeWidth, bg)];
 		}
 
-		const styled = `${fgRgb(borderRgb, "╭")} ${fgRgb(quoteRgb, "❝")} ${fgRgb(textRgb, "Цитировать")} ${fgRgb(borderRgb, "╮")}`;
-		return [paintSurfaceRow(styled, safeWidth, bg[0], bg[1], bg[2])];
+		if (this.copyOnSelectMode) {
+			const plain = ` ${copiedPrefix}${quoteLabel} `;
+			if (safeWidth < visibleWidth(plain)) {
+				this.zones = [{ action: "quote", xStart: 0, xEnd: safeWidth }];
+				const clipped = truncateToWidth(plain.trim(), safeWidth, "…");
+				return [paintThemeSurfaceRow(theme, fgRgb(light ? [15, 23, 42] : [226, 236, 248], clipped), safeWidth, bg)];
+			}
+			const prefixW = visibleWidth(copiedPrefix);
+			const quoteW = visibleWidth(quoteLabel);
+			this.zones = [{ action: "quote", xStart: 1 + prefixW, xEnd: 1 + prefixW + quoteW }];
+			const styledCopied = `${themeFgRgb(theme, palette.success, t("quotes.selectionPopup.copied"))}${theme.fg("dim", " · ")}`;
+			const styledQuote = paintButton(quoteLabel, this.hoveredAction === "quote");
+			return [paintThemeSurfaceRow(theme, ` ${styledCopied}${styledQuote} `, safeWidth, bg)];
+		}
+
+		const plain = ` ${copyLabel}  ${quoteLabel} `;
+		if (safeWidth < visibleWidth(plain)) {
+			const clipped = truncateToWidth(plain.trim(), safeWidth, "…");
+			const copyW = Math.min(safeWidth, visibleWidth(copyLabel));
+			this.zones = [
+				{ action: "copy", xStart: 0, xEnd: copyW },
+				{ action: "quote", xStart: copyW, xEnd: safeWidth },
+			];
+			return [paintThemeSurfaceRow(theme, fgRgb(light ? [15, 23, 42] : [226, 236, 248], clipped), safeWidth, bg)];
+		}
+
+		const copyW = visibleWidth(copyLabel);
+		const quoteW = visibleWidth(quoteLabel);
+		const copyStart = 1;
+		const quoteStart = copyStart + copyW + 2;
+		this.zones = [
+			{ action: "copy", xStart: copyStart, xEnd: copyStart + copyW },
+			{ action: "quote", xStart: quoteStart, xEnd: quoteStart + quoteW },
+		];
+
+		const styledCopy = paintButton(copyLabel, this.hoveredAction === "copy");
+		const styledQuote = paintButton(quoteLabel, this.hoveredAction === "quote");
+		return [paintThemeSurfaceRow(theme, ` ${styledCopy}  ${styledQuote} `, safeWidth, bg)];
 	}
 }
 
@@ -165,6 +273,8 @@ export interface SelectionPopupAnchorContext {
 	readonly viewportBottom: number;
 	readonly stickyBottom?: number;
 	readonly rightReservedCols?: number;
+	readonly copyOnSelect?: boolean;
+	readonly copyOnly?: boolean;
 }
 
 export class SelectionQuoteOverlayController {
@@ -179,6 +289,7 @@ export class SelectionQuoteOverlayController {
 	constructor(
 		private readonly getTheme: () => Theme,
 		private readonly onQuoteConfirmed: (selectedText: string, tui: TUI) => void,
+		private readonly onCopyConfirmed?: (selectedText: string, tui: TUI) => void,
 	) {}
 
 	get isShowing(): boolean {
@@ -186,8 +297,12 @@ export class SelectionQuoteOverlayController {
 			this.visible &&
 			Boolean(this.handle) &&
 			Boolean(this.activeTui) &&
-			!hasBlockingModalOverlay(this.activeTui!)
+			(!hasBlockingModalOverlay(this.activeTui!) || Boolean(this.popup?.copyOnlyMode))
 		);
+	}
+
+	get isCopyOnly(): boolean {
+		return Boolean(this.popup?.copyOnlyMode);
 	}
 
 	get snapshottedText(): string {
@@ -211,8 +326,14 @@ export class SelectionQuoteOverlayController {
 		selectedText: string,
 		anchorCtx: SelectionPopupAnchorContext,
 	): void {
-		const cleaned = normalizeQuoteText(selectedText);
-		if (!tui || !cleaned || hasBlockingModalOverlay(tui)) {
+		const copyOnly = Boolean(anchorCtx.copyOnly);
+		const copyOnSelectMode = Boolean(anchorCtx.copyOnSelect);
+		if (
+			!tui ||
+			!selectedText.trim() ||
+			(hasBlockingModalOverlay(tui) && !copyOnly) ||
+			(copyOnly && copyOnSelectMode)
+		) {
 			this.hide();
 			return;
 		}
@@ -226,6 +347,13 @@ export class SelectionQuoteOverlayController {
 
 		if (!this.popup) {
 			this.popup = new QuoteSelectionPopup(this.getTheme, () => this.activeTui?.requestRender());
+			this.popup.onCopy = (text) => {
+				const targetTui = this.activeTui;
+				this.hide();
+				if (targetTui && text) {
+					this.onCopyConfirmed?.(text, targetTui);
+				}
+			};
 			this.popup.onActivate = (text) => {
 				const targetTui = this.activeTui;
 				this.hide();
@@ -239,10 +367,12 @@ export class SelectionQuoteOverlayController {
 		}
 
 		this.popup.resetGesture();
-		this.popup.selectedTextSnapshot = cleaned;
+		this.popup.copyOnSelectMode = copyOnSelectMode;
+		this.popup.copyOnlyMode = copyOnly;
+		this.popup.selectedTextSnapshot = selectedText;
 
 		const termCols = Math.max(8, tui.terminal?.columns ?? 80);
-		const width = Math.min(QUOTE_SELECTION_POPUP_WIDTH, termCols);
+		const width = Math.min(computeSelectionPopupWidth(copyOnSelectMode, copyOnly), termCols);
 		const height = QUOTE_SELECTION_POPUP_HEIGHT;
 
 		const { col, row } = computeSelectionQuotePopupAnchor({
@@ -271,7 +401,7 @@ export class SelectionQuoteOverlayController {
 				visible: () =>
 					this.visible &&
 					Boolean(this.activeTui) &&
-					!hasBlockingModalOverlay(this.activeTui!),
+					(!hasBlockingModalOverlay(this.activeTui!) || Boolean(this.popup?.copyOnlyMode)),
 			};
 		} else {
 			this.options.width = width;
@@ -279,11 +409,16 @@ export class SelectionQuoteOverlayController {
 			this.options.row = row;
 		}
 
-		if (!this.handle) {
-			this.handle = tui.showOverlay(this.popup, this.options);
-		} else {
-			tui.requestRender();
+		/* Перемонтируем оверлей на вершину стека, чтобы [Copy] рендерился поверх недавно открытых модалок */
+		if (this.handle) {
+			try {
+				this.handle.hide();
+			} catch {
+				/* Уже скрыто хостом */
+			}
+			this.handle = undefined;
 		}
+		this.handle = tui.showOverlay(this.popup, this.options);
 	}
 
 	hide(): void {
@@ -349,18 +484,23 @@ function pointToScreenCoords(
 	return { col: point.col, row: point.row };
 }
 
-/* TuiBase.hasOverlay учитывает nonCapturing Hover Popup, поэтому локально подменяем проверку на блокирующие модалки */
-function withNonCapturingOverlaysTransparent<T>(self: any, fn: () => T): T {
+/**
+ * Временно делает `nonCapturing`-попапы невидимыми для `this.hasOverlay()` внутри
+ * методов выделения и скроллбара `TuiAltScreen`, чтобы открытый Hover Popup не
+ * ломал выделение текста и автоскролл транскрипта.
+ */
+function withNonCapturingOverlaysTransparent<T>(self: any, run: () => T): T {
 	const hadOwn = Object.prototype.hasOwnProperty.call(self, "hasOverlay");
 	const prevDesc = hadOwn ? Object.getOwnPropertyDescriptor(self, "hasOverlay") : undefined;
 	Object.defineProperty(self, "hasOverlay", {
 		configurable: true,
+		writable: true,
 		value: () => hasBlockingModalOverlay(self),
 	});
 	try {
-		return fn();
+		return run();
 	} finally {
-		if (hadOwn && prevDesc) {
+		if (prevDesc) {
 			Object.defineProperty(self, "hasOverlay", prevDesc);
 		} else {
 			delete self.hasOverlay;
@@ -383,10 +523,75 @@ export function installSelectionQuoteRuntimeHooks(
 	if (altProto) {
 		hookMethod(
 			altProto,
+			"getActiveSelectionText",
+			"quotes.cleanSelectionText",
+			(self, args, original) => {
+				const runtime = getActiveHostRuntime();
+				if (!runtime || !runtime.isFullscreen || !isSameHostTui(runtime.tui, self)) {
+					return original.apply(self, args);
+				}
+				const selection = self.getSelectionBounds?.() as
+					| { start?: SelectionPointLike; end?: SelectionPointLike }
+					| undefined;
+				if (!selection?.start || !selection.end || !runtime.scroll) {
+					return original.apply(self, args);
+				}
+				if (selection.start.scrollView !== runtime.scroll) {
+					return original.apply(self, args);
+				}
+				const scrollBox = findScrollViewLayoutBox(self.currentLayout?.root, runtime.scroll);
+				const sourceLines = scrollBox?.scrollContentLines;
+				if (!sourceLines) {
+					return original.apply(self, args);
+				}
+				const selectedLines: SelectedTranscriptLine[] = [];
+				for (let row = selection.start.row; row <= selection.end.row; row += 1) {
+					const fullLine = sourceLines[row] ?? "";
+					const columns = self.getSelectionColumns(fullLine, row, selection) as {
+						start: number;
+						end: number;
+					};
+					const span = Math.max(0, columns.end - columns.start);
+					selectedLines.push({
+						fullLine,
+						selectedAnsi: sliceByColumn(fullLine, columns.start, span, true),
+						startCol: columns.start,
+						endCol: columns.end,
+						contentWidth: scrollBox.rect.width,
+					});
+				}
+				const cleaned = extractCleanSelectionText(selectedLines, { theme: runtime.theme() });
+				return cleaned.length > 0 ? cleaned : undefined;
+			},
+		);
+
+		hookMethod(
+			altProto,
+			"copySelectionToClipboard",
+			"quotes.cleanCopySelectionToClipboard",
+			(self, args, original) => {
+				const runtime = getActiveHostRuntime();
+				if (!runtime || !runtime.isFullscreen || !isSameHostTui(runtime.tui, self)) {
+					return original.apply(self, args);
+				}
+				const text = self.getActiveSelectionText?.() as string | undefined;
+				if (!text) return Promise.resolve(false);
+				copyToClipboard(text);
+				return Promise.resolve(true);
+			},
+		);
+
+		hookMethod(
+			altProto,
 			"handleSelectionMouseEvent",
 			"quotes.allowSelectionWithHoverOverlays",
-			(self, args, original) =>
-				withNonCapturingOverlaysTransparent(self, () => original.apply(self, args)),
+			(self, args, original) => {
+				const runtime = getActiveHostRuntime();
+				if (runtime && isSameHostTui(runtime.tui, self)) {
+					self.copyOnSelect = loadPiUiUserConfig().copyOnSelect;
+				}
+				return withNonCapturingOverlaysTransparent(self, () => original.apply(self, args));
+			},
 		);
 
 		hookMethod(
@@ -418,40 +623,89 @@ export function installSelectionQuoteRuntimeHooks(
 
 				const isMotion = (raw.button & 32) !== 0;
 				const isPress = !raw.release && !isMotion;
-				const isLeftRelease = raw.release && !isMotion && (raw.button & 3) === 0;
+				const isLeftButton = (raw.button & 3) === 0;
+				const isLeftDrag = !raw.release && isMotion && isLeftButton;
+				const isLeftRelease = raw.release && !isMotion && isLeftButton;
 
 				if (isPress && controller.isShowing && !controller.containsScreenPoint(raw.x, raw.y)) {
 					controller.hide();
 				}
 
+				/* Переводим зажатие на кликабельной строке (тул, группа, мысль, метрики, ссылка) в текстовое выделение при начале перетаскивания мышью */
+				if (
+					isLeftDrag &&
+					!self.mouseCapture &&
+					self.mousePressTarget &&
+					!self.selectionPressActive &&
+					self.mousePressPoint &&
+					(raw.x !== self.mousePressPoint.x || raw.y !== self.mousePressPoint.y) &&
+					!controller.containsScreenPoint(self.mousePressPoint.x, self.mousePressPoint.y)
+				) {
+					const startPt = { x: Number(self.mousePressPoint.x), y: Number(self.mousePressPoint.y) };
+					self.clearComponentMouseGesture?.();
+					self.handleSelectionMouseEvent?.({
+						button: 0,
+						x: startPt.x,
+						y: startPt.y,
+						release: false,
+					});
+				}
+
 				const hadSelectionPress = Boolean(self.selectionPressActive);
-				const res = original.apply(self, args);
+				const res =
+					hadSelectionPress &&
+					hasBlockingModalOverlay(self) &&
+					(isLeftDrag || (isLeftRelease && Boolean(self.selectionDragged))) &&
+					!self.mouseCapture &&
+					!self.scrollbarDrag
+						? self.handleSelectionMouseEvent?.(raw)
+						: original.apply(self, args);
 
 				if (isLeftRelease && hadSelectionPress) {
-					if (hasBlockingModalOverlay(self)) {
-						controller.hide();
-						return res;
-					}
-
 					const bounds = self.getSelectionBounds?.() as
 						| { start?: SelectionPointLike; end?: SelectionPointLike }
 						| undefined;
 					const rawSelected = self.getActiveSelectionText?.() as string | undefined;
-					const cleaned = typeof rawSelected === "string" ? normalizeQuoteText(rawSelected) : "";
+					const cleaned = typeof rawSelected === "string" ? rawSelected : "";
 
-					const scrollBox = runtime.scroll
+					const primaryScrollBox = runtime.scroll
 						? findScrollViewLayoutBox(self.currentLayout?.root, runtime.scroll)
 						: undefined;
-					const inTranscript = runtime.scroll
-						? bounds?.start?.scrollView === runtime.scroll
-						: !scrollBox || raw.y < scrollBox.rect.y + scrollBox.rect.height;
+					const inModal = hasBlockingModalOverlay(self);
+					const activeScrollView = bounds?.start?.scrollView;
+					const inPrimaryTranscript =
+						!inModal && Boolean(runtime.scroll && activeScrollView === runtime.scroll);
+					const startedOnOverlay =
+						bounds?.start !== undefined &&
+						isCoveredByRenderedOverlay(self, bounds.start.col, bounds.start.row);
+					/* Отсекаем случайные протяжки из нижнего дока Composer сквозь границу в ленту чата */
+					const crossedDockIntoTranscript =
+						!inPrimaryTranscript &&
+						!inModal &&
+						!startedOnOverlay &&
+						primaryScrollBox !== undefined &&
+						bounds?.start !== undefined &&
+						bounds?.end !== undefined &&
+						((bounds.start.row < primaryScrollBox.rect.y + primaryScrollBox.rect.height) !==
+							(bounds.end.row < primaryScrollBox.rect.y + primaryScrollBox.rect.height));
+					const inComposerDock =
+						!inPrimaryTranscript &&
+						!inModal &&
+						!startedOnOverlay &&
+						primaryScrollBox !== undefined &&
+						bounds?.start !== undefined &&
+						bounds.start.row >= primaryScrollBox.rect.y + primaryScrollBox.rect.height;
 
-					if (cleaned && bounds && inTranscript) {
+					if (cleaned.trim() && bounds && !crossedDockIntoTranscript) {
+						const activeScrollBox = activeScrollView
+							? findScrollViewLayoutBox(self.currentLayout?.root, activeScrollView)
+							: undefined;
+
 						const focusPt = self.selectionFocus as SelectionPointLike | undefined;
 						const anchorPt = self.selectionAnchor as SelectionPointLike | undefined;
-						const focusCoords = pointToScreenCoords(focusPt, scrollBox, raw.x, raw.y);
+						const focusCoords = pointToScreenCoords(focusPt, activeScrollBox, raw.x, raw.y);
 						const anchorCoords = anchorPt
-							? pointToScreenCoords(anchorPt, scrollBox, raw.x, raw.y)
+							? pointToScreenCoords(anchorPt, activeScrollBox, raw.x, raw.y)
 							: undefined;
 
 						let effectiveFocusCol = focusCoords.col;
@@ -463,35 +717,42 @@ export function installSelectionQuoteRuntimeHooks(
 							const trimmedLineWidth = visibleWidth(
 								stripTerminalSequences(rawSourceLine).trimEnd(),
 							);
-							const lineEndScreenCol = (scrollBox?.rect.x ?? 0) + trimmedLineWidth;
+							const lineOffset = activeScrollBox?.rect.x ?? 0;
+							const lineEndScreenCol = lineOffset + trimmedLineWidth;
 							if (self.selectionGranularity === "line") {
 								effectiveFocusCol =
 									trimmedLineWidth > 0
-										? Math.min(Math.max(raw.x, scrollBox?.rect.x ?? 0), lineEndScreenCol)
+										? Math.min(Math.max(raw.x, lineOffset), lineEndScreenCol)
 										: raw.x;
 							} else if (trimmedLineWidth > 0 && effectiveFocusCol > lineEndScreenCol) {
 								effectiveFocusCol = lineEndScreenCol;
 							}
 						}
 
-						const viewportTop = scrollBox?.rect.y ?? 0;
 						const termRows = Math.max(8, self.terminal?.rows ?? 30);
 						const termCols = Math.max(8, self.terminal?.columns ?? 80);
-						const viewportBottom = scrollBox
-							? scrollBox.rect.y + scrollBox.rect.height
-							: termRows;
+						const viewportTop =
+							inPrimaryTranscript && activeScrollBox ? activeScrollBox.rect.y : 0;
+						const viewportBottom =
+							inPrimaryTranscript && activeScrollBox
+								? activeScrollBox.rect.y + activeScrollBox.rect.height
+								: termRows;
 
 						const topSlot = runtime.viewportSlots?.topSlot as
 							| { lastVisibleHeight?: number }
 							| undefined;
-						const stickyBottom = viewportTop + Math.max(0, topSlot?.lastVisibleHeight ?? 0);
+						const stickyBottom = inPrimaryTranscript
+							? viewportTop + Math.max(0, topSlot?.lastVisibleHeight ?? 0)
+							: 0;
 
-						const railVisible = Boolean(
-							runtime.viewportSlots?.rightRail?.isVisible({
-								width: scrollBox?.rect.width ?? termCols,
-								height: scrollBox?.rect.height ?? termRows,
-							}),
-						);
+						const railVisible =
+							inPrimaryTranscript &&
+							Boolean(
+								runtime.viewportSlots?.rightRail?.isVisible({
+									width: activeScrollBox?.rect.width ?? termCols,
+									height: activeScrollBox?.rect.height ?? termRows,
+								}),
+							);
 
 						controller.show(runtime.tui, cleaned, {
 							focusCol: effectiveFocusCol,
@@ -501,7 +762,9 @@ export function installSelectionQuoteRuntimeHooks(
 							viewportTop,
 							viewportBottom,
 							stickyBottom,
-							rightReservedCols: railVisible ? 3 : 1,
+							rightReservedCols: railVisible ? 2 : 1,
+							copyOnSelect: loadPiUiUserConfig().copyOnSelect,
+							copyOnly: inModal || inComposerDock,
 						});
 						self.requestRender?.();
 					} else {

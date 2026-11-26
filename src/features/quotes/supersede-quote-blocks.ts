@@ -10,14 +10,20 @@ import {
 export { isConartiInternalRegistrationActive, withConartiInternalRegistration };
 
 const QUOTE_BLOCKS_PATH_RE =
-	/(?:^|[/\\]|npm:)pi-quote-blocks(?:$|[/\\])|[/\\]quote-blocks\.[cm]?[jt]s$/i;
+	/(?:^|[/\\]|npm:)pi-quote-blocks(?:$|[/\\]|\.[cm]?[jt]s$)|[/\\]quote-blocks\.[cm]?[jt]s$/i;
 const QUOTE_BLOCKS_WIDGET_KEY = "quote-blocks";
 const QUOTE_BLOCKS_STORE_SYMBOL = Symbol.for("pi.quoteBlocks.store");
 const GUARDED_APIS = new WeakSet<object>();
 const GUARDED_UIS = new WeakSet<object>();
 
 export function isSupersededQuoteBlocksExtension(ext: unknown): boolean {
-	return matchesExtensionSourcePath(ext, QUOTE_BLOCKS_PATH_RE);
+	if (!matchesExtensionSourcePath(ext, QUOTE_BLOCKS_PATH_RE)) return false;
+	const { commands, shortcuts } = ext as {
+		commands?: Map<string, { description?: string }>;
+		shortcuts?: Map<string, { description?: string }>;
+	};
+	return [...(commands ?? [])].some(([name, command]) => isExternalQuoteBlocksCommand(name, command.description)) &&
+		[...(shortcuts ?? [])].some(([key, shortcut]) => isExternalQuoteBlocksShortcut(key, shortcut.description));
 }
 
 function clearExternalQuoteBlocksSharedStore(): void {

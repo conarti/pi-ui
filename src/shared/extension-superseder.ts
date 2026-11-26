@@ -20,6 +20,8 @@ const RUNNER_METHODS_TO_GUARD = [
 	"bindCore",
 	"setUIContext",
 	"getShortcuts",
+	"getEntryRenderer",
+	"getMessageRenderer",
 	"hasHandlers",
 	"resolveRegisteredCommands",
 	"emit",
@@ -74,23 +76,53 @@ export function matchesExtensionSourcePath(ext: unknown, pathRegex: RegExp): boo
 	return candidates.some((candidate) => typeof candidate === "string" && pathRegex.test(candidate));
 }
 
-function neutralizeRunnerExtensions(runner: unknown): void {
+type SupersededWidgetPredicate = (ext: unknown, key: string) => boolean;
+const SUPERSEDED_WIDGET_PREDICATES_KEY = Symbol.for("conarti.pi-ui.superseded-widget-predicates.v1");
+
+function getWidgetPredicates(): Map<string, SupersededWidgetPredicate> {
+	const globals = globalThis as Record<symbol, Map<string, SupersededWidgetPredicate> | undefined>;
+	return globals[SUPERSEDED_WIDGET_PREDICATES_KEY] ??= new Map();
+}
+
+export function registerSupersededWidgetPredicate(id: string, predicate: SupersededWidgetPredicate): void {
+	getWidgetPredicates().set(id, predicate);
+}
+
+export function isSupersededWidget(ext: unknown, key: string): boolean {
+	for (const predicate of getWidgetPredicates().values()) {
+		if (predicate(ext, key)) return true;
+	}
+	return false;
+}
+
+export function isSupersededExtension(ext: unknown): boolean {
+	if (!ext || typeof ext !== "object") return false;
+	for (const predicate of getPredicatesMap().values()) {
+		if (predicate(ext)) return true;
+	}
+	return false;
+}
+
+export function neutralizeRunnerExtensions(runner: unknown): void {
 	if (!runner || typeof runner !== "object") return;
 	const extensions = (runner as { extensions?: unknown[] }).extensions;
 	if (!Array.isArray(extensions)) return;
-	const predicates = [...getPredicatesMap().values()];
-	if (predicates.length === 0) return;
+	if (getPredicatesMap().size === 0) return;
 
 	for (const ext of extensions) {
-		if (!predicates.some((predicate) => predicate(ext))) continue;
+		if (!isSupersededExtension(ext)) continue;
 		const rec = ext as {
 			shortcuts?: Map<unknown, unknown>;
 			commands?: Map<unknown, unknown>;
 			handlers?: Map<unknown, unknown>;
+			entryRenderers?: Map<unknown, unknown>;
+			messageRenderers?: Map<unknown, unknown>;
 		};
 		rec.shortcuts?.clear?.();
 		rec.commands?.clear?.();
 		rec.handlers?.clear?.();
+		rec.entryRenderers?.clear?.();
+		rec.messageRenderers?.clear?.();
 	}
 }
 

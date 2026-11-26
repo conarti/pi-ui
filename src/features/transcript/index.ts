@@ -1,12 +1,21 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { isKeyRelease, matchesKey } from "@earendil-works/pi-tui";
 import { stopAllAnimations } from "../../shared/animation-scheduler.ts";
 import { clearHoverExcept } from "../../shared/runtime-hooks.ts";
+import { hideSkillPreviewPopup, isSkillPreviewPopupVisible } from "../../shared/skill-tags.ts";
+import { requestRender } from "../../shared/ui-action-bridge.ts";
+import { hideLinkTargetPopup, isLinkTargetPopupVisible } from "./link-target-popup.ts";
 import { clearMarkdownCopyTimers, installMarkdownCardsAndHeadings } from "./markdown-cards.ts";
 import {
 	clearRecordedThinkingTimings,
+	getMeasuredThinkingDurations,
 	installAssistantTranscriptBlocks,
+	noteThinkingTurnStart,
 	observeAssistantThinkingMessage,
+	resetGlobalThinkingExpandState,
+	restoreThinkingDurations,
 	stopThinkingWave,
+	THINKING_DURATION_ENTRY,
 } from "./thinking-block.ts";
 import {
 	clearPendingUserMessageTimestamps,
@@ -20,10 +29,41 @@ export function registerTranscriptFeature(pi: ExtensionAPI): void {
 	installUserPromptCards();
 	installAssistantTranscriptBlocks();
 
-	pi.on("session_start", async (event) => {
+	let unsubscribePopupInput: (() => void) | undefined;
+
+	pi.on("session_start", async (event, ctx) => {
+		unsubscribePopupInput?.();
+		unsubscribePopupInput = undefined;
+		hideSkillPreviewPopup();
+		hideLinkTargetPopup();
 		if (event.reason !== "reload") {
 			clearRecordedThinkingTimings();
+			resetGlobalThinkingExpandState();
 		}
+		if (ctx.mode === "tui" && ctx.hasUI) {
+			restoreThinkingDurations(ctx.sessionManager.getEntries());
+			unsubscribePopupInput = ctx.ui.onTerminalInput((data) => {
+				if (
+					!isKeyRelease(data) &&
+					(data === "\x1b" || matchesKey(data, "escape")) &&
+					(isSkillPreviewPopupVisible() || isLinkTargetPopupVisible())
+				) {
+					hideSkillPreviewPopup();
+					hideLinkTargetPopup();
+					requestRender();
+					return { consume: true };
+				}
+				return undefined;
+			});
+		}
+	});
+
+	pi.on("agent_start", async () => {
+		noteThinkingTurnStart();
+	});
+
+	pi.on("turn_start", async () => {
+		noteThinkingTurnStart();
 	});
 
 	pi.on("message_start", async (event: any) => {
@@ -44,6 +84,12 @@ export function registerTranscriptFeature(pi: ExtensionAPI): void {
 		observeAssistantThinkingMessage(event.message, false);
 	});
 
+	pi.on("turn_end", (event, ctx) => {
+		if (ctx.mode !== "tui" || event.message.role !== "assistant") return;
+		const durations = getMeasuredThinkingDurations(event.message);
+		if (durations) pi.appendEntry(THINKING_DURATION_ENTRY, durations);
+	});
+
 	pi.on("agent_end", async () => {
 		stopThinkingWave();
 		stopAllAnimations();
@@ -55,9 +101,14 @@ export function registerTranscriptFeature(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async () => {
+		unsubscribePopupInput?.();
+		unsubscribePopupInput = undefined;
+		hideSkillPreviewPopup();
+		hideLinkTargetPopup();
 		stopThinkingWave();
 		stopAllAnimations();
 		clearRecordedThinkingTimings();
+		resetGlobalThinkingExpandState();
 		clearPendingUserMessageTimestamps();
 		clearUserPromptCopyTimers();
 		clearMarkdownCopyTimers();

@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -12,6 +12,9 @@ import { hasBlockingModalOverlay } from "../src/shared/modal-card.ts";
 import {
 	createInteractiveHarness,
 	fauxAssistantMessage,
+	fauxText,
+	fauxThinking,
+	fauxToolCall,
 	makeAssistantEntry,
 	makeUserEntry,
 	type InteractiveHarness,
@@ -101,7 +104,7 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 
 		await harness.mouseWheel("up", 40, 8, 8);
 		const midScreen = harness.screen();
-		const stickyBand = [0, 1, 2].map((r) => midScreen.sliceText(r, 0, 119)).join("\n");
+		const stickyBand = [3, 4, 5].map((r) => midScreen.sliceText(r, 0, 120)).join("\n");
 
 		expect(stickyBand).not.toContain("#4/5");
 		expect(stickyBand).toContain("09:15");
@@ -109,25 +112,26 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 		expect(stickyBand).toContain("Inspect compacted");
 		expect(stickyBand).toContain("turn four");
 
+		const headerRows = 3;
 		const geo = getRailGeometry();
 		expect(geo.windowEnd - geo.windowStart).toBe(5);
 
-		const turn4TickRow = geo.ticksY + 3;
-		await harness.mouseMove(117, turn4TickRow);
+		const turn4TickRow = headerRows + geo.ticksY + 3;
+		await harness.mouseMove(119, turn4TickRow);
 
 		const hoverScreen = harness.screen();
 		const hoverText = hoverScreen.text();
-		expect(hoverText).toContain("09:15");
 		expect(hoverText).not.toContain("Реплика");
+		expect(hoverText).not.toContain("Turn #4");
 		expect(hoverText).toContain("Inspect compacted turn four");
 
 		const prevScrollTop = scroll.scrollTop;
-		await harness.mouseClick(117, turn4TickRow);
+		await harness.mouseClick(119, turn4TickRow);
 		expect(scroll.scrollTop).not.toBe(prevScrollTop);
 		expect(scroll.isFollowingEnd).toBe(false);
 
 		const jumpedScreen = harness.screen();
-		expect(jumpedScreen.rowText(1)).toContain("Inspect compacted");
+		expect(jumpedScreen.rowText(4)).toContain("Inspect compacted");
 	});
 
 	it("computes structural Turn offsets without full-document ANSI matching and stays stable across hover, copy badge, OSC markers, and duplicate prompts", async () => {
@@ -153,22 +157,24 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 		const runtime = getActiveHostRuntime()!;
 		const scroll = runtime.scroll!;
 		await harness.mouseWheel("up", 40, 6, 9);
-		expect(harness.screen().sliceText(1, 0, 119)).toContain("10:05");
+		expect(harness.screen().sliceText(4, 0, 120)).toContain("10:05");
 
+		const headerRows = 3;
 		const geoAtTurn2 = getRailGeometry();
-		const tick0Row = geoAtTurn2.ticksY;
-		const tick1Row = geoAtTurn2.ticksY + 1;
+		const tick0Row = headerRows + geoAtTurn2.ticksY;
+		const tick1Row = headerRows + geoAtTurn2.ticksY + 1;
 
-		await harness.mouseClick(117, tick0Row);
+		await harness.mouseClick(119, tick0Row);
 		const turn1StartOffset = scroll.scrollTop;
 		expect(scroll.isFollowingEnd).toBe(false);
 
 		const cardPos = harness.screen().findText("› continue");
 		expect(cardPos).toBeDefined();
 		await harness.mouseMove(cardPos!.col + 3, cardPos!.row);
-		expect(harness.screen().rowText(cardPos!.row - 1)).toContain("Copy");
+		expect(harness.screen().rowText(cardPos!.row - 1).trim()).toBe("");
+		expect(harness.screen().rowText(cardPos!.row)).toContain("Copy");
 
-		await harness.mouseClick(117, tick1Row);
+		await harness.mouseClick(119, tick1Row);
 		const turn2StartOffset = scroll.scrollTop;
 		expect(turn2StartOffset).toBeGreaterThan(turn1StartOffset + 10);
 		expect(scroll.isFollowingEnd).toBe(false);
@@ -176,11 +182,11 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 		const chatRenderSpy = vi.spyOn(runtime.chatContainer!, "render");
 		chatRenderSpy.mockClear();
 		scroll.scrollTo(turn1StartOffset + 6, { disableFollow: true });
-		expect(harness.screen().rowText(1)).toContain("10:00");
+		expect(harness.screen().rowText(4)).toContain("10:00");
 		expect(chatRenderSpy).toHaveBeenCalledTimes(1);
 		chatRenderSpy.mockRestore();
 
-		await harness.mouseClick(117, tick1Row);
+		await harness.mouseClick(119, tick1Row);
 		await harness.submitInput("/sticky prev");
 		expect(scroll.scrollTop).toBe(turn1StartOffset);
 		expect(scroll.isFollowingEnd).toBe(false);
@@ -228,7 +234,7 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 
 		scroll.scrollToEnd();
 		await harness.submitInput("Third turn live");
-		const stickyTop = [0, 1, 2].map((r) => harness!.screen().rowText(r)).join("\n");
+		const stickyTop = [3, 4, 5].map((r) => harness!.screen().rowText(r)).join("\n");
 		expect(stickyTop).toContain("Third turn live");
 	});
 
@@ -253,28 +259,29 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 		expect(scroll.isFollowingEnd).toBe(true);
 		expect(maxScrollTop).toBeGreaterThan(20);
 
+		const headerRows = 3;
 		const geo = getRailGeometry();
-		const tick0Row = geo.ticksY;
-		const tick2Row = geo.ticksY + 2;
-		const downArrowRow = geo.downY;
+		const tick0Row = headerRows + geo.ticksY;
+		const tick2Row = headerRows + geo.ticksY + 2;
+		const downArrowRow = headerRows + geo.downY;
 
-		await harness.mouseClick(117, tick0Row);
+		await harness.mouseClick(119, tick0Row);
 		const turn1Top = scroll.scrollTop;
 		expect(scroll.isFollowingEnd).toBe(false);
 		expect(turn1Top).toBeLessThan(maxScrollTop);
 
-		await harness.mouseClick(117, downArrowRow);
+		await harness.mouseClick(119, downArrowRow);
 		expect(scroll.scrollTop).toBeGreaterThan(turn1Top);
 		expect(scroll.isFollowingEnd).toBe(false);
 
-		await harness.mouseClick(117, downArrowRow);
+		await harness.mouseClick(119, downArrowRow);
 		expect(scroll.scrollTop).toBe(maxScrollTop);
 		expect(scroll.isFollowingEnd).toBe(true);
 
 		await harness.submitInput("/sticky prev");
 		expect(scroll.isFollowingEnd).toBe(false);
 
-		await harness.mouseClick(117, tick2Row);
+		await harness.mouseClick(119, tick2Row);
 		expect(scroll.scrollTop).toBe(maxScrollTop);
 		expect(scroll.isFollowingEnd).toBe(true);
 
@@ -304,13 +311,14 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 
 			await harness.submitInput("Alpha prompt");
 			await harness.submitInput("Beta prompt");
-			await harness.mouseWheel("up", 40, 8, 3);
+			await harness.mouseWheel("up", 40, 8, 5);
 
 			const scroll = getActiveHostRuntime()!.scroll!;
-			expect(scroll.scrollbar).toBe("auto");
+			expect(scroll.scrollbar).toBe("hidden");
 
+			const headerRows = 3;
 			const geo = getRailGeometry();
-			await harness.mouseMove(117, geo.ticksY);
+			await harness.mouseMove(119, headerRows + geo.ticksY);
 			expect(harness.screen().text()).toContain("Alpha prompt");
 			expect(harness.screen().text()).toContain("╭─");
 
@@ -323,22 +331,22 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 
 			await harness.mouseMove(20, 6);
 			const afterLeaveLines = Array.from({ length: scroll.viewportHeight }, (_, r) =>
-				harness!.screen().sliceText(r, 40, 116),
+				harness!.screen().sliceText(headerRows + r, 40, 118),
 			).join("\n");
 			expect(afterLeaveLines).not.toContain("╭─");
 
-			expect(harness.screen().rowText(1)).toContain("› ");
+			expect(harness.screen().rowText(4)).toContain("› ");
 			await harness.submitInput("/sticky toggle");
-			expect(harness.screen().rowText(1)).not.toContain("› Alpha prompt");
-			expect(harness.screen().rowText(1)).not.toContain("› Beta prompt");
+			expect(harness.screen().rowText(4)).not.toContain("› Alpha prompt");
+			expect(harness.screen().rowText(4)).not.toContain("› Beta prompt");
 
 			await harness.submitInput("/sticky toggle");
-			expect(harness.screen().rowText(1)).toContain("› ");
+			expect(harness.screen().rowText(4)).toContain("› ");
 
 			const hasRail = () =>
 				Array.from({ length: scroll.viewportHeight }, (_, r) =>
-					harness!.screen().sliceText(r, 117, 119),
-				).some((cell) => cell === " ▲" || cell === "──" || cell === " ─");
+					harness!.screen().sliceText(headerRows + r, 118, 120),
+				).some((cell) => cell === " ▲" || cell === "━━" || cell === " ─");
 
 			expect(hasRail()).toBe(true);
 			await harness.submitInput("/outline");
@@ -350,5 +358,233 @@ describe("Transcript Turn Index (Sticky Prompt + Outline Rail in real Interactiv
 		} finally {
 			rmSync(tempCwd, { recursive: true, force: true });
 		}
+	});
+
+	it("never hides the lower prompt under Sticky Prompt when earlier turns contain grouped tool calls", async () => {
+		const tempCwd = mkdtempSync(join(tmpdir(), "pi-ui-sticky-grouped-"));
+		try {
+			writeFileSync(join(tempCwd, "a.txt"), "alpha\n", "utf8");
+			writeFileSync(join(tempCwd, "b.txt"), "beta\n", "utf8");
+			writeFileSync(join(tempCwd, "c.txt"), "gamma\n", "utf8");
+
+			harness = await createInteractiveHarness({
+				theme: "dark",
+				width: 110,
+				height: 36,
+				cwd: tempCwd,
+				responses: [
+					fauxAssistantMessage(
+						[fauxThinking("Inspecting files"), fauxToolCall("read", { path: "a.txt", toolSummary: "Read a" })],
+						{ stopReason: "toolUse" },
+					),
+					fauxAssistantMessage(
+						[fauxThinking("Inspecting b"), fauxToolCall("read", { path: "b.txt", toolSummary: "Read b" })],
+						{ stopReason: "toolUse" },
+					),
+					fauxAssistantMessage(
+						[fauxThinking("Inspecting c"), fauxToolCall("read", { path: "c.txt", toolSummary: "Read c" })],
+						{ stopReason: "toolUse" },
+					),
+					fauxAssistantMessage([fauxText("Finished reading all three files.")]),
+					fauxAssistantMessage([fauxText(buildResponseText("second-reply", 28))]),
+				],
+			});
+
+			await harness.submitInput("Upper prompt alpha\nsecond line of upper prompt");
+			await harness.submitInput("Lower prompt beta");
+
+			const scroll = getActiveHostRuntime()!.scroll!;
+			const contentHeight = (scroll as unknown as { contentHeight?: number }).contentHeight ?? 0;
+
+			/* Находим реальную строку Lower prompt beta при scrollTop = 0 */
+			scroll.scrollTo(0, { disableFollow: true });
+			harness.flushFrame();
+			const atZero = harness.screen();
+			const lowerAtZero = atZero.findText("Lower prompt beta");
+			expect(lowerAtZero).toBeDefined();
+			const realLowerDocRow = lowerAtZero!.row - 3;
+
+			const assertLowerPromptVisibleAcrossHandoff = (lowerRow: number, totalHeight: number) => {
+				for (
+					let top = Math.max(1, lowerRow - 5);
+					top <= Math.min(Math.max(1, totalHeight - scroll.viewportHeight), lowerRow + 3);
+					top += 1
+				) {
+					scroll.scrollTo(top, { disableFollow: true });
+					harness!.flushFrame();
+					expect(harness!.screen().text()).toContain("Lower prompt beta");
+				}
+			};
+
+			/* В свёрнутом состоянии группы инструментов нижний промпт ни на одном шаге не перекрывается верхним Sticky Prompt */
+			assertLowerPromptVisibleAcrossHandoff(realLowerDocRow, contentHeight);
+
+			/* Раскрываем свёрнутую группу инструментов кликом и убеждаемся, что кэш координат обновился и нижний промпт по-прежнему не пропадает */
+			scroll.scrollTo(0, { disableFollow: true });
+			harness.flushFrame();
+			const groupHit =
+				harness.screen().findText("Explored") ??
+				harness.screen().findText("3 files");
+			expect(groupHit).toBeDefined();
+			await harness.mouseClick(groupHit!.col + 2, groupHit!.row);
+
+			const expandedHeight = (scroll as unknown as { contentHeight?: number }).contentHeight ?? 0;
+			expect(expandedHeight).toBeGreaterThan(contentHeight);
+			const lowerExpanded = harness.screen().findText("Lower prompt beta");
+			expect(lowerExpanded).toBeDefined();
+			assertLowerPromptVisibleAcrossHandoff(lowerExpanded!.row - 3, expandedHeight);
+		} finally {
+			rmSync(tempCwd, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves referential string[] and Component identity across consecutive animation frames without re-hydrating session entries (ADR-0008)", async () => {
+		const tempCwd = mkdtempSync(join(tmpdir(), "pi-ui-adr0008-cache-"));
+		try {
+			writeFileSync(join(tempCwd, "one.txt"), "one\n", "utf8");
+			writeFileSync(join(tempCwd, "two.txt"), "two\n", "utf8");
+
+			let tick = 0;
+			harness = await createInteractiveHarness({
+				theme: "dark",
+				width: 110,
+				height: 36,
+				cwd: tempCwd,
+				extensionFactories: [
+					(pi) => {
+						pi.on("session_start", (_ev, ctx) => {
+							ctx.ui.setWidget("live-progress", () => ({
+								render: () => [`◆ 1/3 steps · frame ${tick}`],
+								invalidate() {},
+							}));
+						});
+					},
+				],
+				responses: [
+					fauxAssistantMessage(
+						[fauxThinking("Reading file one"), fauxToolCall("read", { path: "one.txt", toolSummary: "Read one" })],
+						{ stopReason: "toolUse" },
+					),
+					fauxAssistantMessage(
+						[fauxThinking("Reading file two"), fauxToolCall("read", { path: "two.txt", toolSummary: "Read two" })],
+						{ stopReason: "toolUse" },
+					),
+					fauxAssistantMessage([fauxThinking("Synthesizing answer"), fauxText("```ts\nexport const ok = true;\n```\n\nAll files inspected.")]),
+					fauxAssistantMessage([fauxText("Follow-up answer with metrics row.")]),
+				],
+			});
+
+			await harness.submitInput("First prompt with grouped exploration");
+			await harness.submitInput("Second plain prompt");
+			harness.flushFrame(true);
+
+			const modeAny = harness.mode as unknown as {
+				chatContainer: Container;
+				ui: { requestRender: () => void };
+				renderer?: { doRender: () => void };
+			};
+			const chat = modeAny.chatContainer;
+			const renderer = modeAny.renderer!;
+
+			/* Прогревочный кадр заполняет референциальные кэши карточек и групп */
+			tick += 1;
+			modeAny.ui.requestRender();
+			renderer.doRender();
+
+			const baselineLayout = (chat as unknown as { childLines?: { lines: string[]; children: Component[] } }).childLines;
+			expect(baselineLayout).toBeDefined();
+			const baselineLines = baselineLayout!.lines;
+
+			const getEntriesSpy = vi.spyOn(harness.session.sessionManager, "getEntries");
+			const getBranchSpy = vi.spyOn(harness.session.sessionManager, "getBranch");
+
+			for (let frame = 0; frame < 10; frame += 1) {
+				tick += 1;
+				modeAny.ui.requestRender();
+				renderer.doRender();
+				const nextLayout = (chat as unknown as { childLines?: { lines: string[]; children: Component[] } }).childLines;
+				expect(nextLayout).toBe(baselineLayout);
+				expect(nextLayout?.lines).toBe(baselineLines);
+			}
+
+			/* Ни один завершённый промпт или чип не клонирует getEntries() повторно на кадрах анимации */
+			expect(getEntriesSpy).toHaveBeenCalledTimes(0);
+			/* getBranch() читается не более одного раза за проход рендера (TurnIndex), а не в каждой карточке метрик */
+			expect(getBranchSpy.mock.calls.length).toBeLessThanOrEqual(10);
+
+			getEntriesSpy.mockRestore();
+			getBranchSpy.mockRestore();
+		} finally {
+			rmSync(tempCwd, { recursive: true, force: true });
+		}
+	});
+
+	it("never overlaps a multi-line prompt with a truncated Sticky clone of itself and preserves a 1-row canvas separator during push-off", async () => {
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width: 110,
+			height: 32,
+			responses: [
+				fauxAssistantMessage([fauxText(buildResponseText("first-reply", 20))]),
+				fauxAssistantMessage([fauxText(buildResponseText("second-reply", 30))]),
+			],
+		});
+
+		await harness.prompt("Short first prompt");
+		const sevenLinePrompt = [
+			"1. First line of tall prompt",
+			"2. Second line of tall prompt",
+			"3. Third line of tall prompt",
+			"4. Fourth line of tall prompt",
+			"5. Fifth line of tall prompt",
+			"6. Sixth line of tall prompt",
+			"7. Seventh line of tall prompt",
+		].join("\n");
+		await harness.prompt(sevenLinePrompt);
+
+		const rt = getActiveHostRuntime()!;
+		const scroll = rt.scroll!;
+		const turns = (rt.viewportSlots?.topSlot as unknown as { turnIndex: { getTurns: (w?: number) => Array<{ start: number; end: number; height: number; mounted: boolean }> } }).turnIndex.getTurns(110);
+		const mounted = turns.filter((t) => t.mounted);
+		expect(mounted).toHaveLength(2);
+		const second = mounted[1]!;
+		expect(second.height).toBe(9);
+
+		/* Во время вытеснения первого промпта вторым между плашками всегда остаётся минимум 1 строка фона холста (не цвета карточки) */
+		for (let st = second.start - 4; st <= second.start; st += 1) {
+			scroll.scrollTo(st, { disableFollow: true });
+			harness.flushFrame();
+			const scr = harness.screen();
+			const firstHit = scr.findText("Short first prompt");
+			const secondHit = scr.findText("1. First line of tall prompt");
+			if (firstHit && secondHit) {
+				expect(secondHit.row - firstHit.row).toBeGreaterThanOrEqual(3);
+				let hasCanvasSeparator = false;
+				for (let r = firstHit.row + 1; r < secondHit.row; r += 1) {
+					if (scr.cellAt(r, 10)?.bg?.kind !== "rgb") {
+						hasCanvasSeparator = true;
+						break;
+					}
+				}
+				expect(hasCanvasSeparator).toBe(true);
+			}
+		}
+
+		/* Пока длинный 7-строчный промпт прокручивается сам (start .. end - 5), Sticky не накладывает +4 lines поверх его строк 4..7 */
+		for (let st = second.start; st <= second.end - 5; st += 1) {
+			scroll.scrollTo(st, { disableFollow: true });
+			harness.flushFrame();
+			const scrText = harness.screen().text();
+			expect(scrText).not.toContain("+4 lines");
+			expect(scrText).toContain("7. Seventh line of tall prompt");
+		}
+
+		/* Как только сама карточка почти ушла за верх (scrollTop = second.end - 4), включается аккуратный 3-строчный Sticky без хвоста снизу */
+		scroll.scrollTo(second.end - 4, { disableFollow: true });
+		harness.flushFrame();
+		const pinnedText = harness.screen().text();
+		expect(pinnedText).toContain("+4 lines");
+		expect(pinnedText).not.toContain("6. Sixth line of tall prompt");
+		expect(pinnedText).not.toContain("7. Seventh line of tall prompt");
 	});
 });

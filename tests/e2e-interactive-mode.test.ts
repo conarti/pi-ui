@@ -228,15 +228,15 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		await harness.flush();
 
 		expect(vi.getTimerCount()).toBe(1);
-		const spineRgbFrame0 = findRowGlyphRgb(harness, "Thinking…", "┃");
-		const workingRgbFrame0 = findRowGlyphRgb(harness, "Working", "◆");
+		const spineRgbFrame0 = findRowGlyphRgb(harness, "Thinking…", "✦");
+		const workingRgbFrame0 = findRowGlyphRgb(harness, "[stop]", "✦");
 		expect(spineRgbFrame0).toBeDefined();
 		expect(workingRgbFrame0).toBeDefined();
 
 		vi.advanceTimersByTime(33 * 6);
 		harness.flushFrame();
-		const spineRgbFrame1 = findRowGlyphRgb(harness, "Thinking…", "┃");
-		const workingRgbFrame1 = findRowGlyphRgb(harness, "Working", "◆");
+		const spineRgbFrame1 = findRowGlyphRgb(harness, "Thinking…", "✦");
+		const workingRgbFrame1 = findRowGlyphRgb(harness, "[stop]", "✦");
 		expect(spineRgbFrame1).not.toEqual(spineRgbFrame0);
 		expect(workingRgbFrame1).not.toEqual(workingRgbFrame0);
 
@@ -269,13 +269,13 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 
 		await harness.flush();
 
-		const toolDiamondBefore = findRowGlyphRgb(harness, "inspect_bundle", "◆");
-		expect(toolDiamondBefore).toBeDefined();
+		const toolStarBefore = findRowGlyphRgb(harness, "inspect_bundle", "✦");
+		expect(toolStarBefore).toBeDefined();
 		vi.advanceTimersByTime(33 * 6);
 		harness.flushFrame();
-		const toolDiamondAfter = findRowGlyphRgb(harness, "inspect_bundle", "◆");
-		expect(toolDiamondAfter).toBeDefined();
-		expect(toolDiamondAfter).not.toEqual(toolDiamondBefore);
+		const toolStarAfter = findRowGlyphRgb(harness, "inspect_bundle", "✦");
+		expect(toolStarAfter).toBeDefined();
+		expect(toolStarAfter).not.toEqual(toolStarBefore);
 
 		releaseTool();
 		const stream2 = await streamQueue.nextStream();
@@ -317,17 +317,19 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(expandedHit).toBeDefined();
 		await harness.mouseClick(expandedHit!.col + 2, expandedHit!.row);
 		expect(harness.screen().text()).not.toContain("Verifying tree-shaking boundaries");
-		expect(harness.screen().text()).not.toContain("Цитировать");
+		expect(harness.screen().text()).not.toContain("Quote");
 
 		const promptHit = harness.screen().findText("› Audit src/entry.ts and show the helper");
 		expect(promptHit).toBeDefined();
 		await harness.mouseMove(promptHit!.col + 4, promptHit!.row);
 		const hoveredPromptScreen = harness.screen();
-		expect(hoveredPromptScreen.rowText(promptHit!.row - 1)).toContain("Copy");
+		expect(hoveredPromptScreen.rowText(promptHit!.row - 1).trim()).toBe("");
+		expect(hoveredPromptScreen.rowText(promptHit!.row)).toContain("Copy");
 		const promptCopyPos = hoveredPromptScreen.findText("Copy");
 		expect(promptCopyPos).toBeDefined();
 		await harness.mouseClick(promptCopyPos!.col + 1, promptCopyPos!.row);
-		expect(harness.screen().rowText(promptHit!.row - 1)).toContain("Copied");
+		expect(hoveredPromptScreen.rowText(promptHit!.row - 1).trim()).toBe("");
+		expect(harness.screen().rowText(promptHit!.row)).toContain("Copied");
 		expect(await getActiveHostRuntime()!.clipboard.readText?.()).toBe(
 			"Audit src/entry.ts and show the helper",
 		);
@@ -335,20 +337,21 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		harness.setTheme("light");
 		const codeLineHit = harness.screen().findText("export const bundleAnswer = 42;");
 		expect(codeLineHit).toBeDefined();
-		const codeHeaderRow = codeLineHit!.row - 1;
-		await harness.mouseMove(codeLineHit!.col + 2, codeHeaderRow);
+		const codeFooterRow = codeLineHit!.row + 1;
+		const initialFooterText = harness.screen().rowText(codeFooterRow);
+		const codeCopyCol = initialFooterText.lastIndexOf("[Copy]");
+		expect(codeCopyCol).toBeGreaterThan(10);
+		await harness.mouseMove(codeCopyCol + 2, codeFooterRow);
 
 		const hoveredCodeScreen = harness.screen();
-		const headerCell = hoveredCodeScreen.cellAt(codeHeaderRow, codeLineHit!.col);
-		expect(headerCell?.bg.kind).toBe("rgb");
-		if (headerCell?.bg.kind === "rgb") {
-			expect(luminance(headerCell.bg.r, headerCell.bg.g, headerCell.bg.b)).toBeGreaterThan(170);
+		const footerCell = hoveredCodeScreen.cellAt(codeFooterRow, codeLineHit!.col);
+		expect(footerCell?.bg.kind).toBe("rgb");
+		if (footerCell?.bg.kind === "rgb") {
+			expect(luminance(footerCell.bg.r, footerCell.bg.g, footerCell.bg.b)).toBeGreaterThan(170);
 		}
 
-		const codeCopyCol = hoveredCodeScreen.rowText(codeHeaderRow).lastIndexOf("Copy");
-		expect(codeCopyCol).toBeGreaterThan(10);
-		await harness.mouseClick(codeCopyCol + 1, codeHeaderRow);
-		expect(harness.screen().rowText(codeHeaderRow)).toContain("Copied");
+		await harness.mouseClick(codeCopyCol + 2, codeFooterRow);
+		expect(harness.screen().rowText(codeFooterRow)).toContain("Copied");
 		expect(await getActiveHostRuntime()!.clipboard.readText?.()).toBe(
 			"export const bundleAnswer = 42;",
 		);
@@ -360,6 +363,11 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 
 	it("coordinates Sticky Prompt, Outline Rail, mouse-selection & Alt+Q quoting, paste/image/quote Prompt Chips, and Prompt Suggestion workflows", async () => {
 		const sharedAgentDir = allocateTempDir("pi-ui-e2e-agent-");
+		writeFileSync(
+			join(sharedAgentDir, "pi-ui.json"),
+			`${JSON.stringify({ promptSuggestions: true }, null, 2)}\n`,
+			"utf8",
+		);
 		const buildReply = (tag: string, count: number) =>
 			Array.from({ length: count }, (_, idx) => `${tag} line ${idx + 1}: cache invalidation detail`).join(
 				"\n",
@@ -398,16 +406,16 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 
 		await harness.mouseWheel("up", 30, 10, 5);
 		const scrolledTopScreen = harness.screen();
-		const topChromeRows = [1, 2, 3].map((r) => scrolledTopScreen.rowText(r)).join("\n");
+		const topChromeRows = [3, 4, 5].map((r) => scrolledTopScreen.rowText(r)).join("\n");
 		expect(topChromeRows).toContain("› Design Turn One cache strategy");
 
-		const railColStart = harness.width - 3;
-		const railColEnd = harness.width - 1;
+		const railColStart = harness.width - 2;
+		const railColEnd = harness.width;
 		let secondTickRow = -1;
 		const tickRows: number[] = [];
-		for (let r = 0; r < harness.height - 6; r += 1) {
+		for (let r = 3; r < harness.height - 6; r += 1) {
 			const slice = scrolledTopScreen.sliceText(r, railColStart, railColEnd);
-			if (slice === " ─" || slice === "──") {
+			if (slice === " ─" || slice === "━━") {
 				tickRows.push(r);
 			}
 		}
@@ -433,7 +441,7 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 			quoteLine2!.row,
 			{ steps: 3 },
 		);
-		const popupPos = harness.screen().findText("Цитировать");
+		const popupPos = harness.screen().findText("Quote");
 		expect(popupPos).toBeDefined();
 		expect(harness.screen().cellAt(popupPos!.row, popupPos!.col)?.inverse).toBe(false);
 
@@ -441,21 +449,18 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		await flushUiAsync(harness);
 
 		const editor = getActiveComposerEditor()!;
-		expect(editor.getText()).toBe("[❝ Quote #1 · 2 lines]");
+		expect(editor.getText()).toBe("[❝ Quote #1 · 2 lines] ");
 
-		await harness.typeText(" ");
 		await harness.pressKey("\x1bq");
 		await flushUiAsync(harness);
 
-		await harness.typeText(" ");
 		await harness.paste("log-line-1\nlog-line-2\nlog-line-3\nlog-line-4", true);
 
-		await harness.typeText(" ");
 		await harness.pressKey("\x16");
 		await flushUiAsync(harness);
 
 		expect(editor.getText()).toBe(
-			"[❝ Quote #1 · 2 lines] [❝ Quote #2 · 1 line] [📋 Pasted #3 · 4 lines] [🖼 Image #4]",
+			"[❝ Quote #1 · 2 lines] [❝ Quote #2 · 1 line] [📋 Pasted #3 · 4 lines] [🖼 Image #4] ",
 		);
 
 		const draftPastePos = harness.screen().findText("[📋 Pasted #3 · 4 lines]");
@@ -473,7 +478,7 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(serializedChipTurn).toContain('"type":"image"');
 
 		await harness.mouseWheel("up", 30, 10, 2);
-		const stickyBand = [1, 2, 3].map((r) => harness!.screen().rowText(r)).join("\n");
+		const stickyBand = [3, 4, 5].map((r) => harness!.screen().rowText(r)).join("\n");
 		expect(stickyBand).toContain("[📋 Pasted #3 · 4 lines]");
 		expect(stickyBand).not.toContain("log-line-4");
 		await harness.mouseWheel("down", 30, 10, 6);
@@ -621,24 +626,30 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		});
 
 		await harness.submitInput("Inspect and update service timeout");
+		/* По умолчанию активен пресет Balanced: чтения свёрнуты в Explored, правки и команды в 1 строку. */
+		const balancedText = harness.screen().text();
+		expect(balancedText).toContain("✦ Explored 2 files, 1 search");
+		expect(balancedText).not.toContain("✦ Read src/service.ts");
+		expect(balancedText).toContain("✦ Edited src/service.ts");
+		expect(balancedText).not.toContain("+export const timeoutMs = 2500;");
+		expect(balancedText).not.toContain("│ out-7");
+
+		const exploredPos = harness.screen().findText("✦ Explored 2 files, 1 search");
+		expect(exploredPos).toBeDefined();
+		await harness.mouseClick(exploredPos!.col + 2, exploredPos!.row);
+		expect(harness.screen().text()).toContain("│ ✦ Read src/service.ts");
+		const exploredOpenPos = harness.screen().findText("✦ Explored 2 files, 1 search");
+		await harness.mouseClick(exploredOpenPos!.col + 2, exploredOpenPos!.row);
+		expect(harness.screen().text()).not.toContain("✦ Read src/service.ts");
+
+		await harness.submitInput("/density detailed");
 		const detailedText = harness.screen().text();
-		expect(detailedText).toContain("◆ Explored 2 files, 1 search");
-		expect(detailedText).not.toContain("◆ Read src/service.ts");
-		expect(detailedText).toContain("◆ Edited src/service.ts");
 		expect(detailedText).toContain("-export const timeoutMs = 1000;");
 		expect(detailedText).toContain("+export const timeoutMs = 2500;");
 		expect(detailedText).toContain("│ out-1");
 		expect(detailedText).toContain("│ …");
 		expect(detailedText).toContain("│ out-7");
 		expect(detailedText).not.toContain("│ out-4");
-
-		const exploredPos = harness.screen().findText("◆ Explored 2 files, 1 search");
-		expect(exploredPos).toBeDefined();
-		await harness.mouseClick(exploredPos!.col + 2, exploredPos!.row);
-		expect(harness.screen().text()).toContain("◆ Read src/service.ts");
-		const exploredOpenPos = harness.screen().findText("◆ Explored 2 files, 1 search");
-		await harness.mouseClick(exploredOpenPos!.col + 2, exploredOpenPos!.row);
-		expect(harness.screen().text()).not.toContain("◆ Read src/service.ts");
 
 		await harness.submitInput("/density diff-focus");
 		const diffFocusText = harness.screen().text();
@@ -647,7 +658,7 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 
 		await harness.submitInput("/density compact");
 		const compactText = harness.screen().text();
-		expect(compactText).toContain("◆ Edited src/service.ts");
+		expect(compactText).toContain("Edited 1 file, ran 1 command, explored 2 files, 1 search");
 		expect(compactText).not.toContain("+export const timeoutMs = 2500;");
 		expect(compactText).not.toContain("│ out-7");
 
@@ -689,17 +700,17 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(roBashRes?.isError).toBe(false);
 		expect(mutBashRes?.isError).toBe(true);
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);
-		expect(harness.screen().text()).toContain("Plan Studio");
+		expect(harness.screen().text()).toContain("Plan Approval");
 		expect(harness.suggestionCalls).toHaveLength(suggestionCallsBeforePlan);
 
 		await harness.pressKey("\x1b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 
-		await harness.submitInput("/mode safe");
+		await harness.submitInput("/mode auto");
 		expect(harness.session.getActiveToolNames()).toContain("edit");
 
 		const safePromise = harness.submitInput("Apply governed changes");
-		await waitForCondition(() => harness!.screen().text().includes("Auto-Safe Confirmation"));
+		await waitForCondition(() => harness!.screen().text().includes("Auto Permission"));
 		expect(harness.screen().text()).toContain("src/service.ts");
 		await harness.pressKey("\r");
 
@@ -734,9 +745,6 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 				fauxAssistantMessage("Post-reload turn succeeded."),
 			],
 			suggestionResponses: [
-				fauxAssistantMessage(""),
-				fauxAssistantMessage(""),
-				fauxAssistantMessage(""),
 				fauxAssistantMessage("Продолжи после перезагрузки"),
 			],
 		});
@@ -768,7 +776,7 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 			targetBeforeSwitch!.row,
 			{ steps: 3 },
 		);
-		expect(harness.screen().text()).toContain("Цитировать");
+		expect(harness.screen().text()).toContain("Quote");
 
 		expect(await harness.setTuiMode("regular")).toBe(true);
 		expect(runtime.isFullscreen).toBe(false);
@@ -790,11 +798,11 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(runtime.viewportSlots?.topSlot).toBeDefined();
 		expect(runtime.viewportSlots?.rightRail).toBeDefined();
 
-		const railStart = harness.width - 3;
-		const railEnd = harness.width - 1;
+		const railStart = harness.width - 2;
+		const railEnd = harness.width;
 		const hasRailAfterSwitch = Array.from({ length: harness.height - 6 }, (_, r) =>
-			harness!.screen().sliceText(r, railStart, railEnd),
-		).some((s) => /[▲▼─]/.test(s));
+			harness!.screen().sliceText(r + 3, railStart, railEnd),
+		).some((s) => /[▲▼━─]/.test(s));
 		expect(hasRailAfterSwitch).toBe(true);
 
 		const targetAfterSwitch = harness.screen().findText("Selectable across mode switch");
@@ -806,11 +814,11 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 			targetAfterSwitch!.row,
 			{ steps: 3 },
 		);
-		const quotePopupAfterSwitch = harness.screen().findText("Цитировать");
+		const quotePopupAfterSwitch = harness.screen().findText("Quote");
 		expect(quotePopupAfterSwitch).toBeDefined();
 		await harness.mouseClick(quotePopupAfterSwitch!.col + 2, quotePopupAfterSwitch!.row);
 		await flushUiAsync(harness);
-		expect(getActiveComposerEditor()!.getText()).toBe("[❝ Quote #1 · 1 line]");
+		expect(getActiveComposerEditor()!.getText()).toBe("[❝ Quote #1 · 1 line] ");
 		getActiveComposerEditor()!.setText("");
 
 		const altProto = TuiAltScreen.prototype as unknown as { handleMouseEvent: unknown };
@@ -827,7 +835,7 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(harness.session.getActiveToolNames()).not.toContain("edit");
 
 		await harness.mouseWheel("up", 30, 10, 10);
-		const topAfterReload = [1, 2, 3].map((r) => harness!.screen().rowText(r)).join("\n");
+		const topAfterReload = [3, 4, 5].map((r) => harness!.screen().rowText(r)).join("\n");
 		expect(topAfterReload).toContain("Inspect [📋 Pasted #1 · 4 lines]");
 		expect(topAfterReload).not.toContain("persist-log-4");
 		await harness.mouseWheel("down", 30, 10, 14);
@@ -836,7 +844,8 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 		expect(harness.screen().text()).toContain("⌘ Command Palette");
 		await harness.pressKey("\x1b");
 
-		await harness.submitInput("/mode code");
+		await harness.submitInput("/suggestions on");
+		await harness.submitInput("/mode always-approve");
 		expect(harness.session.getActiveToolNames()).toContain("edit");
 		await harness.submitInput("Verify post-reload turn");
 		expect(harness.screen().text()).toContain("Post-reload turn succeeded.");
@@ -863,19 +872,22 @@ describe("End-to-end @conarti/pi-ui surfaces in real InteractiveMode", () => {
 
 		await harness.submitInput("Show 256color card");
 		const headingHit = harness.screen().findText("Heading Three");
-		const codeHeaderHit = harness.screen().findText("ts");
+		const codeBodyHit = harness.screen().findText("export const answer = 42;");
 		expect(headingHit).toBeDefined();
-		expect(codeHeaderHit).toBeDefined();
+		expect(codeBodyHit).toBeDefined();
+		const codeFooterRow = codeBodyHit!.row + 1;
+		const copyCol = harness.screen().rowText(codeFooterRow).lastIndexOf("[Copy]");
+		expect(copyCol).toBeGreaterThan(10);
 
-		await harness.mouseMove(codeHeaderHit!.col + 1, codeHeaderHit!.row);
+		await harness.mouseMove(copyCol + 2, codeFooterRow);
 		const hoveredFrame = harness.renderFrame();
 		const headingAnsi = hoveredFrame[headingHit!.row] ?? "";
-		const codeHeaderAnsi = hoveredFrame[codeHeaderHit!.row] ?? "";
+		const codeFooterAnsi = hoveredFrame[codeFooterRow] ?? "";
 		expect(headingAnsi).toContain("\x1b[38;5;");
 		expect(headingAnsi).not.toContain("\x1b[38;2;");
-		expect(codeHeaderAnsi).toContain("\x1b[48;5;");
-		expect(codeHeaderAnsi).toContain("\x1b[38;5;");
-		expect(codeHeaderAnsi).not.toContain("\x1b[48;2;");
-		expect(codeHeaderAnsi).not.toContain("\x1b[38;2;");
+		expect(codeFooterAnsi).toContain("\x1b[48;5;");
+		expect(codeFooterAnsi).toContain("\x1b[38;5;");
+		expect(codeFooterAnsi).not.toContain("\x1b[48;2;");
+		expect(codeFooterAnsi).not.toContain("\x1b[38;2;");
 	});
 });

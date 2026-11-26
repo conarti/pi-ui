@@ -1,7 +1,20 @@
-import { UserMessageComponent, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	SkillInvocationMessageComponent,
+	UserMessageComponent,
+	type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { Container, stripTerminalSequences, type Component } from "@earendil-works/pi-tui";
 import { reconstructTurnPromptText } from "../features/prompt-chips/registry.ts";
 import type { FullscreenShellContext } from "./fullscreen-layout.ts";
+import { t } from "./i18n.ts";
+import {
+	getPiUiConfigVersion,
+	getPiUiRenderPassId,
+	loadPiUiUserConfig,
+	type TimestampDisplayMode,
+} from "./pi-ui-config.ts";
+import { extractSkillInvocations, serializeSkillBlockTag } from "./skill-tags.ts";
+import { formatTranscriptTimestamp } from "./transcript-timestamp.ts";
 
 export type StickyDisplayMode = "auto" | "always";
 
@@ -19,12 +32,12 @@ export interface IndexedTurn extends BranchTurn {
 	readonly start: number;
 	readonly end: number;
 	readonly height: number;
-	readonly component?: UserMessageComponent;
+	readonly component?: UserMessageComponent | SkillInvocationMessageComponent;
 	readonly mounted: boolean;
 }
 
 export interface MountedUserMetric {
-	readonly component: UserMessageComponent;
+	readonly component: UserMessageComponent | SkillInvocationMessageComponent;
 	readonly start: number;
 	readonly end: number;
 	readonly height: number;
@@ -48,15 +61,22 @@ export function sanitizeTurnText(text: string): string {
 }
 
 export function summarizeTurnTitle(prompt: string, ordinal: number): string {
-	const oneLine = prompt.replace(/\s+/g, " ").trim();
-	return oneLine || `Реплика #${ordinal}`;
+	const preview = extractSkillInvocations(prompt).previewText;
+	const oneLine = preview.replace(/\s+/g, " ").trim();
+	return oneLine || t("turn.fallbackTitle", { ordinal });
 }
 
-export function formatTurnTime(timestamp: number | string | undefined): string {
+export interface FormatTurnTimeOptions {
+	readonly mode?: TimestampDisplayMode;
+	readonly now?: Date;
+}
+
+export function formatTurnTime(
+	timestamp: number | string | undefined,
+	options?: FormatTurnTimeOptions,
+): string {
 	if (timestamp === undefined) return "";
-	const date = new Date(timestamp);
-	if (Number.isNaN(date.getTime())) return "";
-	return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+	return formatTranscriptTimestamp(timestamp, options?.mode ?? loadPiUiUserConfig().timestamps, options?.now);
 }
 
 const EXISTING_IMAGE_TOKEN_RE = /\[(?:Image #(\d+):[^\]]+|🖼 Image #(\d+))\]/gu;
@@ -123,6 +143,27 @@ function appendBranchTurns(
 	return turns;
 }
 
+interface ContainerChildLinesLayout {
+	readonly width: number;
+	readonly children: readonly Component[];
+	readonly parts: readonly (readonly string[])[];
+	readonly lines: readonly string[];
+}
+
+function getContainerChildLines(node: Container): ContainerChildLinesLayout | undefined {
+	const layout = (node as unknown as { childLines?: ContainerChildLinesLayout }).childLines;
+	if (
+		layout &&
+		typeof layout.width === "number" &&
+		Array.isArray(layout.children) &&
+		Array.isArray(layout.parts) &&
+		Array.isArray(layout.lines)
+	) {
+		return layout;
+	}
+	return undefined;
+}
+
 function isWalkableContainer(node: Component): node is Container {
 	return (
 		node instanceof Container &&
@@ -132,10 +173,29 @@ function isWalkableContainer(node: Component): node is Container {
 	);
 }
 
+function isStandaloneSkillTurnComponent(node: Component): node is SkillInvocationMessageComponent {
+	if (!(node instanceof SkillInvocationMessageComponent)) return false;
+	const sb = (node as unknown as { skillBlock?: { name?: string; userMessage?: string } }).skillBlock;
+	return Boolean(sb?.name && !sb.userMessage);
+}
+
+function countLayoutUserComponents(layout: ContainerChildLinesLayout): number {
+	let count = 0;
+	for (const child of layout.children) {
+		if (child instanceof UserMessageComponent || isStandaloneSkillTurnComponent(child)) {
+			count += 1;
+		} else if (isWalkableContainer(child)) {
+			const nested = getContainerChildLines(child);
+			count += nested ? countLayoutUserComponents(nested) : countMountedUserComponents(child);
+		}
+	}
+	return count;
+}
+
 /**
- * Walks the transcript container hierarchy structurally to compute exact top-row offsets
- * and rendered heights for each mounted `UserMessageComponent` without full-document
- * renders or ANSI string matching.
+ * Walks the rendered `Container.childLines` layout (including `chatContainer`'s folded
+ * `ToolGroupComponent` children) so `Turn.start` / `Turn.end` match `ScrollView` row-for-row
+ * without extra `render()` passes when the frame layout is already fresh.
  */
 export function collectStructuralUserMetrics(doc: Component, width: number): MountedUserMetric[] {
 	const metrics: MountedUserMetric[] = [];
@@ -143,7 +203,7 @@ export function collectStructuralUserMetrics(doc: Component, width: number): Mou
 
 	const visit = (node: Component | undefined): void => {
 		if (!node) return;
-		if (node instanceof UserMessageComponent) {
+		if (node instanceof UserMessageComponent || isStandaloneSkillTurnComponent(node)) {
 			const lines = node.render(width);
 			const height = lines.length;
 			if (height > 0) {
@@ -158,8 +218,38 @@ export function collectStructuralUserMetrics(doc: Component, width: number): Mou
 			return;
 		}
 		if (isWalkableContainer(node)) {
-			for (const child of node.children) {
-				visit(child);
+			const expectedUsers = countMountedUserComponents(node);
+			let layout = getContainerChildLines(node);
+			if (
+				!layout ||
+				layout.width !== width ||
+				countLayoutUserComponents(layout) !== expectedUsers
+			) {
+				const rendered = node.render(width);
+				layout = getContainerChildLines(node);
+				if (!layout || layout.width !== width) {
+					cursor += rendered.length;
+					return;
+				}
+			}
+			for (let idx = 0; idx < layout.children.length; idx += 1) {
+				const child = layout.children[idx]!;
+				const partHeight = layout.parts[idx]?.length ?? 0;
+				if (child instanceof UserMessageComponent || isStandaloneSkillTurnComponent(child)) {
+					if (partHeight > 0) {
+						metrics.push({
+							component: child,
+							start: cursor,
+							end: cursor + partHeight,
+							height: partHeight,
+						});
+						cursor += partHeight;
+					}
+				} else if (isWalkableContainer(child)) {
+					visit(child);
+				} else {
+					cursor += partHeight;
+				}
 			}
 			return;
 		}
@@ -173,7 +263,7 @@ export function collectStructuralUserMetrics(doc: Component, width: number): Mou
 
 function countMountedUserComponents(node: Component | undefined): number {
 	if (!node) return 0;
-	if (node instanceof UserMessageComponent) return 1;
+	if (node instanceof UserMessageComponent || isStandaloneSkillTurnComponent(node)) return 1;
 	if (isWalkableContainer(node)) {
 		let count = 0;
 		for (const child of node.children) {
@@ -222,9 +312,14 @@ export class TranscriptTurnIndex {
 	private seenEntries: readonly unknown[] = [];
 	private branchTurns: BranchTurn[] = [];
 	private branchVersion = 0;
+	private lastBranchConfigVersion = -1;
+	private lastBranchPassId = -1;
+	private lastBranchSnapshot: readonly unknown[] = [];
 
 	private cacheDoc: Component | undefined;
+	private cacheDocLayout: unknown = undefined;
 	private cacheBranchVersion = -1;
+	private cacheConfigVersion = -1;
 	private cacheWidth = -1;
 	private cacheContentHeight = -1;
 	private cacheMountedCount = -1;
@@ -239,38 +334,72 @@ export class TranscriptTurnIndex {
 
 	invalidate(): void {
 		this.cacheDoc = undefined;
+		this.cacheDocLayout = undefined;
 		this.cacheBranchVersion = -1;
+		this.cacheConfigVersion = -1;
 		this.cacheWidth = -1;
 		this.cacheContentHeight = -1;
 		this.cacheMountedCount = -1;
 		this.cacheZeroHeightChildCount = -1;
+		this.lastBranchPassId = -1;
+	}
+
+	private readBranchForCurrentPass(): readonly unknown[] {
+		const passId = getPiUiRenderPassId();
+		if (passId > 0 && passId === this.lastBranchPassId) {
+			return this.lastBranchSnapshot;
+		}
+		const branch = this.getBranch() ?? [];
+		if (passId > 0) {
+			this.lastBranchPassId = passId;
+			this.lastBranchSnapshot = branch;
+		}
+		return branch;
 	}
 
 	getBranchTurns(): readonly BranchTurn[] {
-		const branch = this.getBranch() ?? [];
+		const branch = this.readBranchForCurrentPass();
+		const configVersion = getPiUiConfigVersion();
 		let same = 0;
 		const max = Math.min(this.seenEntries.length, branch.length);
 		while (same < max && this.seenEntries[same] === branch[same]) {
 			same++;
 		}
 
-		if (same === this.seenEntries.length && branch.length === this.seenEntries.length) {
+		if (
+			same === this.seenEntries.length &&
+			branch.length === this.seenEntries.length &&
+			configVersion === this.lastBranchConfigVersion
+		) {
 			return this.branchTurns;
 		}
 
-		if (same === this.seenEntries.length && branch.length > this.seenEntries.length) {
+		if (
+			same === this.seenEntries.length &&
+			branch.length > this.seenEntries.length &&
+			configVersion === this.lastBranchConfigVersion
+		) {
 			this.branchTurns = appendBranchTurns(this.branchTurns.slice(), branch.slice(this.seenEntries.length), branch);
 		} else {
 			this.branchTurns = appendBranchTurns([], branch);
 		}
 		this.seenEntries = branch.slice();
+		this.lastBranchConfigVersion = configVersion;
 		this.branchVersion += 1;
 		return this.branchTurns;
 	}
 
 	getTurnCount(): number {
 		const branchCount = this.getBranchTurns().length;
-		const mountedCount = countMountedUserComponents(this.shell.scroll.children[0]);
+		const doc = this.shell.scroll.children[0];
+		const docLayout = doc instanceof Container ? getContainerChildLines(doc) : undefined;
+		const mountedCount =
+			doc === this.cacheDoc &&
+			docLayout !== undefined &&
+			docLayout === this.cacheDocLayout &&
+			this.cacheMountedCount >= 0
+				? this.cacheMountedCount
+				: countMountedUserComponents(doc);
 		return Math.max(branchCount, mountedCount);
 	}
 
@@ -283,29 +412,42 @@ export class TranscriptTurnIndex {
 
 	getTurns(viewportWidth?: number): readonly IndexedTurn[] {
 		const branchTurns = this.getBranchTurns();
+		const configVersion = getPiUiConfigVersion();
 		const doc = this.shell.scroll.children[0];
 		const contentWidth = this.getContentWidth(viewportWidth);
 		const contentHeight = (this.shell.scroll as unknown as { contentHeight?: number }).contentHeight ?? 0;
-		const mountedCount = countMountedUserComponents(doc);
+		const docLayout = doc instanceof Container ? getContainerChildLines(doc) : undefined;
 		const zeroHeightChildCount = contentHeight === 0 && doc instanceof Container ? doc.children.length : -1;
 
 		if (
 			doc === this.cacheDoc &&
+			docLayout !== undefined &&
+			docLayout === this.cacheDocLayout &&
 			this.branchVersion === this.cacheBranchVersion &&
+			configVersion === this.cacheConfigVersion &&
 			contentWidth === this.cacheWidth &&
 			contentHeight === this.cacheContentHeight &&
-			mountedCount === this.cacheMountedCount &&
+			this.cacheMountedCount >= 0 &&
 			(contentHeight > 0 || zeroHeightChildCount === this.cacheZeroHeightChildCount)
 		) {
 			return this.cacheTurns;
 		}
 
+		const mountedCount = countMountedUserComponents(doc);
+
 		const mountedUsers = doc ? collectStructuralUserMetrics(doc, contentWidth) : [];
 		let indexed: IndexedTurn[];
 
 		const buildMountedTurn = (metric: MountedUserMetric, idx: number): IndexedTurn => {
-			const rawText: unknown = Reflect.get(metric.component, "text");
-			const prompt = sanitizeTurnText(typeof rawText === "string" ? rawText : "").trim();
+			let rawPromptText = "";
+			if (isStandaloneSkillTurnComponent(metric.component)) {
+				const sb = (metric.component as unknown as { skillBlock?: { name?: string; location?: string; content?: string } }).skillBlock;
+				rawPromptText = sb ? serializeSkillBlockTag(sb) : "";
+			} else {
+				const rawText: unknown = Reflect.get(metric.component, "text");
+				rawPromptText = typeof rawText === "string" ? rawText : "";
+			}
+			const prompt = sanitizeTurnText(rawPromptText).trim();
 			const ordinal = idx + 1;
 			const rawId: unknown = Reflect.get(metric.component, "messageId");
 			const id = String(rawId ?? ordinal);
@@ -393,7 +535,9 @@ export class TranscriptTurnIndex {
 		}
 
 		this.cacheDoc = doc;
+		this.cacheDocLayout = doc instanceof Container ? getContainerChildLines(doc) : undefined;
 		this.cacheBranchVersion = this.branchVersion;
+		this.cacheConfigVersion = configVersion;
 		this.cacheWidth = contentWidth;
 		this.cacheContentHeight = contentHeight;
 		this.cacheMountedCount = mountedCount;

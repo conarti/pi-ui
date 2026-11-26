@@ -9,6 +9,7 @@ import {
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 import { bgRgb, fgRgb } from "../../shared/ansi.ts";
+import { t } from "../../shared/i18n.ts";
 import {
 	createModalCard,
 	createSingleLineInput,
@@ -39,7 +40,7 @@ function stylePlanLine(raw: string, theme: Theme): string {
 	return raw ? theme.fg("text", raw) : "";
 }
 
-export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+export async function showPlanApproval(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
 	if (ctx.mode !== "tui") return;
 	const wf = getSessionWorkflow();
 
@@ -47,7 +48,7 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 		if (wf.mode !== "plan") {
 			setSessionMode(pi, ctx, "plan");
 		} else {
-			ctx.ui.notify("План пока пуст — отправь запрос, и после ответа откроется ревью плана", "info");
+			ctx.ui.notify(t("planApproval.emptyNotify"), "info");
 		}
 		return;
 	}
@@ -95,7 +96,7 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 					}
 
 					const commentCount = Object.keys(wf.planComments).length;
-					const subHeader = `${theme.fg("muted", "Кликни по любой строке (или Enter / c), чтобы оставить комментарий прямо под ней")}${
+					const subHeader = `${theme.fg("muted", t("planApproval.subHeader"))}${
 						commentCount > 0
 							? `  ${fgRgb(palette.warning, theme.bold(`· 💬 ${commentCount}`))}`
 							: ""
@@ -140,13 +141,13 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 
 						if (editingLine === i && body.length < maxBodyRows) {
 							const editPrefix = `      ${fgRgb(palette.warning, "↳ 💬 ")}`;
-							const editHint = theme.fg("dim", "  [Enter сохр · Esc отмена]");
+							const editHint = theme.fg("dim", t("planApproval.editHint"));
 							const maxDraft = Math.max(6, innerWidth - visibleWidth(editPrefix) - visibleWidth(editHint));
 							const renderedInput = commentInput.render({
 								theme,
 								focused: Boolean(comp.focused),
 								maxWidth: maxDraft,
-								placeholder: "Комментарий…",
+								placeholder: t("planApproval.commentPlaceholder"),
 							});
 							const editRow = truncateToWidth(`${editPrefix}${renderedInput}${editHint}`, innerWidth, "…");
 							const editPad = " ".repeat(Math.max(0, innerWidth - visibleWidth(editRow)));
@@ -166,7 +167,7 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 					const footerPills: ModalActionPill[] = [
 						{
 							id: "approve",
-							label: "✓ В работу (Ctrl+↵)",
+							label: t("planApproval.pill.approve"),
 							variant: "success",
 							active: true,
 							onClick: () => {
@@ -176,7 +177,10 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 						},
 						{
 							id: "revise",
-							label: commentCount > 0 ? `↻ Пересобрать (${commentCount}) (Ctrl+R)` : "↻ Пересобрать (Ctrl+R)",
+							label:
+								commentCount > 0
+									? t("planApproval.pill.reviseWithCount", { count: commentCount })
+									: t("planApproval.pill.revise"),
 							variant: "warning",
 							active: commentCount > 0,
 							onClick: () => {
@@ -188,7 +192,7 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 					if (commentCount > 0) {
 						footerPills.push({
 							id: "clear",
-							label: "🗑 Сбросить комменты",
+							label: t("planApproval.pill.clearComments"),
 							variant: "neutral",
 							onClick: () => {
 								wf.clearPlanComments();
@@ -198,7 +202,7 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 					}
 					footerPills.push({
 						id: "close",
-						label: "✕ Закрыть (Esc)",
+						label: t("planApproval.pill.close"),
 						variant: "neutral",
 						onClick: () => {
 							if (editingLine !== null) saveCommentEdit();
@@ -207,7 +211,7 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 					});
 
 					return card.render(width, theme, {
-						title: fgRgb(palette.warning, theme.bold("◈ Plan Studio")),
+						title: fgRgb(palette.warning, theme.bold(t("planApproval.title"))),
 						headerMeta: theme.fg("muted", `${cursorIdx + 1}/${wf.planLines.length}`),
 						onClose: () => {
 							if (editingLine !== null) saveCommentEdit();
@@ -220,6 +224,7 @@ export async function showPlanStudio(pi: ExtensionAPI, ctx: ExtensionContext): P
 				},
 				handleInput(data: string): void {
 					if (editingLine !== null) {
+						if (commentInput.handlePaste(data)) return;
 						if (matchesKey(data, "escape")) {
 							editingLine = null;
 							commentInput.clear();
@@ -325,7 +330,7 @@ export async function confirmSafeToolCall(
 		return "block";
 	}
 	if (!ctx.hasUI || ctx.mode !== "tui") {
-		const ok = await ctx.ui.confirm(`Auto-Safe: разрешить ${toolName}?`, summary);
+		const ok = await ctx.ui.confirm(t("permission.confirmTitle", { toolName }), summary);
 		return ok ? "allow" : "block";
 	}
 
@@ -348,33 +353,33 @@ export async function confirmSafeToolCall(
 					const palette = getThemeSurfacePalette(theme);
 					const inner = Math.max(24, width - 4);
 					const body = [
-						`${theme.fg("muted", "Инструмент:")} ${fgRgb(palette.info, theme.bold(toolName))}`,
+						`${theme.fg("muted", t("permission.toolLabel"))} ${fgRgb(palette.info, theme.bold(toolName))}`,
 						truncateToWidth(theme.fg("text", summary), inner, "…"),
 					];
 
 					return card.render(width, theme, {
-						title: fgRgb(palette.info, theme.bold("🛡 Auto-Safe Confirmation")),
+						title: fgRgb(palette.info, theme.bold(t("permission.modalTitle"))),
 						onClose: () => done("block"),
 						bodyLines: body,
 						borderVariant: "info",
 						footerPills: [
 							{
 								id: "allow",
-								label: "✓ Разрешить (Enter)",
+								label: t("permission.pill.allow"),
 								variant: "success",
 								active: true,
 								onClick: () => done("allow"),
 							},
 							{
 								id: "turn",
-								label: "✓ До конца хода (a)",
+								label: t("permission.pill.allowTurn"),
 								variant: "secondary",
 								active: true,
 								onClick: () => done("allow-turn"),
 							},
 							{
 								id: "deny",
-								label: "✕ Отклонить (Esc)",
+								label: t("permission.pill.deny"),
 								variant: "danger",
 								onClick: () => done("block"),
 							},

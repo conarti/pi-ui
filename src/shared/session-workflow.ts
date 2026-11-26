@@ -1,6 +1,12 @@
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { resolveConfigWritePath, writeConfigJsonAtomically } from "./atomic-config-file.ts";
+import { t } from "./i18n.ts";
+import type { CanonicalSessionMode } from "./pi-ui-config.ts";
 import { classifyShellEffect, type ShellDialect } from "./shell-analysis.ts";
 
-export type SessionMode = "code" | "plan" | "safe";
+export type SessionMode = CanonicalSessionMode;
 
 export interface PlanStep {
 	step: number;
@@ -65,32 +71,137 @@ export const LEGACY_SESSION_ENTRY_TYPE = "grok-ui-state";
 export const WRITE_TOOL_NAMES = ["edit", "write"] as const;
 export const WRITE_TOOLS: ReadonlySet<string> = new Set(WRITE_TOOL_NAMES);
 
-export const MODE_META: Record<
-	SessionMode,
-	{ icon: string; label: string; short: string; rgb: [number, number, number]; desc: string }
-> = {
-	code: {
+export const SESSION_MODE_ORDER: readonly SessionMode[] = [
+	"always-approve",
+	"plan",
+	"auto",
+];
+
+/**
+ * Преобразует канонические и устаревшие идентификаторы `Session Mode` (`"code"`, `"safe"`)
+ * в единую тройку `"always-approve" | "plan" | "auto"`.
+ */
+export function normalizeSessionMode(raw: unknown): SessionMode | undefined {
+	if (typeof raw !== "string") return undefined;
+	const value = raw.trim().toLowerCase();
+	if (value === "always-approve" || value === "always_approve" || value === "code") {
+		return "always-approve";
+	}
+	if (value === "plan") {
+		return "plan";
+	}
+	if (value === "auto" || value === "safe" || value === "auto-safe") {
+		return "auto";
+	}
+	return undefined;
+}
+
+export interface SessionModeMeta {
+	readonly icon: string;
+	readonly label: string;
+	readonly short: string;
+	readonly rgb: [number, number, number];
+	readonly desc: string;
+}
+
+export const MODE_META: Record<SessionMode, SessionModeMeta> = {
+	"always-approve": {
 		icon: "●",
-		label: "Code",
-		short: "Code",
+		get label() {
+			return t("sessionMode.alwaysApprove.label");
+		},
+		get short() {
+			return t("sessionMode.alwaysApprove.short");
+		},
 		rgb: [97, 175, 239],
-		desc: "Полный доступ к чтению, правкам и командам",
+		get desc() {
+			return t("sessionMode.alwaysApprove.desc");
+		},
 	},
 	plan: {
 		icon: "◈",
-		label: "Plan",
-		short: "Plan",
+		get label() {
+			return t("sessionMode.plan.label");
+		},
+		get short() {
+			return t("sessionMode.plan.short");
+		},
 		rgb: [229, 192, 123],
-		desc: "Read-only исследование + план без воды с построчными комментариями",
+		get desc() {
+			return t("sessionMode.plan.desc");
+		},
 	},
-	safe: {
+	auto: {
 		icon: "🛡",
-		label: "Auto-Safe",
-		short: "Safe",
-		rgb: [86, 182, 194],
-		desc: "Чтение и безопасные команды сразу, правки/риск — через подтверждение",
+		get label() {
+			return t("sessionMode.auto.label");
+		},
+		get short() {
+			return t("sessionMode.auto.short");
+		},
+		rgb: [100, 178, 240],
+		get desc() {
+			return t("sessionMode.auto.desc");
+		},
 	},
 };
+
+function isShiftTabBinding(value: unknown): boolean {
+	if (typeof value === "string") {
+		return value.trim().toLowerCase() === "shift+tab";
+	}
+	if (Array.isArray(value) && value.length === 1 && typeof value[0] === "string") {
+		return value[0].trim().toLowerCase() === "shift+tab";
+	}
+	return false;
+}
+
+/**
+ * Синхронизирует `"app.thinking.cycle": "alt+t"` в `keybindings.json` хоста Pi,
+ * если биндинг ещё не задан пользователем или всё ещё указывает на `"shift+tab"`,
+ * чтобы `Shift+Tab` переключал только `Session Mode` без двойного срабатывания thinking.
+ */
+export function syncThinkingCycleKeybinding(agentDir = getAgentDir()): boolean {
+	const targetPath = resolveConfigWritePath(join(agentDir, "keybindings.json"));
+
+	let existing: Record<string, unknown> = {};
+	let mode = 0o600;
+	if (existsSync(targetPath)) {
+		try {
+			const rawText = readFileSync(targetPath, "utf8");
+			mode = statSync(targetPath).mode & 0o777;
+			const parsed: unknown = JSON.parse(rawText);
+			if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+				existing = parsed as Record<string, unknown>;
+			} else {
+				return false;
+			}
+		} catch {
+			/* Не перезаписываем повреждённый пользовательский keybindings.json */
+			return false;
+		}
+	}
+
+	const hasCanonical = Object.hasOwn(existing, "app.thinking.cycle");
+	const hasLegacy = Object.hasOwn(existing, "cycleThinkingLevel");
+	const shouldSync =
+		(!hasCanonical && !hasLegacy) ||
+		(hasCanonical && isShiftTabBinding(existing["app.thinking.cycle"])) ||
+		(!hasCanonical && hasLegacy && isShiftTabBinding(existing.cycleThinkingLevel));
+
+	if (!shouldSync) {
+		return false;
+	}
+
+	const payload: Record<string, unknown> = { ...existing };
+	if (!hasCanonical && hasLegacy) {
+		delete payload.cycleThinkingLevel;
+	}
+	payload["app.thinking.cycle"] = "alt+t";
+
+	writeConfigJsonAtomically(targetPath, payload, mode);
+	return true;
+}
 
 export function extractPlanSteps(markdown: string): PlanStep[] {
 	const steps: PlanStep[] = [];
@@ -150,7 +261,7 @@ function inferAvailableWriteTools(tools: ToolAccessPort): string[] {
 	if (typeof tools.getAllTools === "function") {
 		const available = tools
 			.getAllTools()
-			.map((t) => t.name)
+			.map((tool) => tool.name)
 			.filter((name) => WRITE_TOOLS.has(name));
 		if (available.length > 0) return [...new Set(available)];
 	}
@@ -159,7 +270,7 @@ function inferAvailableWriteTools(tools: ToolAccessPort): string[] {
 
 function isDestructiveAnnotatedTool(toolName: string, tools?: ToolAccessPort): boolean {
 	if (!tools || typeof tools.getAllTools !== "function") return false;
-	const meta = tools.getAllTools().find((t) => t.name === toolName);
+	const meta = tools.getAllTools().find((tool) => tool.name === toolName);
 	if (!meta) return false;
 	return meta.annotations?.destructiveHint === true || meta.destructiveHint === true;
 }
@@ -175,9 +286,9 @@ function classifyToolMutation(req: ToolCallPreflightRequest): ToolMutationClassi
 		const targetPath = String(input?.path ?? "");
 		return {
 			mutating: true,
-			planReason: "В режиме Plan запись в файлы отключена. Сначала заверши план и утверди его с пользователем.",
-			confirmSummary: `Изменение файла: ${targetPath}`,
-			safeBlockReason: "Отклонено пользователем в режиме Auto-Safe",
+			planReason: t("preflight.plan.writeBlocked"),
+			confirmSummary: t("preflight.confirm.fileEdit", { targetPath }),
+			safeBlockReason: t("preflight.auto.editBlocked"),
 		};
 	}
 
@@ -190,18 +301,18 @@ function classifyToolMutation(req: ToolCallPreflightRequest): ToolMutationClassi
 		}
 		return {
 			mutating: true,
-			planReason: `В режиме Plan разрешены только команды чтения (${effect.reason}). Заблокировано: ${cmd}`,
+			planReason: t("preflight.plan.shellBlocked", { reason: effect.reason, cmd }),
 			confirmSummary: cmd,
-			safeBlockReason: "Команда отклонена пользователем в режиме Auto-Safe",
+			safeBlockReason: t("preflight.auto.shellBlocked"),
 		};
 	}
 
 	if (isDestructiveAnnotatedTool(toolName, tools)) {
 		return {
 			mutating: true,
-			planReason: `В режиме Plan деструктивный инструмент "${toolName}" заблокирован.`,
-			confirmSummary: `Деструктивный инструмент: ${toolName}`,
-			safeBlockReason: `Инструмент "${toolName}" отклонён пользователем в режиме Auto-Safe`,
+			planReason: t("preflight.plan.destructiveBlocked", { toolName }),
+			confirmSummary: t("preflight.confirm.destructive", { toolName }),
+			safeBlockReason: t("preflight.auto.toolBlocked", { toolName }),
 		};
 	}
 
@@ -209,7 +320,7 @@ function classifyToolMutation(req: ToolCallPreflightRequest): ToolMutationClassi
 }
 
 export class SessionWorkflow {
-	mode: SessionMode = "code";
+	mode: SessionMode = "always-approve";
 	planRaw = "";
 	planLines: string[] = [];
 	planComments: Record<number, string> = {};
@@ -222,7 +333,7 @@ export class SessionWorkflow {
 	private safeConfirmWaiters: Array<() => void> = [];
 
 	reset(defaultPlanFlag = false): void {
-		this.mode = defaultPlanFlag ? "plan" : "code";
+		this.mode = defaultPlanFlag ? "plan" : "always-approve";
 		this.planRaw = "";
 		this.planLines = [];
 		this.planComments = {};
@@ -276,7 +387,7 @@ export class SessionWorkflow {
 		req: ToolCallPreflightRequest,
 		confirmSafe: SafeConfirmationPrompt,
 	): Promise<ToolCallPreflightResult> {
-		if (this.mode === "code") return undefined;
+		if (this.mode === "always-approve") return undefined;
 
 		const classification = classifyToolMutation(req);
 		if (!classification.mutating) return undefined;
@@ -288,7 +399,7 @@ export class SessionWorkflow {
 		if (this.safeAllowTurn) return undefined;
 
 		return await this.enqueueSafeConfirmation(async () => {
-			if (this.mode === "code") return undefined;
+			if (this.mode === "always-approve") return undefined;
 			if (this.mode === "plan") {
 				return { block: true, reason: classification.planReason };
 			}
@@ -315,12 +426,12 @@ export class SessionWorkflow {
 	syncActiveTools(tools: ToolAccessPort, options?: { inferMissingOnPlanRestore?: boolean }): void {
 		const active = tools.getActiveTools();
 		if (this.mode === "plan") {
-			const activeWriteTools = active.filter((t) => WRITE_TOOLS.has(t));
+			const activeWriteTools = active.filter((name) => WRITE_TOOLS.has(name));
 			if (activeWriteTools.length > 0) {
 				const merged = new Set(this.withheldWriteTools ?? []);
 				for (const name of activeWriteTools) merged.add(name);
 				this.withheldWriteTools = [...merged];
-				tools.setActiveTools(active.filter((t) => !WRITE_TOOLS.has(t)));
+				tools.setActiveTools(active.filter((name) => !WRITE_TOOLS.has(name)));
 			} else if (this.withheldWriteTools === undefined) {
 				this.withheldWriteTools = options?.inferMissingOnPlanRestore
 					? inferAvailableWriteTools(tools)
@@ -332,7 +443,7 @@ export class SessionWorkflow {
 		if (this.withheldWriteTools !== undefined) {
 			if (this.withheldWriteTools.length > 0) {
 				const activeSet = new Set(active);
-				const toRestore = this.withheldWriteTools.filter((t) => !activeSet.has(t));
+				const toRestore = this.withheldWriteTools.filter((name) => !activeSet.has(name));
 				if (toRestore.length > 0) {
 					tools.setActiveTools([...active, ...toRestore]);
 				}
@@ -350,12 +461,6 @@ export class SessionWorkflow {
 			this.syncActiveTools(tools);
 		}
 		return this.mode;
-	}
-
-	cycleMode(tools?: ToolAccessPort): SessionMode {
-		const order: SessionMode[] = ["code", "plan", "safe"];
-		const next = order[(order.indexOf(this.mode) + 1) % order.length]!;
-		return this.setMode(next, tools);
 	}
 
 	capturePlan(markdown: string): boolean {
@@ -404,7 +509,13 @@ export class SessionWorkflow {
 
 		if (entries.length === 0) return "";
 		return entries
-			.map(([lineIdx, note]) => `- Строка ${lineIdx + 1} (\`${(this.planLines[lineIdx] ?? "").trim()}\`): ${note}`)
+			.map(([lineIdx, note]) =>
+				t("plan.prompt.lineComment", {
+					line: lineIdx + 1,
+					source: (this.planLines[lineIdx] ?? "").trim(),
+					note,
+				}),
+			)
 			.join("\n");
 	}
 
@@ -415,17 +526,15 @@ export class SessionWorkflow {
 
 		const commentsText = this.formatLineComments();
 		this.executingPlan = this.planSteps.length > 0;
-		this.setMode("code", tools);
+		this.setMode("always-approve", tools);
 		this.planComments = {};
 
 		const stepInstruction =
-			this.planSteps.length > 0
-				? `\nПосле завершения каждого пронумерованного шага плана добавляй маркер \`[DONE:n]\` (например \`[DONE:1]\`), чтобы обновлялся прогресс.`
-				: "";
+			this.planSteps.length > 0 ? t("plan.prompt.doneInstruction") : "";
 
 		const prompt = commentsText
-			? `Реализуй утверждённый план с учётом моих построчных комментариев:\n\n### Комментарии к строкам плана\n${commentsText}${stepInstruction}`
-			: `План утверждён. Приступай к реализации по шагам.${stepInstruction}`;
+			? t("plan.prompt.approveWithComments", { comments: commentsText, stepInstruction })
+			: t("plan.prompt.approve", { stepInstruction });
 
 		return { ok: true, prompt, executingPlan: this.executingPlan };
 	}
@@ -443,7 +552,7 @@ export class SessionWorkflow {
 
 		return {
 			ok: true,
-			prompt: `Обнови план без воды, точечно учитывая мои комментарии к строкам:\n\n${commentsText}`,
+			prompt: t("plan.prompt.revise", { comments: commentsText }),
 		};
 	}
 
@@ -497,8 +606,9 @@ export class SessionWorkflow {
 
 		if (saved?.data && typeof saved.data === "object") {
 			const d = saved.data as Record<string, unknown>;
-			if (d.mode === "code" || d.mode === "plan" || d.mode === "safe") {
-				this.mode = d.mode;
+			const restoredMode = normalizeSessionMode(d.mode);
+			if (restoredMode) {
+				this.mode = restoredMode;
 			}
 			this.planRaw = typeof d.planRaw === "string" ? d.planRaw : "";
 			this.planLines = this.planRaw ? this.planRaw.split("\n") : [];

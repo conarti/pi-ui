@@ -18,6 +18,7 @@ import {
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 import { bgRgb, fgRgb } from "../../shared/ansi.ts";
+import { t } from "../../shared/i18n.ts";
 import { matchesLayoutChord } from "../../shared/keyboard-layout.ts";
 import {
 	createModalCard,
@@ -89,7 +90,7 @@ export async function showQuotesManagerModal(
 	const registry = getActivePromptChipRegistry();
 	const initialItems = listActiveDraftQuotes(registry, readComposerDraftText(ctx));
 	if (initialItems.length === 0) {
-		ctx.ui.notify("В черновике нет активных цитат", "info");
+		ctx.ui.notify(t("quotes.noneInDraft"), "info");
 		return;
 	}
 
@@ -105,6 +106,8 @@ export async function showQuotesManagerModal(
 			let mode: "inspect" | "edit" = "inspect";
 			let editingQuoteNumber: number | undefined;
 			let editBuffer: Editor | undefined;
+			const editUndoStack: string[] = [];
+			const editRedoStack: string[] = [];
 
 			const getItems = (): ActiveDraftQuoteItem[] =>
 				listActiveDraftQuotes(registry, readComposerDraftText(ctx));
@@ -118,6 +121,8 @@ export async function showQuotesManagerModal(
 				const ed = new Editor(tui, createEmbeddedEditorTheme(theme), { paddingX: 0 });
 				ed.focused = true;
 				ed.setText(item.entry.text);
+				editUndoStack.length = 0;
+				editRedoStack.length = 0;
 				editBuffer = ed;
 				mode = "edit";
 				return true;
@@ -208,9 +213,9 @@ export async function showQuotesManagerModal(
 
 					if (items.length === 0) {
 						return card.render(width, theme, {
-							title: fgRgb(palette.accentBright, theme.bold("❝ Цитаты")),
+							title: fgRgb(palette.accentBright, theme.bold(t("quotes.modal.emptyTitle"))),
 							onClose: () => done(),
-							bodyLines: [theme.fg("muted", "Нет активных цитат в черновике")],
+							bodyLines: [theme.fg("muted", t("quotes.modal.emptyBody"))],
 							borderVariant: "primary",
 						});
 					}
@@ -228,7 +233,7 @@ export async function showQuotesManagerModal(
 								? rawEditorLines.slice(1, rawEditorLines.length - 1)
 								: rawEditorLines;
 						const body: string[] = [
-							theme.fg("muted", `Редактирование чипа #${editingQuoteNumber}`),
+							theme.fg("muted", t("quotes.modal.editHeader", { num: editingQuoteNumber })),
 							theme.fg("borderMuted", "─".repeat(innerWidth)),
 							...contentLines.map((line) =>
 								truncateToWidth(`${fgRgb(palette.accent, "│ ")}${line}`, innerWidth, "…"),
@@ -238,21 +243,24 @@ export async function showQuotesManagerModal(
 						const editPills: ModalActionPill[] = [
 							{
 								id: "save-edit",
-								label: "Сохранить",
+								label: t("quotes.modal.save"),
 								variant: "primary",
 								active: true,
 								onClick: () => commitEdit(),
 							},
 							{
 								id: "cancel-edit",
-								label: "Отмена",
+								label: t("quotes.modal.cancel"),
 								variant: "neutral",
 								onClick: () => cancelEdit(),
 							},
 						];
 
 						return card.render(width, theme, {
-							title: fgRgb(palette.accentBright, theme.bold(`❝ Цитата #${editingQuoteNumber}`)),
+							title: fgRgb(
+								palette.accentBright,
+								theme.bold(t("quotes.modal.editTitle", { num: editingQuoteNumber })),
+							),
 							onClose: () => cancelEdit(),
 							bodyLines: body,
 							footerPills: editPills,
@@ -343,7 +351,7 @@ export async function showQuotesManagerModal(
 					const inspectPills: ModalActionPill[] = [
 						{
 							id: "edit-quote",
-							label: "Изменить",
+							label: t("quotes.modal.edit"),
 							variant: "primary",
 							active: true,
 							onClick: () => {
@@ -352,26 +360,26 @@ export async function showQuotesManagerModal(
 						},
 						{
 							id: "remove-quote",
-							label: "Удалить",
+							label: t("quotes.modal.remove"),
 							variant: "danger",
 							onClick: () => removeSelectedQuote(),
 						},
 						{
 							id: "clear-quotes",
-							label: "Очистить все",
+							label: t("quotes.modal.clearAll"),
 							variant: "warning",
 							onClick: () => clearAllQuotes(),
 						},
 						{
 							id: "close-quotes",
-							label: "Закрыть",
+							label: t("quotes.modal.close"),
 							variant: "neutral",
 							onClick: () => done(),
 						},
 					];
 
 					return card.render(width, theme, {
-						title: fgRgb(palette.accentBright, theme.bold("❝ Цитаты черновика")),
+						title: fgRgb(palette.accentBright, theme.bold(t("quotes.modal.title"))),
 						headerMeta: theme.fg("muted", `${items.length}`),
 						onClose: () => done(),
 						bodyLines: body,
@@ -413,6 +421,24 @@ export async function showQuotesManagerModal(
 							tui.requestRender();
 							return;
 						}
+						if (matchesLayoutChord(data, "ctrl+shift+z") || matchesLayoutChord(data, "ctrl+y")) {
+							const redoText = editRedoStack.pop();
+							if (redoText !== undefined) {
+								editUndoStack.push(editBuffer.getText());
+								editBuffer.setText(redoText);
+								tui.requestRender();
+							}
+							return;
+						}
+						if (matchesLayoutChord(data, "ctrl+z")) {
+							const undoText = editUndoStack.pop();
+							if (undoText !== undefined) {
+								editRedoStack.push(editBuffer.getText());
+								editBuffer.setText(undoText);
+								tui.requestRender();
+							}
+							return;
+						}
 						const isCommit =
 							data === "\r" ||
 							data === "\n" ||
@@ -424,7 +450,14 @@ export async function showQuotesManagerModal(
 							tui.requestRender();
 							return;
 						}
+						const beforeText = editBuffer.getText();
 						editBuffer.handleInput(data);
+						const afterText = editBuffer.getText();
+						if (afterText !== beforeText) {
+							editUndoStack.push(beforeText);
+							if (editUndoStack.length > 100) editUndoStack.shift();
+							editRedoStack.length = 0;
+						}
 						tui.requestRender();
 						return;
 					}
@@ -543,29 +576,29 @@ export async function handleQuotesCommand(rawArgs: string, ctx: ExtensionContext
 		const preSnap = registry.captureUndoSnapshot();
 		const res = clearAllDraftQuotes(registry, draft);
 		if (res.removedCount === 0) {
-			ctx.ui.notify("В черновике нет активных цитат", "info");
+			ctx.ui.notify(t("quotes.noneInDraft"), "info");
 			return;
 		}
 		writeComposerDraftTextWithUndo(ctx, res.draftText, preSnap);
-		ctx.ui.notify(`Удалено цитат: ${res.removedCount}`, "info");
+		ctx.ui.notify(t("quotes.clearedCount", { count: res.removedCount }), "info");
 		return;
 	}
 
 	if (sub === "remove" || sub === "rm" || sub === "delete") {
 		const targetNum = parseQuoteTargetNumber(rest.split(/\s+/)[0]);
 		if (targetNum === undefined) {
-			ctx.ui.notify("Использование: /quotes remove <номер>", "warning");
+			ctx.ui.notify(t("quotes.usage.remove"), "warning");
 			return;
 		}
 		const draft = readComposerDraftText(ctx);
 		const preSnap = registry.captureUndoSnapshot();
 		const res = removeDraftQuote(registry, draft, targetNum);
 		if (!res.removed) {
-			ctx.ui.notify(`Цитата #${targetNum} не найдена в черновике`, "warning");
+			ctx.ui.notify(t("quotes.notFound", { num: targetNum }), "warning");
 			return;
 		}
 		writeComposerDraftTextWithUndo(ctx, res.draftText, preSnap);
-		ctx.ui.notify(`Цитата #${targetNum} удалена`, "info");
+		ctx.ui.notify(t("quotes.removed", { num: targetNum }), "info");
 		return;
 	}
 
@@ -573,7 +606,7 @@ export async function handleQuotesCommand(rawArgs: string, ctx: ExtensionContext
 		const tokenMatch = /^(\S+)(?:\s+([\s\S]+))?$/.exec(rest);
 		const targetNum = parseQuoteTargetNumber(tokenMatch?.[1]);
 		if (targetNum === undefined) {
-			ctx.ui.notify("Использование: /quotes edit <номер> [новый текст]", "warning");
+			ctx.ui.notify(t("quotes.usage.edit"), "warning");
 			return;
 		}
 		const inlineReplacement = tokenMatch?.[2];
@@ -582,21 +615,23 @@ export async function handleQuotesCommand(rawArgs: string, ctx: ExtensionContext
 			const preSnap = registry.captureUndoSnapshot();
 			const res = editDraftQuote(registry, draft, targetNum, inlineReplacement);
 			if (!res.found) {
-				ctx.ui.notify(`Цитата #${targetNum} не найдена в черновике`, "warning");
+				ctx.ui.notify(t("quotes.notFound", { num: targetNum }), "warning");
 				return;
 			}
 			if (!(res.unchanged && res.draftText === draft)) {
 				writeComposerDraftTextWithUndo(ctx, res.draftText, preSnap);
 			}
 			ctx.ui.notify(
-				res.removed ? `Цитата #${targetNum} удалена` : `Цитата #${targetNum} обновлена`,
+				res.removed
+					? t("quotes.removed", { num: targetNum })
+					: t("quotes.updated", { num: targetNum }),
 				"info",
 			);
 			return;
 		}
 		const items = listActiveDraftQuotes(registry, readComposerDraftText(ctx));
 		if (!items.some((it) => it.number === targetNum)) {
-			ctx.ui.notify(`Цитата #${targetNum} не найдена в черновике`, "warning");
+			ctx.ui.notify(t("quotes.notFound", { num: targetNum }), "warning");
 			return;
 		}
 		await showQuotesManagerModal(ctx, { initialEditQuoteNumber: targetNum });
@@ -605,7 +640,7 @@ export async function handleQuotesCommand(rawArgs: string, ctx: ExtensionContext
 
 	const directQuoteNum = sub !== "" && rest === "" ? parseQuoteTargetNumber(sub) : undefined;
 	if (sub !== "" && sub !== "list" && sub !== "preview" && directQuoteNum === undefined) {
-		ctx.ui.notify("Использование: /quotes [edit <номер> [текст] | remove <номер> | clear]", "warning");
+		ctx.ui.notify(t("quotes.usage.quotes"), "warning");
 		return;
 	}
 
@@ -619,7 +654,7 @@ export async function handleQuotesCommand(rawArgs: string, ctx: ExtensionContext
 
 	const items = listActiveDraftQuotes(registry, readComposerDraftText(ctx));
 	if (items.length === 0) {
-		ctx.ui.notify("В черновике нет активных цитат", "info");
+		ctx.ui.notify(t("quotes.noneInDraft"), "info");
 		return;
 	}
 	const summary = items
