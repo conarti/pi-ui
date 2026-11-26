@@ -129,16 +129,16 @@ export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void 
 
 					boxes.push({
 						id: "open",
-						xStart: 1,
-						xEnd: 1 + visibleWidth(btnOpen),
+						xStart: 0,
+						xEnd: visibleWidth(btnOpen),
 						y: 0,
 						onClick: () => void showPlanApproval(pi, ctx),
 					});
-					const prefix = ` ${btnOpen}  ${bar} `;
-					const availPreview = Math.max(0, width - visibleWidth(prefix) - visibleWidth(btnClear) - 3);
+					const prefix = `${btnOpen}  ${bar} `;
+					const availPreview = Math.max(0, width - visibleWidth(prefix) - visibleWidth(btnClear) - 2);
 					const clippedPreview = availPreview > 8 ? truncateToWidth(stepPreview, availPreview, "…") : "";
 					const gap = " ".repeat(
-						Math.max(1, width - visibleWidth(prefix) - visibleWidth(clippedPreview) - visibleWidth(btnClear) - 1),
+						Math.max(1, width - visibleWidth(prefix) - visibleWidth(clippedPreview) - visibleWidth(btnClear)),
 					);
 					const xClear = visibleWidth(prefix) + visibleWidth(clippedPreview) + gap.length;
 					boxes.push({
@@ -166,15 +166,15 @@ export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void 
 					});
 					const btnDismiss = renderCloseButton(theme, hovered === "dismiss");
 
-					let x = 1;
+					let x = 0;
 					const wRev = visibleWidth(btnReview);
 					boxes.push({ id: "review", xStart: x, xEnd: x + wRev, y: 0, onClick: () => void showPlanApproval(pi, ctx) });
 					x += wRev + 2;
 					const wRun = visibleWidth(btnRun);
 					boxes.push({ id: "run", xStart: x, xEnd: x + wRun, y: 0, onClick: () => approveAndExecutePlan(pi, ctx) });
-					const leftPart = ` ${btnReview}  ${btnRun}`;
+					const leftPart = `${btnReview}  ${btnRun}`;
 					const gap = " ".repeat(
-						Math.max(1, width - visibleWidth(leftPart) - visibleWidth(btnDismiss) - 1),
+						Math.max(1, width - visibleWidth(leftPart) - visibleWidth(btnDismiss)),
 					);
 					const xDismiss = visibleWidth(leftPart) + gap.length;
 					boxes.push({
@@ -195,13 +195,13 @@ export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void 
 				});
 				boxes.push({
 					id: "exit-plan",
-					xStart: 1,
-					xEnd: 1 + visibleWidth(badge),
+					xStart: 0,
+					xEnd: visibleWidth(badge),
 					y: 0,
 					onClick: () => setSessionMode(pi, ctx, "always-approve"),
 				});
 				const info = theme.fg("muted", t("plan.widget.modeHint"));
-				return [truncateToWidth(` ${badge}${info}`, width, "…")];
+				return [truncateToWidth(`${badge}${info}`, width, "…")];
 			},
 			handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 				const hit = boxes.find((b) => b.y === event.y && event.x >= b.xStart && event.x < b.xEnd);

@@ -1080,4 +1080,54 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 		expect(astraThinkingText).toContain("max");
 		await harness.pressKey("\x1b");
 	});
+
+	it("aligns custom aboveEditor and belowEditor widgets to symmetric x=4..width-5 dialogue margins and translates mouse clicks", async () => {
+		let clickedLocalX = -1;
+		const width = 90;
+		harness = await createInteractiveHarness({
+			theme: "dark",
+			width,
+			height: 28,
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_start", (_ev, ctx) => {
+						ctx.ui.setWidget("custom-above", () => ({
+							invalidate() {},
+							render(innerW: number): string[] {
+								const left = "◆ 2 agy artifacts · /agy-artifacts";
+								const right = "RIGHT_EDGE";
+								const gap = " ".repeat(Math.max(1, innerW - visibleWidth(left) - right.length));
+								return [`${left}${gap}${right}`];
+							},
+							handleMouse(event) {
+								if (event.type === "click") {
+									clickedLocalX = event.x;
+									return { handled: true, render: false };
+								}
+								return undefined;
+							},
+						}));
+						ctx.ui.setWidget("custom-below", ["Below status line"], { placement: "belowEditor" });
+					});
+				},
+			],
+		});
+
+		const screen = harness.screen();
+		const aboveHit = screen.findText("◆ 2 agy artifacts")!;
+		expect(aboveHit).toBeDefined();
+		expect(aboveHit.col).toBe(4);
+		const aboveRow = screen.rowText(aboveHit.row);
+		expect(aboveRow.slice(width - 4)).toBe("    ");
+		expect(aboveRow.slice(width - 4 - "RIGHT_EDGE".length, width - 4)).toBe("RIGHT_EDGE");
+
+		const belowHit = screen.findText("Below status line")!;
+		expect(belowHit).toBeDefined();
+		expect(belowHit.col).toBe(4);
+
+		/* Клик по /agy-artifacts передаёт в виджет локальную координату x без 4-колоночного внешнего отступа */
+		const cmdCol = screen.findText("/agy-artifacts")!.col;
+		await harness.mouseClick(cmdCol + 2, aboveHit.row);
+		expect(clickedLocalX).toBe(cmdCol + 2 - 4);
+	});
 });

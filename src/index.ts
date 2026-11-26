@@ -10,7 +10,7 @@ import {
 	closeActiveComposerPopover,
 	openComposerPopover,
 } from "./features/chrome/composer-popovers.ts";
-import { resetMidTurnQueueUi } from "./features/chrome/mid-turn-queue.ts";
+import { installExtensionWidgetMargins, resetMidTurnQueueUi } from "./features/chrome/mid-turn-queue.ts";
 import { disposeShortcutsBar, mountShortcutsBar, syncShortcutsBar } from "./features/chrome/shortcuts-bar.ts";
 import { registerComposerWorkingAnimation } from "./features/chrome/working-indicator.ts";
 import { createPinnedSessionHeaderSlot, mountSessionHeader } from "./features/chrome/header.ts";
@@ -116,7 +116,8 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 		}
 	});
 
-	/* 1. Карточки транскрипта, волновая анимация, Prompt Chips и цитаты */
+	/* 1. Карточки транскрипта, поля виджетов, волновая анимация, Prompt Chips и цитаты */
+	installExtensionWidgetMargins();
 	registerTranscriptFeature(pi);
 	registerComposerWorkingAnimation(pi);
 	registerPromptChipsFeature(pi);

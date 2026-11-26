@@ -5,9 +5,13 @@ import { InteractiveMode, type Theme } from "@earendil-works/pi-coding-agent";
 import {
 	Container,
 	getImageDimensions,
+	isFocusable,
+	Spacer,
+	Text,
 	truncateToWidth,
 	visibleWidth,
 	type Component,
+	type Focusable,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
@@ -16,6 +20,7 @@ import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { getActiveHostRuntime, getFocusedHostComponent } from "../../shared/host-runtime.ts";
 import { t } from "../../shared/i18n.ts";
 import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
+import { isSlotOwnedByPiUi } from "../../shared/slot-arbitration.ts";
 import { extensionForImageMime } from "../prompt-chips/clipboard.ts";
 import { getActivePromptChipRegistry, IMAGE_MARKER_RE } from "../prompt-chips/registry.ts";
 import { getActiveComposerEditor, type PiUiComposerEditor } from "./composer.ts";
@@ -53,6 +58,9 @@ interface HostInteractiveModeInternals {
 	};
 	pendingMessagesContainer: Container;
 	pendingBashComponents?: Component[];
+	extensionWidgetsAbove?: Map<string, Component>;
+	extensionWidgetsBelow?: Map<string, Component>;
+	renderWidgets?(): void;
 	getAllQueuedMessages(): { steering: string[]; followUp: string[] };
 	clearAllQueues(): { steering: string[]; followUp: string[] };
 	updatePendingMessagesDisplay(): void;
@@ -434,9 +442,172 @@ class PendingQueueStripComponent implements Component {
  * Устанавливает перехват отображения очереди отложенных сообщений над Composer,
  * заменяя статичные строки хоста на кликабельную панель `[Send now] [Edit · Alt+↑] [×]`.
  */
+const STRING_ARRAY_WIDGETS = new WeakSet<object>();
+
+function computeWidgetSidePadding(width: number): number {
+	const outerPad = computeOuterCanvasMargin(width);
+	return outerPad > 0 && width >= 16 ? outerPad + 2 : outerPad;
+}
+
+function normalizeHostStringArrayWidget(component: Component): void {
+	if (!(component instanceof Container)) return;
+	if (
+		!STRING_ARRAY_WIDGETS.has(component) &&
+		!(component.children.length > 0 && component.children.every((child) => child instanceof Text))
+	) {
+		return;
+	}
+	for (const child of component.children) {
+		if (child instanceof Text) {
+			child.setPaddingX(0);
+		}
+	}
+}
+
+class InsetExtensionWidgetComponent implements Component, Focusable {
+	private lastPad = 0;
+	private lastInnerWidth = 0;
+
+	constructor(private readonly inner: Component) {}
+
+	get focused(): boolean {
+		return isFocusable(this.inner) ? this.inner.focused : false;
+	}
+
+	set focused(value: boolean) {
+		if (isFocusable(this.inner)) {
+			this.inner.focused = value;
+		}
+	}
+
+	invalidate(): void {
+		this.inner.invalidate?.();
+	}
+
+	render(width: number): string[] {
+		const pad = computeWidgetSidePadding(width);
+		const innerWidth = Math.max(1, width - pad * 2);
+		this.lastPad = pad;
+		this.lastInnerWidth = innerWidth;
+
+		const rawLines = this.inner.render(innerWidth);
+		if (rawLines.length === 0 || pad === 0) {
+			return [...rawLines];
+		}
+		const margin = " ".repeat(pad);
+		return rawLines.map((line) => {
+			if (line.includes("\x1b_G") || line.includes("\x1b]1337;File=")) {
+				return `${margin}${line}`;
+			}
+			const clipped = visibleWidth(line) > innerWidth ? truncateToWidth(line, innerWidth, "…") : line;
+			const rightFill = " ".repeat(Math.max(0, innerWidth - visibleWidth(clipped)));
+			return `${margin}${clipped}\x1b[0m${rightFill}${margin}`;
+		});
+	}
+
+	handleInput(data: string): void {
+		this.inner.handleInput?.(data);
+	}
+
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (typeof this.inner.handleMouse !== "function") {
+			return undefined;
+		}
+		const pad = this.lastPad;
+		const innerWidth = Math.max(1, this.lastInnerWidth || Math.max(1, event.width - pad * 2));
+		if (
+			event.type !== "drag" &&
+			event.type !== "release" &&
+			(event.x < pad || event.x >= pad + innerWidth)
+		) {
+			return undefined;
+		}
+		const res = this.inner.handleMouse({
+			...event,
+			x: event.x - pad,
+			width: innerWidth,
+		});
+		if (res && typeof res === "object" && "target" in res) {
+			const { target: _ignoredTarget, focusTarget: _ignoredFocus, ...plain } = res as TuiMouseEventResult & {
+				target?: unknown;
+				focusTarget?: unknown;
+			};
+			return plain;
+		}
+		return res;
+	}
+}
+
+export function installExtensionWidgetMargins(): void {
+	const modeProto = (InteractiveMode as unknown as { prototype?: object } | undefined)?.prototype;
+	if (!modeProto) return;
+
+	hookMethod(
+		modeProto,
+		"setExtensionWidget",
+		"chrome.tagStringArrayWidget",
+		(self, args, original) => {
+			const result = original.apply(self, args);
+			const [key, content, options] = args as [
+				string,
+				unknown,
+				{ placement?: "aboveEditor" | "belowEditor" } | undefined,
+			];
+			if (Array.isArray(content)) {
+				const mode = self as HostInteractiveModeInternals;
+				const targetMap =
+					options?.placement === "belowEditor"
+						? mode.extensionWidgetsBelow
+						: mode.extensionWidgetsAbove;
+				const created = targetMap?.get(key);
+				if (created && typeof created === "object") {
+					STRING_ARRAY_WIDGETS.add(created);
+				}
+			}
+			return result;
+		},
+	);
+
+	hookMethod(
+		modeProto,
+		"renderWidgetContainer",
+		"chrome.insetExtensionWidgets",
+		(self, args, original) => {
+			if (!isSlotOwnedByPiUi("editor")) {
+				return original.apply(self, args);
+			}
+			const [container, widgets, spacerWhenEmpty, leadingSpacer] = args as [
+				Container,
+				Map<string, Component>,
+				boolean,
+				boolean,
+			];
+			container.clear();
+			if (widgets.size === 0) {
+				if (spacerWhenEmpty) {
+					container.addChild(new Spacer(1));
+				}
+				return;
+			}
+			if (leadingSpacer) {
+				container.addChild(new Spacer(1));
+			}
+			for (const component of widgets.values()) {
+				normalizeHostStringArrayWidget(component);
+				container.addChild(
+					component instanceof InsetExtensionWidgetComponent
+						? component
+						: new InsetExtensionWidgetComponent(component),
+				);
+			}
+		},
+	);
+}
+
 export function installMidTurnQueueUi(getTheme: () => Theme): void {
 	const state = getQueueState();
 	state.getTheme = getTheme;
+	installExtensionWidgetMargins();
 
 	const modeProto = (InteractiveMode as unknown as { prototype?: object } | undefined)?.prototype;
 	if (!modeProto) return;
@@ -493,6 +664,8 @@ export function installMidTurnQueueUi(getTheme: () => Theme): void {
 			}
 		},
 	);
+
+	state.activeMode?.renderWidgets?.();
 }
 
 export function bindActiveInteractiveModeFromSessionStart(getTheme: () => Theme): void {

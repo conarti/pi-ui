@@ -69,8 +69,9 @@ export class ResponseMetricsRowComponent implements Component {
 		}
 
 		const outerPad = computeOuterCanvasMargin(width);
-		const leftStart = outerPad + 2;
-		const rightPad = outerPad;
+		const innerInset = outerPad > 0 ? 2 : 0;
+		const leftStart = outerPad + innerInset;
+		const rightPad = outerPad + innerInset;
 		const light = isLightTheme(this.themeRef);
 		const palette = getThemeSurfacePalette(this.themeRef);
 

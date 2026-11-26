@@ -308,9 +308,13 @@ export default function (pi) {
 
 		const rowAtRest = screenAtRest.rowText(workedHit!.row);
 		expect(rowAtRest).toContain("Worked for 4s · ttft 0.5s · 40 tok/s");
-		expect(rowAtRest.slice(width - 2)).toBe("  ");
+		expect(rowAtRest.slice(width - 4)).toBe("    ");
 		const expectedTimestamp = "25 Nov, 19:56";
-		expect(rowAtRest.slice(width - 2 - expectedTimestamp.length, width - 2)).toBe(expectedTimestamp);
+		expect(rowAtRest.slice(width - 4 - expectedTimestamp.length, width - 4)).toBe(expectedTimestamp);
+		const userPromptHit = screenAtRest.findText("Read hello.txt and summarize")!;
+		expect(screenAtRest.rowText(userPromptHit.row).lastIndexOf(expectedTimestamp.slice(0, 6))).toBe(
+			rowAtRest.lastIndexOf(expectedTimestamp.slice(0, 6)),
+		);
 
 		/* Проза Markdown выше сохраняет полную ширину без наложенного timestamp на строке 0 */
 		const proseHit = screenAtRest.findText("Summary: hello world.");
@@ -323,8 +327,8 @@ export default function (pi) {
 		const screenHovered = harness.screen();
 		const hoveredRow = screenHovered.rowText(workedHit!.row);
 		expect(hoveredRow).toContain("Worked for 4s · ttft 0.5s · 40 tok/s");
-		expect(hoveredRow.slice(width - 2)).toBe("  ");
-		expect(hoveredRow.slice(width - 2 - expectedTimestamp.length, width - 2)).toBe(expectedTimestamp);
+		expect(hoveredRow.slice(width - 4)).toBe("    ");
+		expect(hoveredRow.slice(width - 4 - expectedTimestamp.length, width - 4)).toBe(expectedTimestamp);
 		expect(screenHovered.rowText(workedHit!.row + 1)).toBe(rowCountBeforeHover);
 
 		await harness.mouseMove(0, 0);
@@ -349,9 +353,9 @@ export default function (pi) {
 		expect(offScreen.text()).not.toContain("ttft 0.4s");
 		const proseAfterOff = offScreen.findText("Summary: hello world.")!;
 		const tsOnlyRow = offScreen.rowText(proseAfterOff.row + 2);
-		expect(tsOnlyRow.slice(width - 2 - expectedTimestamp.length, width - 2)).toBe(expectedTimestamp);
-		expect(tsOnlyRow.slice(0, width - 2 - expectedTimestamp.length).trim()).toBe("");
-		expect(tsOnlyRow.slice(width - 2)).toBe("  ");
+		expect(tsOnlyRow.slice(width - 4 - expectedTimestamp.length, width - 4)).toBe(expectedTimestamp);
+		expect(tsOnlyRow.slice(0, width - 4 - expectedTimestamp.length).trim()).toBe("");
+		expect(tsOnlyRow.slice(width - 4)).toBe("    ");
 	});
 
 	it("includes cache-warming usage in session token and cost totals", async () => {
