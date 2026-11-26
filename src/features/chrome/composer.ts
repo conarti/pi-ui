@@ -27,11 +27,23 @@ import { unwrapHostTui } from "../../shared/host-runtime.ts";
 import { t } from "../../shared/i18n.ts";
 import { matchesLayoutChord } from "../../shared/keyboard-layout.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
+import { loadPiUiUserConfig } from "../../shared/pi-ui-config.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import { getSessionWorkflow, MODE_META } from "../../shared/session-workflow.ts";
-import { setAppActionRunner, setRequestRender } from "../../shared/ui-action-bridge.ts";
+import { runAppAction, setAppActionRunner, setRequestRender } from "../../shared/ui-action-bridge.ts";
 import { setSessionMode } from "../plan-studio/index.ts";
 import { showPlanStudio } from "../plan-studio/studio-overlay.ts";
+import {
+	closeActiveComposerPopover,
+	getActiveComposerPopoverKind,
+	openComposerPopover,
+} from "./composer-popovers.ts";
+import {
+	hasQueuedMidTurnMessages,
+	installMidTurnQueueUi,
+	sendNowDraftMidTurn,
+	sendNowTopQueuedMidTurnItem,
+} from "./mid-turn-queue.ts";
 import {
 	bindComposerWorkingIndicator,
 	buildWaveIndicator,
@@ -53,6 +65,15 @@ function fitExactWidth(text: string, targetWidth: number): string {
 
 export const COMPOSER_PLACEHOLDER = t("composer.placeholder");
 
+/**
+ * Вычисляет максимальное число видимых строк многострочного черновика Composer:
+ * `clamp(4, floor(termRows * 0.35), 10)`.
+ */
+export function computeComposerMaxVisibleLines(termRows: number): number {
+	const safeRows = Number.isFinite(termRows) ? Math.max(1, Math.floor(termRows)) : 24;
+	return Math.max(4, Math.min(10, Math.floor(safeRows * 0.35)));
+}
+
 export interface ComposerPointerInfo {
 	readonly hovered: boolean;
 	readonly mouseX?: number;
@@ -66,6 +87,7 @@ export interface ComposerHooks {
 	interceptInput?(data: string, editor: PiUiComposerEditor): boolean;
 	interceptEmptyDraftInput?(data: string, editor: PiUiComposerEditor): boolean;
 	getEmptyPlaceholder?(editor: PiUiComposerEditor): string | undefined;
+	onEmptyPlaceholderClick?(editor: PiUiComposerEditor): boolean;
 	hasDraftAttachments?(): boolean;
 	transformPaste?(pastedText: string, editor: PiUiComposerEditor): string | undefined;
 	findAtomicTokenSpans?(text: string, editor: PiUiComposerEditor): ReadonlyArray<{ start: number; end: number }>;
@@ -138,18 +160,29 @@ export interface PiUiComposerDeps {
 	readonly getTheme: () => Theme;
 }
 
+interface EditorLayoutLine {
+	readonly text: string;
+	readonly hasCursor: boolean;
+	readonly cursorPos?: number;
+}
+
 interface EditorInternals {
 	lastWidth?: number;
 	state: { lines: string[]; cursorLine: number; cursorCol: number };
 	lastAction: unknown;
 	scrollOffset: number;
 	renderedVisibleLineCount: number;
+	renderedAutocompleteHeight?: number;
+	autocompleteState?: unknown;
+	autocompleteList?: { render(width: number): string[] };
 	isInPaste?: boolean;
 	pasteBuffer?: string;
 	undoStack?: { length: number; clear?: () => void };
 	setCursorCol(col: number): void;
 	isEditorEmpty(): boolean;
 	insertTextAtCursor(text: string): void;
+	layoutText?(contentWidth: number): EditorLayoutLine[];
+	segment?(text: string, mode: "grapheme" | "word"): Iterable<Intl.SegmentData>;
 	buildVisualLineMap?(width: number): Array<{ logicalLine: number; startCol: number; length: number }>;
 }
 
@@ -172,19 +205,43 @@ const baseEditorProto = Editor.prototype as unknown as {
 	undo(): void;
 };
 
+export type ComposerTransientHintKind = "esc-clear" | "ctrl-c-stop";
+
+export interface ComposerTransientHint {
+	readonly kind: ComposerTransientHintKind;
+	readonly text: string;
+	readonly expiresAt: number;
+}
+
+interface ComposerRedoEntry {
+	readonly lines: string[];
+	readonly cursorLine: number;
+	readonly cursorCol: number;
+	readonly chipSnapshot: unknown;
+}
+
 export class PiUiComposerEditor extends CustomEditor {
 	private deps: PiUiComposerDeps;
 	private editorHovered = false;
 	private hoveredBadge: string | null = null;
 	private topHits: HitBox[] = [];
+	private bottomHits: HitBox[] = [];
+	private manualScrollActive = false;
+	private totalVisualLineCount = 1;
 	private workingRowOffset = 0;
 	private workingStatusRowY = -1;
 	private workingStopHit: HitBox | undefined;
 	private workingStopHovered = false;
 	private undoSnapshots: unknown[] = [];
+	private redoStack: ComposerRedoEntry[] = [];
 	private pendingUndoCapture: { hasValue: boolean; value: unknown } | undefined;
 	private restoringUndo = false;
+	private applyingRedo = false;
 	private acceptedSuggestionUndoArmed = false;
+	private transientHint: ComposerTransientHint | undefined;
+	private transientHintTimer: ReturnType<typeof setTimeout> | undefined;
+	private lastEmptyEscAt = 0;
+	private lastQueuedAt = 0;
 
 	constructor(
 		tui: TUI,
@@ -237,6 +294,106 @@ export class PiUiComposerEditor extends CustomEditor {
 		return this.tui;
 	}
 
+	getTransientHint(): ComposerTransientHint | undefined {
+		if (!this.transientHint) return undefined;
+		if (Date.now() > this.transientHint.expiresAt) {
+			this.clearTransientHint();
+			return undefined;
+		}
+		return this.transientHint;
+	}
+
+	private showTransientHint(kind: ComposerTransientHintKind, durationMs: number): void {
+		if (this.transientHintTimer) {
+			clearTimeout(this.transientHintTimer);
+			this.transientHintTimer = undefined;
+		}
+		const text =
+			kind === "esc-clear"
+				? t("composer.escAgainToClear")
+				: t("composer.pressCtrlCToStop");
+		this.transientHint = {
+			kind,
+			text,
+			expiresAt: Date.now() + durationMs,
+		};
+		this.transientHintTimer = setTimeout(() => {
+			this.transientHintTimer = undefined;
+			this.transientHint = undefined;
+			this.tui.requestRender();
+		}, durationMs);
+		this.transientHintTimer.unref?.();
+		this.tui.requestRender();
+	}
+
+	clearTransientHint(): void {
+		if (this.transientHintTimer) {
+			clearTimeout(this.transientHintTimer);
+			this.transientHintTimer = undefined;
+		}
+		this.transientHint = undefined;
+	}
+
+	dispose(): void {
+		this.clearTransientHint();
+	}
+
+	clearDraftWithUndo(): void {
+		const hooks = getComposerHooks();
+		const preSnap = hooks?.captureUndoState?.(this);
+		this.clearTransientHint();
+		this.setTextWithUndoSnapshot("", preSnap);
+		hooks?.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
+		this.tui.requestRender();
+	}
+
+	performUndo(): void {
+		const hooks = getComposerHooks();
+		this.clearTransientHint();
+		(this as unknown as { undo(): void }).undo();
+		if (this.internals().isEditorEmpty()) {
+			this.acceptedSuggestionUndoArmed = false;
+		}
+		hooks?.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
+		this.tui.requestRender();
+	}
+
+	performRedo(): boolean {
+		const entry = this.redoStack.pop();
+		if (!entry) return false;
+		const internal = this.internals();
+		const hooks = getComposerHooks();
+		this.clearTransientHint();
+		const currentChipSnap = hooks?.captureUndoState?.(this);
+
+		this.applyingRedo = true;
+		this.restoringUndo = true;
+		try {
+			this.pendingUndoCapture = { hasValue: true, value: currentChipSnap };
+			(this as unknown as { pushUndoSnapshot(): void }).pushUndoSnapshot();
+			internal.state.lines = [...entry.lines];
+			internal.state.cursorLine = Math.max(
+				0,
+				Math.min(internal.state.lines.length - 1, entry.cursorLine),
+			);
+			const targetLine = internal.state.lines[internal.state.cursorLine] ?? "";
+			internal.setCursorCol(Math.max(0, Math.min(targetLine.length, entry.cursorCol)));
+			if (hooks?.restoreUndoState && entry.chipSnapshot !== undefined) {
+				hooks.restoreUndoState(entry.chipSnapshot, this);
+			}
+			const nextText = this.getText();
+			hooks?.onDraftChanged?.(nextText, this);
+			this.onChange?.(this.getText());
+		} finally {
+			this.pendingUndoCapture = undefined;
+			this.restoringUndo = false;
+			this.applyingRedo = false;
+		}
+		hooks?.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
+		this.tui.requestRender();
+		return true;
+	}
+
 	isSessionIdle(): boolean {
 		return this.deps.ctx.isIdle();
 	}
@@ -266,6 +423,31 @@ export class PiUiComposerEditor extends CustomEditor {
 		const { state } = this.internals();
 		const currentLine = state.lines[state.cursorLine] ?? "";
 		return state.cursorCol > 0 ? (currentLine[state.cursorCol - 1] ?? "") : "";
+	}
+
+	getCharAfterCursor(): string {
+		const { state } = this.internals();
+		const currentLine = state.lines[state.cursorLine] ?? "";
+		return state.cursorCol < currentLine.length ? (currentLine[state.cursorCol] ?? "") : "";
+	}
+
+	scrollDraftBy(delta: number): boolean {
+		const internal = this.internals();
+		const visibleRows = Math.max(1, internal.renderedVisibleLineCount ?? 1);
+		const maxScroll = Math.max(0, this.totalVisualLineCount - visibleRows);
+		if (maxScroll <= 0) return false;
+		const prevScroll = internal.scrollOffset ?? 0;
+		const nextScroll = Math.max(0, Math.min(maxScroll, prevScroll + delta));
+		this.manualScrollActive = true;
+		if (nextScroll === prevScroll) return false;
+		internal.scrollOffset = nextScroll;
+		this.tui.requestRender();
+		return true;
+	}
+
+	override setText(text: string): void {
+		this.manualScrollActive = false;
+		super.setText(text);
 	}
 
 	getVisualSlice(visualLineIndex: number, totalWidth?: number): ComposerVisualSlice | undefined {
@@ -499,13 +681,21 @@ export class PiUiComposerEditor extends CustomEditor {
 			const preCaptured = hooks?.captureUndoState ? hooks.captureUndoState(this) : undefined;
 			const transformed = hooks?.transformPaste?.(pastedText, this);
 			if (transformed !== undefined) {
-				this.insertTextWithUndoSnapshot(transformed, preCaptured);
+				const spans = hooks?.findAtomicTokenSpans?.(transformed, this);
+				if (spans && spans.length > 0 && spans[0]!.start === 0 && spans.at(-1)!.end === transformed.length) {
+					this.insertChipTokenWithAutoSpaces(transformed, preCaptured);
+				} else {
+					this.insertTextWithUndoSnapshot(transformed, preCaptured);
+				}
 				return;
 			}
 			baseEditorProto.handlePaste.call(this, pastedText);
 		};
 
 		self.pushUndoSnapshot = (): void => {
+			if (!this.applyingRedo) {
+				this.redoStack.length = 0;
+			}
 			const stackDepth = this.internals().undoStack?.length ?? 0;
 			this.undoSnapshots.length = stackDepth;
 			const hooks = getComposerHooks();
@@ -521,7 +711,14 @@ export class PiUiComposerEditor extends CustomEditor {
 
 		self.undo = (): void => {
 			const internal = this.internals();
+			const hooks = getComposerHooks();
 			const beforeDepth = internal.undoStack?.length ?? 0;
+			const preUndoEntry: ComposerRedoEntry = {
+				lines: [...internal.state.lines],
+				cursorLine: internal.state.cursorLine,
+				cursorCol: internal.state.cursorCol,
+				chipSnapshot: hooks?.captureUndoState?.(this),
+			};
 			this.restoringUndo = true;
 			try {
 				baseEditorProto.undo.call(this);
@@ -530,10 +727,10 @@ export class PiUiComposerEditor extends CustomEditor {
 			}
 			const afterDepth = internal.undoStack?.length ?? 0;
 			if (afterDepth < beforeDepth) {
+				this.redoStack.push(preUndoEntry);
 				this.undoSnapshots.length = Math.min(this.undoSnapshots.length, beforeDepth);
 				const snap = this.undoSnapshots.pop();
 				this.undoSnapshots.length = afterDepth;
-				const hooks = getComposerHooks();
 				if (hooks?.restoreUndoState && snap !== undefined) {
 					hooks.restoreUndoState(snap, this);
 				}
@@ -554,10 +751,36 @@ export class PiUiComposerEditor extends CustomEditor {
 			const origClear = undoStack.clear.bind(undoStack);
 			undoStack.clear = () => {
 				this.undoSnapshots.length = 0;
+				this.redoStack.length = 0;
 				this.acceptedSuggestionUndoArmed = false;
 				origClear();
 			};
 		}
+
+		let hostOnSubmit = this.onSubmit;
+		Object.defineProperty(this, "onSubmit", {
+			configurable: true,
+			enumerable: true,
+			get: () => (text: string) => {
+				const trimmed = text.trim();
+				if (trimmed === "/model") {
+					this.addToHistory?.(trimmed);
+					this.setText("");
+					openComposerPopover(this.deps.pi, this.deps.ctx, "model");
+					return;
+				}
+				if (trimmed === "/thinking") {
+					this.addToHistory?.(trimmed);
+					this.setText("");
+					openComposerPopover(this.deps.pi, this.deps.ctx, "thinking");
+					return;
+				}
+				hostOnSubmit?.(text);
+			},
+			set: (fn: ((text: string) => void) | undefined) => {
+				hostOnSubmit = fn;
+			},
+		});
 
 		let hostOnChange = this.onChange;
 		Object.defineProperty(this, "onChange", {
@@ -581,6 +804,7 @@ export class PiUiComposerEditor extends CustomEditor {
 
 	insertTextWithUndoSnapshot(text: string, preCapturedSnapshot?: unknown): void {
 		if (!text) return;
+		this.manualScrollActive = false;
 		this.pendingUndoCapture = { hasValue: true, value: preCapturedSnapshot };
 		try {
 			this.internals().insertTextAtCursor(text);
@@ -589,7 +813,68 @@ export class PiUiComposerEditor extends CustomEditor {
 		}
 	}
 
+	/**
+	 * Вставляет токен `Prompt Chip` с автоматическими одиночными пробелами вокруг при соседстве
+	 * с непробельным текстом и ставит каретку сразу после `]`, чтобы `Backspace` удалял чип атомарно.
+	 */
+	insertChipTokenWithAutoSpaces(token: string, preCapturedSnapshot?: unknown): void {
+		if (!token) return;
+		const before = this.getCharBeforeCursor();
+		const after = this.getCharAfterCursor();
+		const lead = before && !/\s/u.test(before) ? " " : "";
+		const trail = after && !/\s/u.test(after) ? " " : "";
+		this.insertTextWithUndoSnapshot(`${lead}${token}${trail}`, preCapturedSnapshot);
+		if (trail === " ") {
+			const internal = this.internals();
+			if (internal.state.cursorCol > 0) {
+				internal.setCursorCol(internal.state.cursorCol - 1);
+			}
+		}
+	}
+
+	/**
+	 * Удаляет атомарный `Prompt Chip` по `Backspace` или `Delete`, схлопывая дублирующийся пробел,
+	 * если чип был окружён одиночными пробелами с обеих сторон.
+	 */
+	private tryDeleteAtomicChipWithSpaceCollapse(direction: "backward" | "forward"): boolean {
+		const hooks = getComposerHooks();
+		if (!hooks?.findAtomicTokenSpans) return false;
+		const internal = this.internals();
+		const { state } = internal;
+		const line = state.lines[state.cursorLine] ?? "";
+		const spans = hooks.findAtomicTokenSpans(line, this);
+		if (spans.length === 0) return false;
+
+		const hit =
+			direction === "backward"
+				? spans.find((s) => s.end === state.cursorCol)
+				: spans.find((s) => s.start === state.cursorCol);
+		if (!hit) return false;
+
+		const hasLeadingSpace = hit.start > 0 && line[hit.start - 1] === " ";
+		const hasTrailingSpace = hit.end < line.length && line[hit.end] === " ";
+		if (!hasLeadingSpace || !hasTrailingSpace) return false;
+
+		const preSnap = hooks.captureUndoState?.(this);
+		const nextLine = `${line.slice(0, hit.start)}${line.slice(hit.end + 1)}`;
+		const nextLines = [...state.lines];
+		nextLines[state.cursorLine] = nextLine;
+		this.pendingUndoCapture = { hasValue: true, value: preSnap };
+		try {
+			(this as unknown as { pushUndoSnapshot(): void }).pushUndoSnapshot();
+			state.lines = nextLines;
+			internal.setCursorCol(hit.start);
+			this.onChange?.(this.getText());
+		} finally {
+			this.pendingUndoCapture = undefined;
+		}
+		hooks.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
+		this.tui.requestRender();
+		return true;
+	}
+
 	setTextWithUndoSnapshot(text: string, preCapturedSnapshot?: unknown): void {
+		this.manualScrollActive = false;
 		const normalizedNext =
 			(this as unknown as { normalizeText?: (s: string) => string }).normalizeText?.(text) ?? text;
 		/* Editor.setText пропускает pushUndoSnapshot при неизменной строке (например, правка цитаты с тем же числом строк) */
@@ -605,7 +890,27 @@ export class PiUiComposerEditor extends CustomEditor {
 		}
 	}
 
+	triggerMidTurnAction(action: "queue" | "steer" | "send-now"): void {
+		const expanded = (this.getExpandedText?.() ?? this.getText()).trim();
+		if (action === "send-now") {
+			if (expanded.length > 0) {
+				void sendNowDraftMidTurn(expanded, this);
+			} else if (hasQueuedMidTurnMessages()) {
+				void sendNowTopQueuedMidTurnItem();
+			}
+			return;
+		}
+		if (expanded.length === 0) return;
+		this.lastQueuedAt = Date.now();
+		if (action === "queue") {
+			runAppAction("app.message.followUp");
+		} else {
+			this.onSubmit?.(expanded);
+		}
+	}
+
 	override handleInput(data: string): void {
+		this.manualScrollActive = false;
 		const internal = this.internals();
 		const hooks = getComposerHooks();
 		if (internal.isInPaste) {
@@ -624,6 +929,24 @@ export class PiUiComposerEditor extends CustomEditor {
 			hooks?.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
 			return;
 		}
+		if (
+			!data.startsWith("\x1b[200~") &&
+			!isKeyRelease(data) &&
+			!hasBlockingModalOverlay(this.tui)
+		) {
+			if (matchesLayoutChord(data, "ctrl+l")) {
+				openComposerPopover(this.deps.pi, this.deps.ctx, "model");
+				return;
+			}
+			if (matchesLayoutChord(data, "alt+t")) {
+				openComposerPopover(this.deps.pi, this.deps.ctx, "thinking");
+				return;
+			}
+			if (matchesLayoutChord(data, "alt+m")) {
+				openComposerPopover(this.deps.pi, this.deps.ctx, "mode");
+				return;
+			}
+		}
 		if (!data.startsWith("\x1b[200~") && this.onExtensionShortcut?.(data)) {
 			return;
 		}
@@ -633,18 +956,23 @@ export class PiUiComposerEditor extends CustomEditor {
 			!this.isShowingAutocomplete() &&
 			!hasBlockingModalOverlay(this.tui)
 		) {
-			const isUserCtrlZUndo =
-				matchesLayoutChord(data, "ctrl+z") &&
-				this.matchesKeybinding(data, "tui.editor.undo");
+			/* Ctrl+Shift+Z / Ctrl+Y — Redo, Ctrl+Z — Undo (без SIGTSTP) */
+			if (matchesLayoutChord(data, "ctrl+shift+z") || matchesLayoutChord(data, "ctrl+y")) {
+				this.performRedo();
+				return;
+			}
+			if (matchesLayoutChord(data, "ctrl+z")) {
+				this.performUndo();
+				return;
+			}
+
+			/* Ctrl+C во время активного хода прерывает генерацию */
 			if (
-				(this.acceptedSuggestionUndoArmed && matchesLayoutChord(data, "ctrl+z")) ||
-				isUserCtrlZUndo
+				(data === "\x03" || matchesLayoutChord(data, "ctrl+c")) &&
+				!this.isSessionIdle()
 			) {
-				(this as unknown as { undo(): void }).undo();
-				if (internal.isEditorEmpty()) {
-					this.acceptedSuggestionUndoArmed = false;
-				}
-				hooks?.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
+				this.clearTransientHint();
+				this.deps.ctx.abort();
 				this.tui.requestRender();
 				return;
 			}
@@ -652,24 +980,141 @@ export class PiUiComposerEditor extends CustomEditor {
 			if (this.isDraftCompletelyEmpty()) {
 				for (const featureHook of listAllComposerHooks()) {
 					if (featureHook.interceptEmptyDraftInput?.(data, this)) {
+						this.clearTransientHint();
+						this.lastEmptyEscAt = 0;
 						hooks?.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
 						this.tui.requestRender();
 						return;
 					}
 				}
 			}
+
+			/* Каскадный Esc: никогда не прерывает активный ход; Esc×2 очищает черновик+чипы или открывает /tree */
+			if (data === "\x1b" || matchesKey(data, "escape")) {
+				if (closeActiveComposerPopover()) {
+					return;
+				}
+				if (!this.isSessionIdle()) {
+					this.showTransientHint("ctrl-c-stop", 1500);
+					return;
+				}
+				if (!this.isDraftCompletelyEmpty()) {
+					const activeHint = this.getTransientHint();
+					if (activeHint?.kind === "esc-clear") {
+						this.clearDraftWithUndo();
+						return;
+					}
+					this.showTransientHint("esc-clear", 800);
+					return;
+				}
+				this.clearTransientHint();
+				const now = Date.now();
+				if (now - this.lastEmptyEscAt <= 800) {
+					this.lastEmptyEscAt = 0;
+					runAppAction("app.session.tree");
+					return;
+				}
+				this.lastEmptyEscAt = now;
+				this.onEscape?.();
+				return;
+			}
+
+			this.clearTransientHint();
+			this.lastEmptyEscAt = 0;
 		}
 		if (hooks?.interceptInput?.(data, this)) {
 			return;
+		}
+		if (
+			!data.includes("\x1b[200~") &&
+			!isKeyRelease(data) &&
+			!this.isShowingAutocomplete() &&
+			!hasBlockingModalOverlay(this.tui)
+		) {
+			if (this.matchesKeybinding(data, "tui.editor.deleteCharBackward")) {
+				if (this.tryDeleteAtomicChipWithSpaceCollapse("backward")) return;
+			} else if (this.matchesKeybinding(data, "tui.editor.deleteCharForward")) {
+				if (this.tryDeleteAtomicChipWithSpaceCollapse("forward")) return;
+			}
 		}
 		if (data.includes("\x1b[200~")) {
 			baseEditorProto.handleInput.call(this, data);
 			hooks?.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
 			return;
 		}
+		const isCtrlEnter =
+			matchesKey(data, "ctrl+enter") ||
+			matchesKey(data, "ctrl+return") ||
+			data === "\x1b[13;5u" ||
+			data === "\x1b[27;5;13~";
 		const isAltEnter =
-			matchesKey(data, "alt+enter") || matchesKey(data, "alt+return") || data === "\x1b\r" || data === "\x1b\n";
-		if (isAltEnter) {
+			matchesKey(data, "alt+enter") ||
+			matchesKey(data, "alt+return") ||
+			data === "\x1b\r" ||
+			data === "\x1b\n";
+		const isShiftEnter =
+			matchesKey(data, "shift+enter") ||
+			matchesKey(data, "shift+return") ||
+			data === "\x1b[13;2u" ||
+			data === "\x1b[27;2;13~";
+		const isPlainEnter =
+			!isCtrlEnter &&
+			!isAltEnter &&
+			!isShiftEnter &&
+			(data === "\r" || matchesKey(data, "enter") || matchesKey(data, "return"));
+
+		if (!this.isShowingAutocomplete() && !hasBlockingModalOverlay(this.tui)) {
+			if (!this.isSessionIdle()) {
+				const expanded = (this.getExpandedText?.() ?? this.getText()).trim();
+				if (isCtrlEnter) {
+					if (expanded.length > 0) {
+						void sendNowDraftMidTurn(expanded, this);
+					} else if (hasQueuedMidTurnMessages() && Date.now() - this.lastQueuedAt >= 1000) {
+						void sendNowTopQueuedMidTurnItem();
+					}
+					return;
+				}
+				if (isAltEnter) {
+					if (expanded.length > 0) {
+						const behavior = loadPiUiUserConfig().midTurnEnter;
+						this.lastQueuedAt = Date.now();
+						if (behavior === "steer") {
+							runAppAction("app.message.followUp");
+						} else {
+							this.onSubmit?.(expanded);
+						}
+					}
+					return;
+				}
+				if (isPlainEnter) {
+					if (expanded.length === 0) {
+						if (hasQueuedMidTurnMessages() && Date.now() - this.lastQueuedAt >= 1000) {
+							void sendNowTopQueuedMidTurnItem();
+						}
+						return;
+					}
+					if (!expanded.startsWith("/")) {
+						const behavior = loadPiUiUserConfig().midTurnEnter;
+						this.lastQueuedAt = Date.now();
+						if (behavior === "queue") {
+							runAppAction("app.message.followUp");
+							return;
+						}
+					}
+				}
+			} else if (isCtrlEnter) {
+				const expanded = (this.getExpandedText?.() ?? this.getText()).trim();
+				if (expanded.length > 0) {
+					super.handleInput("\r");
+					hooks?.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
+					return;
+				}
+			} else if (isAltEnter) {
+				baseEditorProto.handleInput.call(this, "\n");
+				hooks?.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
+				return;
+			}
+		} else if (isAltEnter) {
 			baseEditorProto.handleInput.call(this, "\n");
 			hooks?.onPointerOrCursorChange?.({ hovered: this.editorHovered }, this);
 			return;
@@ -739,6 +1184,9 @@ export class PiUiComposerEditor extends CustomEditor {
 		const pillsWidth = computePillsWidth(fittingPills);
 
 		let leftStatus = "";
+		const activeTransientHint = !loadPiUiUserConfig().showShortcutsBar
+			? this.getTransientHint()
+			: undefined;
 		const anySelf = this as unknown as {
 			embedWorkingStatus?: boolean;
 			workingStatusIndicator?: {
@@ -747,8 +1195,15 @@ export class PiUiComposerEditor extends CustomEditor {
 				renderSpinnerInBorder?: (maxWidth: number) => string;
 			};
 		};
-		/* Индикатор kind === "working" рендерится отдельной строкой над Composer; в рамке остаются retry/compaction */
-		if (
+		/* Индикатор kind === "working" рендерится отдельной строкой над Composer; в рамке остаются transient hints и retry/compaction */
+		if (activeTransientHint) {
+			const hintRgb: RgbTuple = isLightTheme(theme) ? [180, 83, 9] : [229, 192, 123];
+			const maxHintW = Math.max(1, spanWidth - pillsWidth - 4);
+			const clippedHint = truncateToWidth(activeTransientHint.text, maxHintW, "…");
+			if (visibleWidth(clippedHint) > 0 && visibleWidth(clippedHint) + pillsWidth + 3 <= spanWidth) {
+				leftStatus = `${bLine("─")} ${fgRgb(hintRgb, clippedHint)} `;
+			}
+		} else if (
 			anySelf.embedWorkingStatus &&
 			anySelf.workingStatusIndicator &&
 			anySelf.workingStatusIndicator.kind !== "working"
@@ -766,7 +1221,13 @@ export class PiUiComposerEditor extends CustomEditor {
 		const leftPart = leftStatus || bLine("─");
 		const leftPartW = visibleWidth(leftPart);
 		const scrollOffset = this.internals().scrollOffset;
-		const overflowText = scrollOffset > 0 ? theme.fg("dim", ` ↑ ${scrollOffset} `) : "";
+		const visibleRows = Math.max(1, this.internals().renderedVisibleLineCount ?? 1);
+		const overflowLabel = scrollOffset > 0 ? ` ↑ ${scrollOffset} ` : "";
+		const overflowText = overflowLabel
+			? this.hoveredBadge === "scroll-up"
+				? theme.fg("accent", overflowLabel)
+				: theme.fg("dim", overflowLabel)
+			: "";
 		const overflowW = visibleWidth(overflowText);
 		const includeOverflow = overflowW > 0 && leftPartW + overflowW + pillsWidth + 1 <= spanWidth;
 
@@ -778,6 +1239,16 @@ export class PiUiComposerEditor extends CustomEditor {
 		if (includeOverflow) {
 			const leftDashes = Math.floor(fillCount / 2);
 			const rightDashes = fillCount - leftDashes;
+			const upXStart = outerPad + visibleWidth(row) + leftDashes;
+			this.topHits.push({
+				id: "scroll-up",
+				xStart: upXStart,
+				xEnd: upXStart + overflowW,
+				y: 0,
+				onClick: () => {
+					this.scrollDraftBy(-Math.max(1, visibleRows - 1));
+				},
+			});
 			row += `${bLine("─".repeat(leftDashes))}${overflowText}${bLine("─".repeat(rightDashes))}`;
 		} else {
 			row += bLine("─".repeat(fillCount));
@@ -803,6 +1274,175 @@ export class PiUiComposerEditor extends CustomEditor {
 		}
 		const closed = `${margin}${row}${bLine("╮")}${margin}`;
 		return fitExactWidth(closed, boxWidth + outerPad * 2);
+	}
+
+	private renderRoundedBottomBorder(
+		boxWidth: number,
+		outerPad: number,
+		hiddenBelow: number,
+		bottomRowY: number,
+	): string {
+		this.bottomHits = [];
+		const spanWidth = Math.max(0, boxWidth - 2);
+		const bLine = (s: string) => this.paintBorder(s);
+		const margin = " ".repeat(outerPad);
+		if (spanWidth === 0) {
+			return `${margin}${bLine("╰")}${bLine("╯")}${margin}`;
+		}
+
+		const { pi, ctx } = this.deps;
+		const theme = this.deps.getTheme();
+		const light = isLightTheme(theme);
+		const activePopover = getActiveComposerPopoverKind();
+		const visibleRows = Math.max(1, this.internals().renderedVisibleLineCount ?? 1);
+
+		const downLabel = hiddenBelow > 0 ? ` ↓ ${hiddenBelow} ` : "";
+		const downText = downLabel
+			? this.hoveredBadge === "scroll-down"
+				? theme.fg("accent", downLabel)
+				: theme.fg("dim", downLabel)
+			: "";
+		const downW = visibleWidth(downText);
+
+		/* Зоны нижней рамки: Model · (thinking) · mode */
+		let zones: Array<{ id: string; text: string; onClick: () => void }> = [];
+		if (spanWidth >= 32) {
+			const wf = getSessionWorkflow();
+			const modeMeta = MODE_META[wf.mode];
+			const thinkingLevel = pi.getThinkingLevel?.() ?? "off";
+			const rawModelLabel = ctx.model?.name || ctx.model?.id || t("composer.noModel");
+			const maxModelChars = Math.max(10, Math.min(28, spanWidth - 26));
+			const modelLabel = truncateToWidth(rawModelLabel, maxModelChars, "…");
+			const thinkingLabel = `(${thinkingLevel})`;
+			const modeLabel = modeMeta.label;
+
+			const paintZone = (
+				id: string,
+				popKind: "model" | "thinking" | "mode",
+				label: string,
+				modeRgb?: RgbTuple,
+			): string => {
+				if (this.hoveredBadge === id || activePopover === popKind) {
+					return fgRgb(light ? [29, 78, 216] : [125, 207, 255], label);
+				}
+				if (modeRgb) {
+					return fgRgb(modeRgb, label);
+				}
+				return theme.fg("muted", label);
+			};
+
+			const modeRgb: RgbTuple | undefined =
+				wf.mode === "plan"
+					? light
+						? [180, 83, 9]
+						: [229, 192, 123]
+					: wf.mode === "auto"
+						? light
+							? [2, 132, 199]
+							: [100, 178, 240]
+						: undefined;
+
+			zones = [
+				{
+					id: "popover-model",
+					text: paintZone("popover-model", "model", modelLabel),
+					onClick: () => openComposerPopover(pi, ctx, "model"),
+				},
+				{
+					id: "popover-thinking",
+					text: paintZone("popover-thinking", "thinking", thinkingLabel),
+					onClick: () => openComposerPopover(pi, ctx, "thinking"),
+				},
+				{
+					id: "popover-mode",
+					text: paintZone("popover-mode", "mode", modeLabel, modeRgb),
+					onClick: () => openComposerPopover(pi, ctx, "mode"),
+				},
+			];
+		}
+
+		const sep = theme.fg("dim", " · ");
+		const sepW = 3;
+		const zonesContentW =
+			zones.length > 0
+				? zones.reduce((sum, z) => sum + visibleWidth(z.text), 0) + sepW * (zones.length - 1)
+				: 0;
+		const trailingDashes = 2;
+		const rightBlockW = zones.length > 0 ? 1 + zonesContentW + 1 + trailingDashes : 0;
+		const includeZones = zones.length > 0 && rightBlockW + 2 <= spanWidth;
+
+		const availLeft = includeZones ? spanWidth - rightBlockW : spanWidth;
+		const includeDown = downW > 0 && downW + 2 <= availLeft;
+
+		let row = bLine("╰");
+		if (includeDown) {
+			const fillLeft = Math.max(0, availLeft - downW);
+			const leftDashes = Math.min(2, fillLeft);
+			const midDashes = fillLeft - leftDashes;
+			const downXStart = outerPad + 1 + leftDashes;
+			this.bottomHits.push({
+				id: "scroll-down",
+				xStart: downXStart,
+				xEnd: downXStart + downW,
+				y: bottomRowY,
+				onClick: () => {
+					this.scrollDraftBy(Math.max(1, visibleRows - 1));
+				},
+			});
+			row += `${bLine("─".repeat(leftDashes))}${downText}${bLine("─".repeat(midDashes))}`;
+		} else {
+			row += bLine("─".repeat(availLeft));
+		}
+
+		if (includeZones) {
+			row += " ";
+			let curX = outerPad + visibleWidth(row);
+			for (let i = 0; i < zones.length; i += 1) {
+				const zone = zones[i]!;
+				const zw = visibleWidth(zone.text);
+				this.bottomHits.push({
+					id: zone.id,
+					xStart: curX,
+					xEnd: curX + zw,
+					y: bottomRowY,
+					onClick: zone.onClick,
+				});
+				row += zone.text;
+				curX += zw;
+				if (i < zones.length - 1) {
+					row += sep;
+					curX += sepW;
+				}
+			}
+			row += ` ${bLine("─".repeat(trailingDashes))}`;
+		}
+
+		const closed = `${margin}${row}${bLine("╯")}${margin}`;
+		return fitExactWidth(closed, boxWidth + outerPad * 2);
+	}
+
+	private renderLayoutLineWithCursor(layoutLine: EditorLayoutLine, contentWidth: number): string {
+		const internal = this.internals();
+		let displayText = layoutLine.text;
+		let lineVisibleWidth = visibleWidth(layoutLine.text);
+		if (layoutLine.hasCursor && layoutLine.cursorPos !== undefined) {
+			const before = displayText.slice(0, layoutLine.cursorPos);
+			const after = displayText.slice(layoutLine.cursorPos);
+			const marker = this.focused ? CURSOR_MARKER : "";
+			if (after.length > 0) {
+				const segs = internal.segment
+					? [...internal.segment(after, "grapheme")]
+					: [...composerGraphemeSegmenter.segment(after)];
+				const head = segs[0]?.segment || "";
+				const restAfter = after.slice(head.length);
+				displayText = `${before}${marker}${renderFakeCursor(head)}${restAfter}`;
+			} else {
+				displayText = `${before}${marker}${renderFakeCursor(" ")}`;
+				lineVisibleWidth += 1;
+			}
+		}
+		const padding = " ".repeat(Math.max(0, contentWidth - lineVisibleWidth));
+		return `${displayText}${padding}`;
 	}
 
 	private renderEmptyPlaceholderCell(innerWidth: number, placeholderText = COMPOSER_PLACEHOLDER): string {
@@ -879,6 +1519,7 @@ export class PiUiComposerEditor extends CustomEditor {
 
 	override render(width: number): string[] {
 		this.topHits = [];
+		this.bottomHits = [];
 		this.workingRowOffset = 0;
 		this.workingStatusRowY = -1;
 		this.workingStopHit = undefined;
@@ -895,6 +1536,7 @@ export class PiUiComposerEditor extends CustomEditor {
 			/* layoutWidth в Editor равен inner - 1; передаём минимум 3, чтобы wordWrapLine не зациклился на 2-колоночных глифах при maxWidth=1 */
 			const base = super.render(Math.max(3, innerW));
 			const visCount = this.internals().renderedVisibleLineCount ?? Math.max(1, base.length - 2);
+			this.totalVisualLineCount = Math.max(this.totalVisualLineCount, visCount);
 			const out: string[] = [`${bLine("╭")}${bLine("─".repeat(innerW))}${bLine("╮")}`];
 			for (let i = 0; i < visCount; i++) {
 				const raw = base[1 + i] ?? "";
@@ -911,9 +1553,51 @@ export class PiUiComposerEditor extends CustomEditor {
 		const outerMargin = " ".repeat(outerPad);
 		const boxWidth = width - outerPad * 2;
 		const innerWidth = boxWidth - 6;
-		const baseLines = super.render(innerWidth);
 		const internal = this.internals();
-		const visibleRows = internal.renderedVisibleLineCount ?? Math.max(1, baseLines.length - 2);
+		const maxVisibleLines = computeComposerMaxVisibleLines(this.tui?.terminal?.rows ?? 24);
+		const layoutWidth = Math.max(1, innerWidth - 1);
+
+		let visibleBodyRawLines: string[];
+		let visibleRows: number;
+		let hiddenBelow = 0;
+		let autocompleteLines: string[] = [];
+
+		if (typeof internal.layoutText === "function") {
+			internal.lastWidth = layoutWidth;
+			const layoutLines = internal.layoutText(layoutWidth);
+			this.totalVisualLineCount = Math.max(1, layoutLines.length);
+			let cursorLineIndex = layoutLines.findIndex((line) => line.hasCursor);
+			if (cursorLineIndex === -1) cursorLineIndex = 0;
+
+			if (!this.manualScrollActive) {
+				if (cursorLineIndex < internal.scrollOffset) {
+					internal.scrollOffset = cursorLineIndex;
+				} else if (cursorLineIndex >= internal.scrollOffset + maxVisibleLines) {
+					internal.scrollOffset = cursorLineIndex - maxVisibleLines + 1;
+				}
+			}
+			const maxScrollOffset = Math.max(0, layoutLines.length - maxVisibleLines);
+			internal.scrollOffset = Math.max(0, Math.min(internal.scrollOffset, maxScrollOffset));
+
+			const slice = layoutLines.slice(internal.scrollOffset, internal.scrollOffset + maxVisibleLines);
+			visibleRows = Math.max(1, slice.length);
+			internal.renderedVisibleLineCount = visibleRows;
+			hiddenBelow = Math.max(0, layoutLines.length - (internal.scrollOffset + slice.length));
+			visibleBodyRawLines = slice.map((ll) => this.renderLayoutLineWithCursor(ll, innerWidth));
+
+			internal.renderedAutocompleteHeight = 0;
+			if (internal.autocompleteState && internal.autocompleteList) {
+				autocompleteLines = internal.autocompleteList.render(innerWidth);
+				internal.renderedAutocompleteHeight = autocompleteLines.length;
+			}
+		} else {
+			const baseLines = super.render(innerWidth);
+			visibleRows = internal.renderedVisibleLineCount ?? Math.max(1, baseLines.length - 2);
+			this.totalVisualLineCount = Math.max(visibleRows, internal.scrollOffset + visibleRows);
+			visibleBodyRawLines = baseLines.slice(1, 1 + visibleRows);
+			autocompleteLines = baseLines.slice(visibleRows + 2);
+		}
+
 		const theme = this.deps.getTheme();
 		const light = isLightTheme(theme);
 		const chevron = light ? fgRgb(37, 99, 235, "›") : fgRgb(125, 207, 255, "›");
@@ -976,7 +1660,7 @@ export class PiUiComposerEditor extends CustomEditor {
 			if (isEmpty && i === 0) {
 				cell = this.renderEmptyPlaceholderCell(innerWidth, activePlaceholder ?? COMPOSER_PLACEHOLDER);
 			} else {
-				const rawInner = baseLines[1 + i] ?? "";
+				const rawInner = visibleBodyRawLines[i] ?? "";
 				const decorated = hooks?.decorateRenderedLine
 					? hooks.decorateRenderedLine(rawInner, visualIdx, this)
 					: rawInner;
@@ -986,12 +1670,12 @@ export class PiUiComposerEditor extends CustomEditor {
 			out.push(`${leftPrefix}${cell}${rightSuffix}`);
 		}
 
-		out.push(`${outerMargin}${bLine("╰")}${bLine("─".repeat(boxWidth - 2))}${bLine("╯")}${outerMargin}`);
+		out.push(this.renderRoundedBottomBorder(boxWidth, outerPad, hiddenBelow, visibleRows + 1));
 
 		const acLeftPad = " ".repeat(outerPad + 4);
 		const acRightPad = " ".repeat(outerPad + 2);
-		for (let idx = visibleRows + 2; idx < baseLines.length; idx++) {
-			out.push(`${acLeftPad}${fitExactWidth(baseLines[idx] ?? "", innerWidth)}${acRightPad}`);
+		for (const acLine of autocompleteLines) {
+			out.push(`${acLeftPad}${fitExactWidth(acLine, innerWidth)}${acRightPad}`);
 		}
 
 		return out;
@@ -1048,6 +1732,7 @@ export class PiUiComposerEditor extends CustomEditor {
 		const { compact, leftOffset, innerWidth, visualLines } = this.resolveBoxLayout(totalWidth);
 		const internal = this.internals();
 		const visibleRows = internal.renderedVisibleLineCount ?? 1;
+		const bottomBorderRow = visibleRows + 1;
 		const autocompleteStartRow = visibleRows + 2;
 		const inBox = boxEvent.y >= 0 && boxEvent.y < autocompleteStartRow;
 		let hoverStateChanged = false;
@@ -1063,34 +1748,19 @@ export class PiUiComposerEditor extends CustomEditor {
 				const prevScroll = internal.scrollOffset ?? 0;
 				const nextScroll = Math.max(0, Math.min(maxScroll, prevScroll + boxEvent.wheelDelta));
 				const changed = nextScroll !== prevScroll;
+				this.manualScrollActive = true;
 				if (changed) {
 					internal.scrollOffset = nextScroll;
-					const cursorVisualIdx = visualLines.findIndex(
-						(vl) =>
-							vl.logicalLine === internal.state.cursorLine &&
-							internal.state.cursorCol >= vl.startCol &&
-							internal.state.cursorCol <= vl.startCol + vl.length,
-					);
-					const targetVisualIdx =
-						cursorVisualIdx < nextScroll
-							? nextScroll
-							: cursorVisualIdx >= nextScroll + visibleRows
-								? nextScroll + visibleRows - 1
-								: cursorVisualIdx;
-					const targetVl = visualLines[targetVisualIdx];
-					if (targetVl && targetVisualIdx !== cursorVisualIdx) {
-						internal.state.cursorLine = targetVl.logicalLine;
-						internal.setCursorCol(
-							Math.min(
-								targetVl.startCol + targetVl.length,
-								Math.max(targetVl.startCol, internal.state.cursorCol),
-							),
-						);
-					}
 				}
 				return { handled: true, render: changed };
 			}
 		}
+
+		const findBorderHit = (x: number, y: number): HitBox | undefined => {
+			if (y === 0) return this.topHits.find((h) => x >= h.xStart && x < h.xEnd);
+			if (y === bottomBorderRow) return this.bottomHits.find((h) => x >= h.xStart && x < h.xEnd);
+			return undefined;
+		};
 
 		if (boxEvent.type === "move") {
 			if (inBox) {
@@ -1114,10 +1784,7 @@ export class PiUiComposerEditor extends CustomEditor {
 					},
 					this,
 				);
-				const nextBadge =
-					boxEvent.y === 0
-						? (this.topHits.find((h) => boxEvent.x >= h.xStart && boxEvent.x < h.xEnd)?.id ?? null)
-						: null;
+				const nextBadge = findBorderHit(boxEvent.x, boxEvent.y)?.id ?? null;
 				if (!this.editorHovered || nextBadge !== this.hoveredBadge) {
 					this.editorHovered = true;
 					this.hoveredBadge = nextBadge;
@@ -1134,21 +1801,40 @@ export class PiUiComposerEditor extends CustomEditor {
 			}
 		}
 
-		/* Перехватываем press на пилюлях верхней рамки, чтобы быстрый повторный клик (<500мс) не запускал выделение слова */
-		if (boxEvent.type === "press" && boxEvent.button === "left" && boxEvent.y === 0) {
-			const hit = this.topHits.find((h) => boxEvent.x >= h.xStart && boxEvent.x < h.xEnd);
+		/* Перехватываем press на пилюлях и зонах рамок, чтобы быстрый повторный клик (<500мс) не запускал выделение слова */
+		if (
+			boxEvent.type === "press" &&
+			boxEvent.button === "left" &&
+			(boxEvent.y === 0 || boxEvent.y === bottomBorderRow)
+		) {
+			const hit = findBorderHit(boxEvent.x, boxEvent.y);
 			if (hit) {
 				return { handled: true, focus: true, render: false };
 			}
 		}
 
-		if (boxEvent.type === "click" && boxEvent.button === "left" && boxEvent.y === 0) {
-			const hit = this.topHits.find((h) => boxEvent.x >= h.xStart && boxEvent.x < h.xEnd);
+		if (
+			boxEvent.type === "click" &&
+			boxEvent.button === "left" &&
+			(boxEvent.y === 0 || boxEvent.y === bottomBorderRow)
+		) {
+			const hit = findBorderHit(boxEvent.x, boxEvent.y);
 			if (hit) {
 				hit.onClick();
 				return { handled: true, focus: true, render: true };
 			}
 			return { handled: true, focus: true };
+		}
+
+		if (boxEvent.type === "click" && boxEvent.y >= 1 && boxEvent.y <= visibleRows) {
+			this.manualScrollActive = false;
+			if (boxEvent.button === "left" && boxEvent.y === 1 && this.isDraftCompletelyEmpty()) {
+				for (const featureHook of listAllComposerHooks()) {
+					if (featureHook.onEmptyPlaceholderClick?.(this)) {
+						return { handled: true, focus: true, render: true };
+					}
+				}
+			}
 		}
 
 		if (
@@ -1192,6 +1878,7 @@ export class PiUiComposerEditor extends CustomEditor {
 export function mountComposer(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	if (ctx.mode !== "tui" || !ctx.hasUI) return;
 
+	installMidTurnQueueUi(() => ctx.ui.theme);
 	bindComposerWorkingIndicator(ctx);
 
 	const apiKey = pi as unknown as object;

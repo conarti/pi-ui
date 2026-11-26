@@ -85,20 +85,21 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		const wf = getSessionWorkflow();
 		expect(wf.mode).toBe("always-approve");
 
+		/* Alt+M across RU/EN/Option toggles the upward Session Mode popover */
 		await harness.pressKey("\x1b[1100;3u");
-		expect(wf.mode).toBe("plan");
+		expect(harness.screen().text()).toContain("Session Mode");
 		await harness.pressKey("\x1bь");
-		expect(wf.mode).toBe("auto");
+		expect(harness.screen().text()).not.toContain("Session Mode");
 		await harness.pressKey("\x1b[27;3;1100~");
-		expect(wf.mode).toBe("always-approve");
+		expect(harness.screen().text()).toContain("Session Mode");
 		await harness.pressKey("µ");
-		expect(wf.mode).toBe("plan");
+		expect(harness.screen().text()).not.toContain("Session Mode");
 		await harness.pressKey("\x1b[181;1:3u");
-		expect(wf.mode).toBe("plan");
+		expect(harness.screen().text()).not.toContain("Session Mode");
 		await harness.pressKey("\x1b[109;3u");
-		expect(wf.mode).toBe("auto");
+		expect(harness.screen().text()).toContain("Session Mode");
 		await harness.pressKey("\x1b[1100::109;3u");
-		expect(wf.mode).toBe("always-approve");
+		expect(harness.screen().text()).not.toContain("Session Mode");
 
 		await harness.pressKey("\x1b[1079;7u");
 		expect(wf.mode).toBe("plan");
@@ -110,11 +111,13 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		await harness.pressKey("\x1b\x10");
 		expect(wf.mode).toBe("always-approve");
 		await harness.pressKey("\x1bm");
-		expect(wf.mode).toBe("plan");
+		expect(harness.screen().text()).toContain("Session Mode");
 		await harness.pressKey("\x1bь");
-		expect(wf.mode).toBe("auto");
+		expect(harness.screen().text()).not.toContain("Session Mode");
 		await harness.pressKey("\x1bm");
-		expect(wf.mode).toBe("always-approve");
+		expect(harness.screen().text()).toContain("Session Mode");
+		await harness.pressKey("\x1b");
+		expect(harness.screen().text()).not.toContain("Session Mode");
 
 		expect(getOutlineSettings().enabled).toBe(true);
 		await harness.pressKey("\x1b[1097;7u");
@@ -183,7 +186,11 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		expect(emptyScreen.rowText(topRow)).toBe(`  ╭${"─".repeat(74)}╮  `);
 		expect(emptyScreen.rowText(topRow + 1).startsWith("  │ › Ask or describe a task…")).toBe(true);
 		expect(emptyScreen.rowText(topRow + 1).endsWith(" │  ")).toBe(true);
-		expect(emptyScreen.rowText(topRow + 2)).toBe(`  ╰${"─".repeat(74)}╯  `);
+		const emptyBottom = emptyScreen.rowText(topRow + 2);
+		expect(emptyBottom.startsWith("  ╰─")).toBe(true);
+		expect(emptyBottom.endsWith("──╯  ")).toBe(true);
+		expect(emptyBottom).toContain("(off)");
+		expect(emptyBottom).toContain("Always-approve");
 
 		await harness.typeText("Сделай рефакторинг");
 		await harness.pressKey("\x1b[13;2u");
@@ -197,7 +204,9 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		expect(typedScreen.rowText(typedTop + 1)).not.toContain("Ask or describe a task");
 		expect(typedScreen.rowText(typedTop + 2).startsWith("  │   второй строки")).toBe(true);
 		expect(typedScreen.rowText(typedTop + 2).endsWith(" │  ")).toBe(true);
-		expect(typedScreen.rowText(typedTop + 3)).toBe(`  ╰${"─".repeat(74)}╯  `);
+		const typedBottom = typedScreen.rowText(typedTop + 3);
+		expect(typedBottom.startsWith("  ╰─")).toBe(true);
+		expect(typedBottom.endsWith("──╯  ")).toBe(true);
 		expect(typedScreen.text()).not.toContain("⌥↵");
 		expect(typedScreen.text()).not.toContain("отправить");
 
@@ -508,7 +517,8 @@ describe("Composer & multi-layout shortcuts (real InteractiveMode)", () => {
 		editor.setText("");
 		await harness.sendInput("\x1b[200~вставка\x1b[201~\x1b[109;3u");
 		expect(editor.getText()).toBe("вставка");
-		expect(wf.mode).toBe("plan");
+		expect(harness.screen().text()).toContain("Session Mode");
+		await harness.pressKey("\x1b");
 		editor.setText("");
 		await harness.submitInput("/mode always-approve");
 		expect(wf.mode).toBe("always-approve");

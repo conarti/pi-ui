@@ -338,8 +338,8 @@ describe("Symmetric Grok-grid viewport chrome, pinned Header, Outline Rail, whee
 		await harness.mouseWheel("down", pasteRow01!.col + 2, pasteRow01!.row, 10);
 		expect(scroll.scrollTop).toBe(scrollBeforePopupWheel);
 
-		/* Wheeling outside the popup dismisses it and scrolls ScrollView */
-		await harness.mouseWheel("up", 10, 5, 3);
+		/* Wheeling outside the 14-row popup dismisses it and scrolls ScrollView */
+		await harness.mouseWheel("up", 60, 5, 3);
 		expect(harness.screen().text()).not.toContain("paste-row-15");
 		expect(scroll.scrollTop).toBeLessThan(scrollBeforePopupWheel);
 
