@@ -46,6 +46,7 @@ import {
 import { getOutlineSettings } from "../outline-rail/index.ts";
 import { setSessionMode } from "../plan-studio/index.ts";
 import { showPlanStudio } from "../plan-studio/studio-overlay.ts";
+import { showSlotArbitrationModal } from "../slot-arbitration/index.ts";
 import { getStickyConfig } from "../sticky-prompt/index.ts";
 
 interface PaletteItem {
@@ -234,6 +235,15 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 					"info",
 				);
 			},
+		},
+		{
+			id: "slot-arbitration",
+			group: t("palette.group.settings"),
+			icon: "⇄",
+			label: t("palette.item.slots"),
+			hint: "/slots",
+			keywords: "slots arbitration extensions owners footer header editor working command shortcut",
+			run: () => showSlotArbitrationModal(ctx, undefined, "manage"),
 		},
 		{
 			id: "toggle-response-metrics",

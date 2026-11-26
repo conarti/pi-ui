@@ -8,7 +8,7 @@ import {
 } from "../../shared/extension-superseder.ts";
 
 const EXTERNAL_SUGGESTION_PATH_RE =
-	/(?:^|[/\\]|npm:)pi-next-prompt(?:$|[/\\])|[/\\]next-prompt\.[cm]?[jt]s$/i;
+	/(?:^|[/\\]|npm:)pi-next-prompt(?:$|[/\\]|\.[cm]?[jt]s$)|[/\\]next-prompt\.[cm]?[jt]s$/i;
 const INLINE_SUGGESTION_PROMPT_RE =
 	/\[Suggestion mode\]\s*Predict what the user will type next/i;
 const GUARDED_APIS = new WeakSet<object>();

@@ -19,6 +19,7 @@ import {
 import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
 import { t } from "../../shared/i18n.ts";
 import { claimHover, copyToClipboard } from "../../shared/runtime-hooks.ts";
+import { isSlotOwnedByPiUi } from "../../shared/slot-arbitration.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
 import { showContextInspector } from "../context-inspector/index.ts";
 
@@ -209,6 +210,7 @@ class SessionHeaderView implements Component {
 	}
 
 	isVisible = (viewport: { width: number; height: number }): boolean => {
+		if (!isSlotOwnedByPiUi("header")) return false;
 		if (!this.pinnedMode) return true;
 		return viewport.width >= 24 && viewport.height >= 8;
 	};
@@ -222,7 +224,7 @@ class SessionHeaderView implements Component {
 
 	render(width: number): string[] {
 		this.hits = [];
-		if (width < 24) return [];
+		if (width < 24 || !isSlotOwnedByPiUi("header")) return [];
 
 		if (!this.pinnedMode && getActiveHostRuntime()?.isFullscreen) {
 			return [];

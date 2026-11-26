@@ -20,6 +20,11 @@ import {
 import { fgRgb, getActiveGlobalTheme, isLightTheme, type HitBox } from "../../shared/ansi.ts";
 import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { t } from "../../shared/i18n.ts";
+import {
+	isSlotOwnedByPiUi,
+	PI_UI_OWNER_ID,
+	registerSlotOwnershipChangeListener,
+} from "../../shared/slot-arbitration.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
 
 const COMPOSER_SURFACE_KEY = "composer.working-indicator";
@@ -403,7 +408,7 @@ export function getWorkingStatusController(): WorkingStatusController {
 }
 
 export function isComposerWorkingSuppressed(): boolean {
-	return getWorkingState().suppressed === true;
+	return getWorkingState().suppressed === true || !isSlotOwnedByPiUi("workingIndicator");
 }
 
 export function buildWaveIndicator(options?: WaveSampleOptions): WorkingIndicatorOptions {
@@ -555,11 +560,11 @@ export function restoreDefaultWorkingIndicator(ctx?: ExtensionContext): void {
 export function startComposerWorkingWave(): void {
 	const state = getWorkingState();
 	const ctx = state.ctx;
-	if (state.suppressed || !ctx || ctx.mode !== "tui" || !ctx.hasUI) return;
+	if (isComposerWorkingSuppressed() || !ctx || ctx.mode !== "tui" || !ctx.hasUI) return;
 	activateAnimationSurface(COMPOSER_SURFACE_KEY, () => {
 		const current = getWorkingState();
 		const activeCtx = current.ctx;
-		if (current.suppressed || !activeCtx || activeCtx.mode !== "tui" || !activeCtx.hasUI) {
+		if (isComposerWorkingSuppressed() || !activeCtx || activeCtx.mode !== "tui" || !activeCtx.hasUI) {
 			deactivateAnimationSurface(COMPOSER_SURFACE_KEY);
 			return;
 		}
@@ -595,6 +600,21 @@ function extractLatestThinkingText(message: unknown): string {
 }
 
 export function registerComposerWorkingAnimation(pi: ExtensionAPI): void {
+	registerSlotOwnershipChangeListener("workingIndicator.wave", (slotId, ownerId) => {
+		if (slotId !== "workingIndicator") return;
+		if (ownerId !== PI_UI_OWNER_ID) {
+			deactivateAnimationSurface(COMPOSER_SURFACE_KEY);
+			return;
+		}
+		const state = getWorkingState();
+		if (state.ctx && state.ctx.isIdle?.() === false && !state.suppressed) {
+			if (!state.controller.isActive()) {
+				state.controller.beginTurn();
+			}
+			startComposerWorkingWave();
+		}
+	});
+
 	pi.on("agent_start", () => {
 		getWorkingStatusController().beginTurn();
 		startComposerWorkingWave();
