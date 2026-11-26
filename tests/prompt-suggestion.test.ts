@@ -55,6 +55,16 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		return dir;
 	}
 
+	function allocateEnabledAgentDir(prefix = "pi-ui-sug-enabled-"): string {
+		const dir = allocateTempDir(prefix);
+		writeFileSync(
+			join(dir, "pi-ui.json"),
+			`${JSON.stringify({ promptSuggestions: true }, null, 2)}\n`,
+			"utf8",
+		);
+		return dir;
+	}
+
 	afterEach(async () => {
 		if (harness) {
 			await harness.dispose();
@@ -112,7 +122,23 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		await harness.pressKey("\x15");
 
 		await harness.submitInput("/suggestions status");
-		expect(harness.screen().text()).toContain("Использование: /suggestions [on|off]");
+		expect(harness.screen().text()).toContain("Usage: /suggestions [on|off]");
+	});
+
+	it("fires zero background Prompt Suggestion calls on fresh installs without explicit opt-in", async () => {
+		harness = await createInteractiveHarness({
+			width: 90,
+			height: 26,
+			responses: [fauxAssistantMessage("Fresh install reply.")],
+			suggestionResponses: [fauxAssistantMessage("Should not run")],
+		});
+
+		await harness.submitInput("Hello fresh install");
+		await new Promise<void>((resolve) => setTimeout(resolve, 35));
+		expect(harness.calls).toHaveLength(1);
+		expect(harness.suggestionCalls).toHaveLength(0);
+		expect(harness.screen().text()).toContain(COMPOSER_PLACEHOLDER);
+		expect(harness.screen().text()).not.toContain("Should not run");
 	});
 
 	it("predicts Prompt Suggestion in background reusing prompt-cache prefix, renders dimmed inside rounded composer frame with narrow truncation, and never keeps working indicator active", async () => {
@@ -122,6 +148,7 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		});
 
 		harness = await createInteractiveHarness({
+			agentDir: allocateEnabledAgentDir(),
 			width: 84,
 			height: 26,
 			thinkingLevel: "high",
@@ -204,6 +231,7 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 
 	it("silently ignores errored, multiline, empty, sentinel, and >100-char prediction responses without error toasts", async () => {
 		harness = await createInteractiveHarness({
+			agentDir: allocateEnabledAgentDir(),
 			width: 90,
 			height: 26,
 			responses: [
@@ -244,6 +272,7 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		});
 
 		harness = await createInteractiveHarness({
+			agentDir: allocateEnabledAgentDir(),
 			width: 90,
 			height: 26,
 			settings: {
@@ -425,6 +454,7 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 
 	it("accepts Prompt Suggestion on Tab or Right arrow with Ctrl+Z and tui.editor.undo reversal, clearing the stored suggestion", async () => {
 		harness = await createInteractiveHarness({
+			agentDir: allocateEnabledAgentDir(),
 			width: 92,
 			height: 26,
 			responses: [
@@ -485,6 +515,7 @@ describe("Prompt Suggestion (real InteractiveMode)", () => {
 		const tinyPngBytes = Uint8Array.from(Buffer.from(tinyPngBase64, "base64"));
 
 		harness = await createInteractiveHarness({
+			agentDir: allocateEnabledAgentDir(),
 			width: 96,
 			height: 28,
 			settings: {
@@ -636,6 +667,7 @@ export default function (pi) {
 					: [DEFAULT_EXTENSION_ENTRY, externalEntry];
 
 			harness = await createInteractiveHarness({
+				agentDir: allocateEnabledAgentDir(),
 				width: 92,
 				height: 26,
 				loadDefaultExtension: false,
@@ -771,6 +803,7 @@ export default function (pi) {
 					: [DEFAULT_EXTENSION_ENTRY, renamedEntry];
 
 			harness = await createInteractiveHarness({
+				agentDir: allocateEnabledAgentDir(),
 				width: 92,
 				height: 26,
 				loadDefaultExtension: false,
@@ -821,17 +854,17 @@ describe("Prompt Suggestion configuration, sanitization, and external superseder
 		}
 	});
 
-	it("resolves getAgentDir dynamically, defaults promptSuggestions to true, survives malformed JSON, and preserves symlinks and sibling keys", () => {
+	it("resolves getAgentDir dynamically, defaults promptSuggestions to false, survives malformed JSON, and preserves symlinks and sibling keys", () => {
 		expect(getPiUiConfigPath()).toBe(join(tempRoot, "agent-a", "pi-ui.json"));
 		expect(loadPiUiUserConfig()).toEqual(DEFAULT_PI_UI_USER_CONFIG);
-		expect(loadPiUiUserConfig().promptSuggestions).toBe(true);
+		expect(loadPiUiUserConfig().promptSuggestions).toBe(false);
 
 		const secondDir = join(tempRoot, "agent-b");
 		process.env.PI_CODING_AGENT_DIR = secondDir;
 		expect(getPiUiConfigPath()).toBe(join(secondDir, "pi-ui.json"));
 
-		updatePiUiUserConfig({ promptSuggestions: false });
-		expect(loadPiUiUserConfig().promptSuggestions).toBe(false);
+		updatePiUiUserConfig({ promptSuggestions: true });
+		expect(loadPiUiUserConfig().promptSuggestions).toBe(true);
 
 		writeFileSync(getPiUiConfigPath(), "{broken json", "utf8");
 		expect(loadPiUiUserConfig()).toEqual(DEFAULT_PI_UI_USER_CONFIG);

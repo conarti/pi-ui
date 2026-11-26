@@ -252,17 +252,17 @@ describe("Session Workflow on real InteractiveMode", () => {
 		await harness.pressKey("\r");
 		await harness.pressKey("\x1b");
 
-		await harness.submitInput("/mode code");
+		await harness.submitInput("/mode always-approve");
 		expect(getLatestPersistedState(harness)).toMatchObject({
-			mode: "code",
+			mode: "always-approve",
 			planRaw: "# Migration Plan\n1. Extract workflow\n2. Wire commands",
 			planComments: { 1: "Keep legacy restore intact" },
 			executingPlan: false,
 		});
 
-		await harness.submitInput("/mode safe");
+		await harness.submitInput("/mode auto");
 		expect(getLatestPersistedState(harness)).toMatchObject({
-			mode: "safe",
+			mode: "auto",
 			planRaw: "# Migration Plan\n1. Extract workflow\n2. Wire commands",
 			planComments: { 1: "Keep legacy restore intact" },
 			executingPlan: false,
@@ -306,9 +306,9 @@ describe("Session Workflow on real InteractiveMode", () => {
 		await harness.pressKey("\r");
 		await harness.pressKey("\x1b");
 
-		await harness.submitInput("/mode code");
+		await harness.submitInput("/mode always-approve");
 		const draftScreen = harness.screen();
-		const openBannerPos = draftScreen.findText("Открыть план");
+		const openBannerPos = draftScreen.findText("Open plan");
 		expect(openBannerPos).toBeDefined();
 		const bannerRow = draftScreen.rowText(openBannerPos!.row);
 		const dismissCol = bannerRow.lastIndexOf("✕");
@@ -321,7 +321,7 @@ describe("Session Workflow on real InteractiveMode", () => {
 			planSteps: [],
 			executingPlan: false,
 		});
-		expect(harness.screen().text()).not.toContain("Открыть план");
+		expect(harness.screen().text()).not.toContain("Open plan");
 
 		await harness.submitInput("/mode plan");
 		await harness.submitInput("Generate executable plan");
@@ -331,7 +331,7 @@ describe("Session Workflow on real InteractiveMode", () => {
 		await harness.flush();
 
 		expect(getLatestPersistedState(harness)?.executingPlan).toBe(true);
-		const hidePos = harness.screen().findText("Скрыть");
+		const hidePos = harness.screen().findText("Hide");
 		expect(hidePos).toBeDefined();
 		await harness.mouseClick(hidePos!.col + 1, hidePos!.row);
 
@@ -341,12 +341,12 @@ describe("Session Workflow on real InteractiveMode", () => {
 			planSteps: [],
 			executingPlan: false,
 		});
-		expect(harness.screen().text()).not.toContain("План 0/2");
+		expect(harness.screen().text()).not.toContain("Plan 0/2");
 
 		await harness.submitInput("Follow-up after hiding plan");
 		const callAfterHide = harness.calls.at(-1)!;
 		const serializedHideMsgs = JSON.stringify(callAfterHide.messages);
-		expect(serializedHideMsgs).not.toContain("[Выполнение плана]");
+		expect(serializedHideMsgs).not.toContain("[Plan execution]");
 
 		await harness.submitInput("/mode plan");
 		await harness.submitInput("Generate second executable plan");
@@ -416,7 +416,7 @@ describe("Session Workflow on real InteractiveMode", () => {
 		expect(allCall1Text).toContain("[DONE:n]");
 
 		expect(getLatestPersistedState(harness)).toMatchObject({
-			mode: "code",
+			mode: "always-approve",
 			executingPlan: true,
 			planComments: {},
 			planSteps: [
@@ -439,14 +439,14 @@ describe("Session Workflow on real InteractiveMode", () => {
 			responses: [fauxAssistantMessage("Tests green. [done:2]")],
 		});
 
-		expect(harness.screen().text()).toContain("План 1/2");
+		expect(harness.screen().text()).toContain("Plan 1/2");
 
 		await harness.submitInput("Finish step 2");
 		expect(getLatestPersistedState(harness)?.planSteps).toEqual([
 			{ step: 1, text: "Implement parser", completed: true },
 			{ step: 2, text: "Add integration tests", completed: true },
 		]);
-		expect(harness.screen().text()).toContain("Все шаги плана выполнены");
+		expect(harness.screen().text()).toContain("All plan steps completed");
 
 		await harness.dispose();
 		harness = undefined;
@@ -464,6 +464,8 @@ describe("Session Workflow on real InteractiveMode", () => {
 				});
 			},
 		});
+
+		expect(getSessionWorkflow().mode).toBe("auto");
 
 		await openSlashWithoutWaiting(harness, "/plan review");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(true);

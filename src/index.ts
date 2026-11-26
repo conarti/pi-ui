@@ -26,17 +26,122 @@ import { registerPromptSuggestionFeature } from "./features/prompt-suggestion/in
 import { registerQuotesFeature } from "./features/quotes/index.ts";
 import { registerTranscriptFeature } from "./features/transcript/index.ts";
 import { acquireHostRuntime, disposeActiveHostRuntime } from "./shared/host-runtime.ts";
-import { installKeyboardLayoutSupport } from "./shared/keyboard-layout.ts";
-import { getSessionWorkflow } from "./shared/session-workflow.ts";
+import { t } from "./shared/i18n.ts";
+import {
+	installKeyboardLayoutSupport,
+	registerOptionShortcutChord,
+} from "./shared/keyboard-layout.ts";
+import { loadPiUiUserConfig, updatePiUiUserConfig } from "./shared/pi-ui-config.ts";
+import {
+	getSessionWorkflow,
+	syncThinkingCycleKeybinding,
+} from "./shared/session-workflow.ts";
 import { requestRender, resetUiActionBridge } from "./shared/ui-action-bridge.ts";
 import { TranscriptTurnIndex } from "./shared/turn-index.ts";
 
-export default function conartiPiUi(pi: ExtensionAPI): void {
-	installKeyboardLayoutSupport(pi);
+function registerUnifiedConfigCommands(pi: ExtensionAPI): void {
+	const toggleChoices = ["on", "off", "status"] as const;
+	pi.registerCommand("shortcuts-bar", {
+		description: t("shortcutsBar.command"),
+		getArgumentCompletions: (prefix) => {
+			const typed = prefix.trimStart().toLowerCase();
+			const items = toggleChoices
+				.filter((choice) => choice.startsWith(typed) && choice !== typed.trimEnd())
+				.map((choice) => ({ value: choice, label: choice }));
+			return items.length > 0 ? items : null;
+		},
+		handler: async (args, ctx) => {
+			const arg = args.trim().toLowerCase();
+			if (arg === "status") {
+				const current = loadPiUiUserConfig().showShortcutsBar;
+				ctx.ui.notify(
+					t("shortcutsBar.status", { state: current ? t("state.on") : t("state.off") }),
+					"info",
+				);
+				return;
+			}
+			if (arg !== "" && arg !== "on" && arg !== "off") {
+				ctx.ui.notify(t("shortcutsBar.usage"), "warning");
+				return;
+			}
+			const current = loadPiUiUserConfig().showShortcutsBar;
+			const next = arg === "on" ? true : arg === "off" ? false : !current;
+			const updated = updatePiUiUserConfig({ showShortcutsBar: next });
+			requestRender();
+			ctx.ui.notify(
+				t("shortcutsBar.toggled", {
+					state: updated.showShortcutsBar ? t("state.on") : t("state.off"),
+				}),
+				"info",
+			);
+		},
+	});
 
-	// 0. Acquire shared Host Runtime once at session_start before feature listeners bind
+	pi.registerCommand("slots", {
+		description: t("slots.command"),
+		getArgumentCompletions: (prefix) => {
+			const typed = prefix.trimStart().toLowerCase();
+			const choices = ["status", "clear"];
+			const items = choices
+				.filter((choice) => choice.startsWith(typed) && choice !== typed.trimEnd())
+				.map((choice) => ({ value: choice, label: choice }));
+			return items.length > 0 ? items : null;
+		},
+		handler: async (args, ctx) => {
+			const trimmed = args.trim();
+			const parts = trimmed ? trimmed.split(/\s+/) : [];
+			const sub = parts[0]?.toLowerCase() ?? "";
+
+			if (sub === "" || sub === "status") {
+				const owners = loadPiUiUserConfig().slotOwners;
+				const pairs = Object.entries(owners);
+				if (pairs.length === 0) {
+					ctx.ui.notify(t("slots.empty"), "info");
+				} else {
+					ctx.ui.notify(
+						t("slots.status", {
+							entries: pairs.map(([slot, owner]) => `${slot}=${owner}`).join(", "),
+						}),
+						"info",
+					);
+				}
+				return;
+			}
+
+			if (sub === "clear" || sub === "reset") {
+				updatePiUiUserConfig({ slotOwners: {} });
+				requestRender();
+				ctx.ui.notify(t("slots.cleared"), "info");
+				return;
+			}
+
+			if (parts.length === 2) {
+				const [slot, owner] = parts as [string, string];
+				const existing = loadPiUiUserConfig().slotOwners;
+				updatePiUiUserConfig({ slotOwners: { ...existing, [slot]: owner } });
+				requestRender();
+				ctx.ui.notify(t("slots.updated", { slot, owner }), "info");
+				return;
+			}
+
+			ctx.ui.notify(t("slots.usage"), "warning");
+		},
+	});
+}
+
+export default function conartiPiUi(pi: ExtensionAPI): void {
+	/* Синхронизируем app.thinking.cycle -> alt+t до чтения keybindings.json в InteractiveMode */
+	syncThinkingCycleKeybinding();
+	installKeyboardLayoutSupport(pi);
+	registerOptionShortcutChord("alt+t");
+
+	/* 0. Получаем общий Host Runtime один раз при session_start до подписки фич */
 	pi.on("session_start", async (_event, ctx) => {
-		await acquireHostRuntime(ctx);
+		const synced = syncThinkingCycleKeybinding();
+		const runtime = await acquireHostRuntime(ctx);
+		if (synced) {
+			runtime?.keybindings?.reload?.();
+		}
 	});
 
 	/* 1. Карточки транскрипта, волновая анимация, Prompt Chips и цитаты */
@@ -54,38 +159,44 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 	/* 4. Режим планирования с построчными комментариями и защита вызовов тулов */
 	registerPlanStudioFeature(pi);
 
-	/* 5. Command Palette (Ctrl+K / /palette) и фоновые Prompt Suggestion после модальных хуков */
+	/* 5. Command Palette (Ctrl+K / /palette), конфиг-команды и фоновые Prompt Suggestion */
 	registerCommandPaletteFeature(pi);
+	registerUnifiedConfigCommands(pi);
 	registerPromptSuggestionFeature(pi);
 
 	pi.registerFlag("plan", {
-		description: "Запустить сессию сразу в режиме Plan",
+		description: t("sessionMode.flag.plan"),
 		type: "boolean",
 		default: false,
 	});
 
+	pi.registerShortcut("shift+tab", {
+		description: t("sessionMode.shortcut.cycle"),
+		handler: async (ctx) => cycleSessionMode(pi, ctx),
+	});
+
 	pi.registerShortcut("alt+m", {
-		description: "Переключить режим (Code / Plan / Auto-Safe)",
+		description: t("sessionMode.shortcut.cycle"),
 		handler: async (ctx) => cycleSessionMode(pi, ctx),
 	});
 
 	pi.registerShortcut("ctrl+alt+p", {
-		description: "Plan Mode / открыть Plan Studio",
+		description: t("sessionMode.shortcut.planStudio"),
 		handler: async (ctx) => {
 			const wf = getSessionWorkflow();
 			if (wf.hasPlan()) await showPlanStudio(pi, ctx);
-			else setSessionMode(pi, ctx, wf.mode === "plan" ? "code" : "plan");
+			else setSessionMode(pi, ctx, wf.mode === "plan" ? "always-approve" : "plan");
 		},
 	});
 
 	pi.registerCommand("context", {
-		description: "Визуальный инспектор контекста, токенов и буфера компакта",
+		description: t("context.command"),
 		handler: async (_args, ctx) => {
 			await showContextInspector(pi, ctx);
 		},
 	});
 
-	// 5. Fullscreen viewport shell: StickyPromptBar (top) + native ScrollView scrollbar + OutlineRail (right)
+	/* 6. Оболочка fullscreen viewport: StickyPromptBar (сверху) и OutlineRail (справа) */
 	let activeStickyBar: StickyPromptBar | undefined;
 	let disposeShell: (() => void) | undefined;
 	let unsubscribeStickyKey: (() => void) | undefined;

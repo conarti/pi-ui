@@ -283,30 +283,30 @@ describe("Tool-call preflight (Shell Effect, destructiveHint, Permission Prompt 
 			"mcp_docs",
 		]);
 
-		await harness.submitInput("/mode safe");
+		await harness.submitInput("/mode auto");
 
 		await harness.submitInput("Run read-only checks");
 		expect(harness.screen().text()).toContain("Read-only checks passed.");
-		expect(harness.screen().text()).not.toContain("Auto-Safe Confirmation");
+		expect(harness.screen().text()).not.toContain("Auto Permission");
 		expect(executed).toEqual(["mcp_docs:plans", "ps:Get-Content README.md"]);
 
 		const safeTurn = harness.submitInput("Apply safe mutations");
 
 		const editModalText = await waitForScreen(harness, (t) => t.includes("src/app.ts"));
-		expect(editModalText).toContain("Auto-Safe Confirmation");
+		expect(editModalText).toContain("Auto Permission");
 		expect(editModalText).toContain("edit");
 		await harness.pressKey("\r");
 
 		const writeModalText = await waitForScreen(harness, (t) => t.includes("src/new.ts"));
 		expect(readFileSync(join(projectDir, "src", "app.ts"), "utf8")).toBe("export const mode = 'new';\n");
-		expect(writeModalText).toContain("Auto-Safe Confirmation");
+		expect(writeModalText).toContain("Auto Permission");
 		expect(writeModalText).toContain("write");
 		await harness.pressKey("\x1b");
 
 		const deployModalText = await waitForScreen(harness, (t) => t.includes("deploy_prod"));
 		expect(existsSync(join(projectDir, "src", "new.ts"))).toBe(false);
 		expect(findToolResult(harness, "safe-write")?.isError).toBe(true);
-		expect(contentText(findToolResult(harness, "safe-write")!.content)).toContain("Auto-Safe");
+		expect(contentText(findToolResult(harness, "safe-write")!.content)).toContain("Auto mode");
 		expect(deployModalText).toContain("deploy_prod");
 		await harness.pressKey("\r");
 
@@ -322,14 +322,14 @@ describe("Tool-call preflight (Shell Effect, destructiveHint, Permission Prompt 
 		await harness.pressKey("\r");
 
 		await safeTurn;
-		expect(harness.screen().text()).not.toContain("Auto-Safe Confirmation");
+		expect(harness.screen().text()).not.toContain("Auto Permission");
 		expect(executed).toContain("ps:Remove-Item dist -Recurse");
 		expect(harness.screen().text()).toContain("Auto-Safe workflow finished.");
 	});
 
 	it("serializes concurrent mutating tool calls strictly one Modal Card at a time in FIFO order without deadlocking on prompt errors or session abort", async () => {
 		const wf = new SessionWorkflow();
-		wf.mode = "safe";
+		wf.mode = "auto";
 		let confirmCalls = 0;
 		const [errOutcome, okOutcome] = await Promise.all([
 			wf.preflightToolCall({ toolName: "edit", input: { path: "src/a.ts" } }, async () => {
@@ -410,12 +410,12 @@ describe("Tool-call preflight (Shell Effect, destructiveHint, Permission Prompt 
 			"parallel_batch",
 		]);
 
-		await harness.submitInput("/mode safe");
+		await harness.submitInput("/mode auto");
 		const turn = harness.submitInput("Run concurrent batch");
 
 		const firstScreen = await waitForScreen(harness, (t) => t.includes("first.txt"));
 		expect(settledOrder).toEqual([]);
-		expect(firstScreen).toContain("Auto-Safe Confirmation");
+		expect(firstScreen).toContain("Auto Permission");
 		expect(firstScreen).not.toContain("touch second.txt");
 		expect(firstScreen).not.toContain("deploy_prod");
 
@@ -437,7 +437,7 @@ describe("Tool-call preflight (Shell Effect, destructiveHint, Permission Prompt 
 
 		expect(settledOrder).toEqual(["first", "second", "third"]);
 		expect(executed).toEqual(["deploy_prod:third"]);
-		expect(harness.screen().text()).not.toContain("Auto-Safe Confirmation");
+		expect(harness.screen().text()).not.toContain("Auto Permission");
 		const batchResult = JSON.parse(contentText(findToolResult(harness, "batch-1")!.content));
 		expect(batchResult).toEqual({ firstErr: false, secondErr: true, thirdErr: false });
 
@@ -446,7 +446,7 @@ describe("Tool-call preflight (Shell Effect, destructiveHint, Permission Prompt 
 		await harness.session.abort();
 		await abortTurn;
 		expect(existsSync(join(projectDir, "aborted-write.txt"))).toBe(false);
-		expect(harness.screen().text()).not.toContain("Auto-Safe Confirmation");
+		expect(harness.screen().text()).not.toContain("Auto Permission");
 	});
 
 	it("allow-for-the-rest-of-the-turn ('a') drains queued sibling calls without extra modals and resets on agent_end and session restart", async () => {

@@ -9,6 +9,7 @@ import {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
+import { getThemeSurfacePalette, paintThemeSurfaceRow } from "../../shared/ansi.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import { sanitizeTurnText, type IndexedTurn, type TranscriptTurnIndex } from "../../shared/turn-index.ts";
@@ -172,6 +173,7 @@ export class OutlinePreviewPopup implements Component {
 
 	render(width: number): string[] {
 		const th = this.getTheme();
+		const palette = getThemeSurfacePalette(th);
 		const safeWidth = Math.max(6, width);
 		const inner = Math.max(4, safeWidth - 2);
 		const textW = Math.max(1, inner - 2);
@@ -185,6 +187,8 @@ export class OutlinePreviewPopup implements Component {
 			return clipped + " ".repeat(Math.max(0, textW - visibleWidth(clipped)));
 		};
 		const bodyRow = (s: string) => `${edge("│")} ${th.fg("text", fit(s))} ${edge("│")}`;
+		const paintCardRow = (s: string) =>
+			paintThemeSurfaceRow(th, s, safeWidth, palette.popupSurfaceBg);
 
 		const out: string[] = [];
 		if (time) {
@@ -192,11 +196,11 @@ export class OutlinePreviewPopup implements Component {
 			const padLeft = " ".repeat(Math.max(0, safeWidth - visibleWidth(clippedTime)));
 			out.push(`${padLeft}${th.fg("muted", clippedTime)}`);
 		}
-		out.push(edge(`╭${"─".repeat(inner)}╮`));
+		out.push(paintCardRow(edge(`╭${"─".repeat(inner)}╮`)));
 		for (const line of lines) {
-			out.push(bodyRow(line));
+			out.push(paintCardRow(bodyRow(line)));
 		}
-		out.push(edge(`╰${"─".repeat(inner)}╯`));
+		out.push(paintCardRow(edge(`╰${"─".repeat(inner)}╯`)));
 		return out;
 	}
 }

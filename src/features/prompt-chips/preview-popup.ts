@@ -13,7 +13,7 @@ import {
 	fgRgb,
 	getThemeSurfacePalette,
 	isLightTheme,
-	paintSurfaceRow,
+	paintThemeSurfaceRow,
 	type RgbTuple,
 } from "../../shared/ansi.ts";
 import { registerTransientHoverDismisser, unwrapHostTui } from "../../shared/host-runtime.ts";
@@ -134,7 +134,7 @@ export class PromptChipPreviewPopup implements Component {
 		const titleRgb: RgbTuple = light ? [29, 78, 216] : [125, 207, 255];
 		const textRgb: RgbTuple = light ? [15, 23, 42] : [220, 232, 248];
 		const mutedRgb: RgbTuple = light ? [100, 116, 139] : [136, 152, 176];
-		const [bgR, bgG, bgB] = palette.surfaceBg;
+		const popupBg = palette.popupSurfaceBg;
 
 		const spec = buildChipPreviewSpec(this.chip);
 		const b = (s: string) => fgRgb(borderRgb, s);
@@ -142,12 +142,11 @@ export class PromptChipPreviewPopup implements Component {
 		const clippedTitle = truncateToWidth(` ${spec.title} `, Math.max(1, innerSpan - 2), "…");
 		const titleW = visibleWidth(clippedTitle);
 		const rightDashes = Math.max(0, innerSpan - 1 - titleW);
-		const topRow = paintSurfaceRow(
+		const topRow = paintThemeSurfaceRow(
+			theme,
 			`${b("╭─")}${fgRgb(titleRgb, clippedTitle)}${b("─".repeat(rightDashes))}${b("╮")}`,
 			safeWidth,
-			bgR,
-			bgG,
-			bgB,
+			popupBg,
 		);
 
 		const out: string[] = [topRow];
@@ -155,11 +154,11 @@ export class PromptChipPreviewPopup implements Component {
 			const clipped = truncateToWidth(row.text, textWidth, "…");
 			const pad = " ".repeat(Math.max(0, textWidth - visibleWidth(clipped)));
 			const colored = fgRgb(row.muted ? mutedRgb : textRgb, `${clipped}${pad}`);
-			out.push(paintSurfaceRow(`${b("│")} ${colored} ${b("│")}`, safeWidth, bgR, bgG, bgB));
+			out.push(paintThemeSurfaceRow(theme, `${b("│")} ${colored} ${b("│")}`, safeWidth, popupBg));
 		}
 
 		out.push(
-			paintSurfaceRow(`${b("╰")}${b("─".repeat(innerSpan))}${b("╯")}`, safeWidth, bgR, bgG, bgB),
+			paintThemeSurfaceRow(theme, `${b("╰")}${b("─".repeat(innerSpan))}${b("╯")}`, safeWidth, popupBg),
 		);
 		return out;
 	}

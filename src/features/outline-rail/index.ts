@@ -6,6 +6,7 @@ import {
 	registerTransientHoverDismisser,
 } from "../../shared/host-runtime.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
+import { t } from "../../shared/i18n.ts";
 import type { IndexedTurn, TranscriptTurnIndex } from "../../shared/turn-index.ts";
 import { reconstructTurnPromptText } from "../prompt-chips/registry.ts";
 import {
@@ -143,7 +144,7 @@ export function createOutlineRailSlot(
 export function registerOutlineCommands(pi: ExtensionAPI, requestRender: () => void): void {
 	const toggle = (ctx: ExtensionContext) => {
 		if (ctx.mode !== "tui") {
-			ctx.ui.notify("Навигация по репликам доступна в fullscreen TUI", "warning");
+			ctx.ui.notify(t("outline.fullscreenOnly"), "warning");
 			return;
 		}
 		const settings = getOutlineSettings();
@@ -151,18 +152,18 @@ export function registerOutlineCommands(pi: ExtensionAPI, requestRender: () => v
 		getActiveHostRuntime()?.scroll?.invalidate?.();
 		requestRender();
 		ctx.ui.notify(
-			`Панель навигации справа: ${settings.enabled ? "показана" : "скрыта"}`,
+			t("outline.toggled", { state: settings.enabled ? t("state.shown") : t("state.hidden") }),
 			"info",
 		);
 	};
 
 	pi.registerShortcut("ctrl+alt+o", {
-		description: "Показать / скрыть правую панель навигации по репликам",
+		description: t("outline.shortcut"),
 		handler: async (ctx) => toggle(ctx),
 	});
 
 	pi.registerCommand("outline", {
-		description: "Показать / скрыть правую панель навигации по репликам (Ctrl+Alt+O)",
+		description: t("outline.command"),
 		handler: async (_args, ctx) => toggle(ctx),
 	});
 }

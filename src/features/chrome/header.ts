@@ -3,6 +3,7 @@ import { basename } from "node:path";
 import { VERSION, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { fgRgb, type HitBox } from "../../shared/ansi.ts";
+import { t } from "../../shared/i18n.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import { requestRender } from "../../shared/ui-action-bridge.ts";
 import { showCommandPalette } from "../command-palette/index.ts";
@@ -38,8 +39,9 @@ export function mountSessionHeader(pi: ExtensionAPI, ctx: ExtensionContext): voi
 				if (width < 28) return [];
 
 				const brand = `${fgRgb(97, 175, 239, "◈")} ${theme.bold("pi")} ${theme.fg("dim", `v${VERSION} · @conarti/pi-ui`)}`;
-				const proj = `${theme.fg("muted", projectName)}${gitBranch ? ` ${fgRgb(86, 182, 194, `(${gitBranch})`)}` : ""}`;
-				const menuText = hovered ? fgRgb(125, 207, 255, "⌃K меню") : theme.fg("dim", "⌃K меню");
+				const proj = `${theme.fg("muted", projectName)}${gitBranch ? ` ${fgRgb(100, 178, 240, `(${gitBranch})`)}` : ""}`;
+				const menuLabel = t("header.menu");
+				const menuText = hovered ? fgRgb(125, 207, 255, menuLabel) : theme.fg("dim", menuLabel);
 
 				const left = `  ${brand}  ${theme.fg("dim", "·")}  ${proj}`;
 				const right = `${menuText}  `;

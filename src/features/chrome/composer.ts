@@ -22,6 +22,7 @@ import {
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 import { fgRgb, isLightTheme, renderPill, type HitBox, type RgbTuple } from "../../shared/ansi.ts";
+import { t } from "../../shared/i18n.ts";
 import { matchesLayoutChord } from "../../shared/keyboard-layout.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
@@ -43,7 +44,7 @@ function fitExactWidth(text: string, targetWidth: number): string {
 	return slicedW < targetWidth ? sliced + " ".repeat(targetWidth - slicedW) : sliced;
 }
 
-export const COMPOSER_PLACEHOLDER = "Спроси или опиши задачу…";
+export const COMPOSER_PLACEHOLDER = t("composer.placeholder");
 
 export interface ComposerPointerInfo {
 	readonly hovered: boolean;
@@ -370,7 +371,7 @@ export class PiUiComposerEditor extends CustomEditor {
 		const st = getSessionWorkflow();
 		const light = isLightTheme(this.deps.getTheme());
 		if (st.mode === "plan") return light ? [180, 83, 9] : [196, 160, 92];
-		if (st.mode === "safe") return light ? [15, 118, 110] : [76, 162, 174];
+		if (st.mode === "auto") return light ? [2, 132, 199] : [100, 178, 240];
 		if (st.isStreaming) return light ? [37, 99, 235] : [97, 175, 239];
 		if (this.editorHovered) return light ? [59, 130, 246] : [92, 138, 198];
 		if (this.focused) return light ? [148, 163, 184] : [76, 91, 115];
@@ -681,7 +682,7 @@ export class PiUiComposerEditor extends CustomEditor {
 		const st = getSessionWorkflow();
 
 		const allPills: Array<{ id: string; str: string; onClick: () => void }> = [];
-		if (st.mode !== "code") {
+		if (st.mode !== "always-approve") {
 			const meta = MODE_META[st.mode];
 			allPills.push({
 				id: "mode",
@@ -691,19 +692,24 @@ export class PiUiComposerEditor extends CustomEditor {
 					variant: st.mode === "plan" ? "warning" : "secondary",
 					theme,
 				}),
-				onClick: () => setSessionMode(pi, ctx, "code"),
+				onClick: () => setSessionMode(pi, ctx, "always-approve"),
 			});
 		}
 		if (st.planLines.length > 0) {
 			const commentCount = Object.keys(st.planComments).length;
 			allPills.push({
 				id: "plan",
-				str: renderPill(commentCount > 0 ? `План (${commentCount})` : "План", {
-					hovered: this.hoveredBadge === "plan",
-					active: true,
-					variant: "warning",
-					theme,
-				}),
+				str: renderPill(
+					commentCount > 0
+						? t("composer.pill.planWithComments", { count: commentCount })
+						: t("composer.pill.plan"),
+					{
+						hovered: this.hoveredBadge === "plan",
+						active: true,
+						variant: "warning",
+						theme,
+					},
+				),
 				onClick: () => void showPlanStudio(pi, ctx),
 			});
 		}
@@ -912,6 +918,14 @@ export class PiUiComposerEditor extends CustomEditor {
 			}
 			if (inBox) {
 				return hoverStateChanged ? { handled: true, render: true } : undefined;
+			}
+		}
+
+		/* Перехватываем press на пилюлях верхней рамки, чтобы быстрый повторный клик (<500мс) не запускал выделение слова */
+		if (event.type === "press" && event.button === "left" && event.y === 0) {
+			const hit = this.topHits.find((h) => event.x >= h.xStart && event.x < h.xEnd);
+			if (hit) {
+				return { handled: true, focus: true, render: false };
 			}
 		}
 

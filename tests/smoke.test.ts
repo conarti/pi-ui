@@ -110,9 +110,9 @@ describe("conartiPiUi end-to-end InteractiveMode smoke", () => {
 		expect(selectedScreen.cellAt(railGeo.downY, 117)?.inverse).toBe(false);
 		expect(selectedScreen.cellAt(railGeo.downY, 118)?.inverse).toBe(false);
 
-		const quotePopupPos = selectedScreen.findText("Цитировать");
+		const quotePopupPos = selectedScreen.findText("Quote");
 		expect(quotePopupPos).toBeDefined();
-		expect(selectedScreen.text()).toContain("╭ ❝ Цитировать ╮");
+		expect(selectedScreen.text()).toContain("╭ ❝ Quote ╮");
 
 		await harness.mouseClick(quotePopupPos!.col + 2, quotePopupPos!.row);
 		const afterQuoteScreen = harness.screen();

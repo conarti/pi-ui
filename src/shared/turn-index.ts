@@ -2,6 +2,7 @@ import { UserMessageComponent, type ExtensionContext } from "@earendil-works/pi-
 import { Container, stripTerminalSequences, type Component } from "@earendil-works/pi-tui";
 import { reconstructTurnPromptText } from "../features/prompt-chips/registry.ts";
 import type { FullscreenShellContext } from "./fullscreen-layout.ts";
+import { t } from "./i18n.ts";
 
 export type StickyDisplayMode = "auto" | "always";
 
@@ -49,7 +50,7 @@ export function sanitizeTurnText(text: string): string {
 
 export function summarizeTurnTitle(prompt: string, ordinal: number): string {
 	const oneLine = prompt.replace(/\s+/g, " ").trim();
-	return oneLine || `Реплика #${ordinal}`;
+	return oneLine || t("turn.fallbackTitle", { ordinal });
 }
 
 export function formatTurnTime(timestamp: number | string | undefined): string {

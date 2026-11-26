@@ -14,8 +14,9 @@ import {
 } from "@earendil-works/pi-tui";
 import {
 	fgRgb,
+	getThemeSurfacePalette,
 	isLightTheme,
-	paintSurfaceRow,
+	paintThemeSurfaceRow,
 	type RgbTuple,
 } from "../../shared/ansi.ts";
 import {
@@ -30,13 +31,14 @@ import {
 	unwrapHostTui,
 } from "../../shared/host-runtime.ts";
 import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
+import { t } from "../../shared/i18n.ts";
 import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
 import {
 	computeSelectionQuotePopupAnchor,
 	normalizeQuoteText,
 } from "./quote-model.ts";
 
-export const QUOTE_SELECTION_POPUP_LABEL = "╭ ❝ Цитировать ╮";
+export const QUOTE_SELECTION_POPUP_LABEL = t("quotes.selectionPopup.label");
 export const QUOTE_SELECTION_POPUP_WIDTH = visibleWidth(QUOTE_SELECTION_POPUP_LABEL);
 export const QUOTE_SELECTION_POPUP_HEIGHT = 1;
 
@@ -117,15 +119,12 @@ export class QuoteSelectionPopup implements Component {
 	render(width: number): string[] {
 		const theme = this.getTheme();
 		const light = isLightTheme(theme);
+		const palette = getThemeSurfacePalette(theme);
 		const safeWidth = Math.max(4, Math.min(QUOTE_SELECTION_POPUP_WIDTH, width));
 
-		const bg: RgbTuple = light
-			? this.hovered
-				? [208, 227, 252]
-				: [226, 238, 252]
-			: this.hovered
-				? [42, 64, 92]
-				: [30, 44, 62];
+		const bg: RgbTuple = this.hovered
+			? palette.selectedRowBg
+			: palette.popupSurfaceBg;
 		const borderRgb: RgbTuple = light
 			? this.hovered
 				? [37, 99, 235]
@@ -148,11 +147,11 @@ export class QuoteSelectionPopup implements Component {
 
 		if (safeWidth < QUOTE_SELECTION_POPUP_WIDTH) {
 			const clipped = truncateToWidth(QUOTE_SELECTION_POPUP_LABEL, safeWidth, "…");
-			return [paintSurfaceRow(fgRgb(textRgb, clipped), safeWidth, bg[0], bg[1], bg[2])];
+			return [paintThemeSurfaceRow(theme, fgRgb(textRgb, clipped), safeWidth, bg)];
 		}
 
-		const styled = `${fgRgb(borderRgb, "╭")} ${fgRgb(quoteRgb, "❝")} ${fgRgb(textRgb, "Цитировать")} ${fgRgb(borderRgb, "╮")}`;
-		return [paintSurfaceRow(styled, safeWidth, bg[0], bg[1], bg[2])];
+		const styled = `${fgRgb(borderRgb, "╭")} ${fgRgb(quoteRgb, "❝")} ${fgRgb(textRgb, t("quotes.selectionPopup.word"))} ${fgRgb(borderRgb, "╮")}`;
+		return [paintThemeSurfaceRow(theme, styled, safeWidth, bg)];
 	}
 }
 

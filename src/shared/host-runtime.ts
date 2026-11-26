@@ -44,11 +44,25 @@ export interface HostClipboardProvider {
 	writeText?(text: string): void | Promise<void>;
 }
 
+export interface ExternalOpenResult {
+	readonly ok: boolean;
+	readonly error?: string;
+}
+
+export interface HostExternalOpener {
+	openUrl(url: string): Promise<ExternalOpenResult>;
+	openPath(
+		filePath: string,
+		options?: { readonly line?: number; readonly column?: number },
+	): Promise<ExternalOpenResult>;
+}
+
 interface AcquiredHostTui {
 	tui: TUI;
 	keybindings?: KeybindingsManager;
 	theme?: () => Theme;
 	clipboard?: HostClipboardProvider;
+	externalOpener?: HostExternalOpener;
 }
 
 export interface HostRuntimeHandle {
@@ -56,6 +70,7 @@ export interface HostRuntimeHandle {
 	readonly tui: TUI;
 	readonly keybindings: KeybindingsManager | undefined;
 	readonly clipboard: HostClipboardProvider;
+	readonly externalOpener: HostExternalOpener;
 	readonly isFullscreen: boolean;
 	readonly scroll: ScrollView | undefined;
 	readonly chatContainer: Container | undefined;
@@ -87,6 +102,7 @@ interface InternalHostRuntimeHandle extends HostRuntimeHandle {
 interface RuntimeSlot {
 	active?: InternalHostRuntimeHandle;
 	clipboard?: HostClipboardProvider;
+	externalOpener?: HostExternalOpener;
 }
 
 function getTransientHoverDismissers(): Map<string, () => void> {
@@ -178,6 +194,14 @@ export function setHostClipboardProvider(clipboard: HostClipboardProvider | unde
 
 export function getHostClipboardProvider(): HostClipboardProvider | undefined {
 	return getRuntimeSlot().clipboard;
+}
+
+export function setHostExternalOpener(opener: HostExternalOpener | undefined): void {
+	getRuntimeSlot().externalOpener = opener;
+}
+
+export function getHostExternalOpener(): HostExternalOpener | undefined {
+	return getRuntimeSlot().externalOpener;
 }
 
 export function getActiveHostRuntime(): HostRuntimeHandle | undefined {
@@ -531,6 +555,58 @@ export function resolveActiveClipboardProvider(): HostClipboardProvider {
 	return getActiveHostRuntime()?.clipboard ?? getHostClipboardProvider() ?? defaultHostClipboardProvider;
 }
 
+const ALLOWED_EXTERNAL_URL_SCHEMES = new Set(["http:", "https:", "mailto:"]);
+
+function execOpenTarget(target: string): Promise<ExternalOpenResult> {
+	const command =
+		process.platform === "darwin"
+			? "open"
+			: process.platform === "win32"
+				? "cmd.exe"
+				: "xdg-open";
+	const args =
+		process.platform === "win32" ? ["/c", "start", "", target] : [target];
+	return new Promise((resolve) => {
+		execFile(command, args, { timeout: 5000 }, (err) => {
+			if (err) {
+				resolve({ ok: false, error: err.message });
+				return;
+			}
+			resolve({ ok: true });
+		});
+	});
+}
+
+export const defaultHostExternalOpener: HostExternalOpener = {
+	async openUrl(rawUrl: string): Promise<ExternalOpenResult> {
+		const trimmed = rawUrl.trim();
+		if (!trimmed) return { ok: false, error: "Empty URL" };
+		try {
+			const parsed = new URL(trimmed);
+			if (!ALLOWED_EXTERNAL_URL_SCHEMES.has(parsed.protocol.toLowerCase())) {
+				return { ok: false, error: `Unsupported URL scheme: ${parsed.protocol}` };
+			}
+		} catch {
+			return { ok: false, error: "Invalid URL" };
+		}
+		return await execOpenTarget(trimmed);
+	},
+
+	async openPath(filePath: string): Promise<ExternalOpenResult> {
+		const trimmed = filePath.trim();
+		if (!trimmed) return { ok: false, error: "Empty file path" };
+		return await execOpenTarget(trimmed);
+	},
+};
+
+export function resolveActiveExternalOpener(): HostExternalOpener {
+	return (
+		getActiveHostRuntime()?.externalOpener ??
+		getHostExternalOpener() ??
+		defaultHostExternalOpener
+	);
+}
+
 export function installViewportScrollDismissHooks(
 	namespace: string,
 	isActive: () => boolean,
@@ -702,7 +778,7 @@ async function acquireHostTuiFromExtensionUi(
  */
 export async function acquireHostRuntime(
 	ctx: ExtensionContext,
-	options?: { clipboard?: HostClipboardProvider },
+	options?: { clipboard?: HostClipboardProvider; externalOpener?: HostExternalOpener },
 ): Promise<HostRuntimeHandle | undefined> {
 	const slot = getRuntimeSlot();
 	if (slot.active && slot.active.ctx === ctx) {
@@ -717,6 +793,7 @@ export async function acquireHostRuntime(
 	const { tui, keybindings } = acquired;
 	const theme = acquired.theme ?? (() => ctx.ui.theme);
 	const explicitClipboard = options?.clipboard ?? acquired.clipboard;
+	const explicitExternalOpener = options?.externalOpener ?? acquired.externalOpener;
 
 	const resolveFullscreenLayout = (): {
 		renderer: TUI;
@@ -825,6 +902,9 @@ export async function acquireHostRuntime(
 		keybindings,
 		get clipboard() {
 			return explicitClipboard ?? slot.clipboard ?? defaultHostClipboardProvider;
+		},
+		get externalOpener() {
+			return explicitExternalOpener ?? slot.externalOpener ?? defaultHostExternalOpener;
 		},
 		get isFullscreen() {
 			syncRendererState();
