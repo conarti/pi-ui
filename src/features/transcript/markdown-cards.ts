@@ -113,7 +113,8 @@ export function clearMarkdownCopyTimers(): void {
 
 function isEligibleAssistantMarkdown(self: any): boolean {
 	return Boolean(
-		!self.__conartiThinkingMarkdown &&
+		self.__conartiAssistantMarkdown &&
+			!self.__conartiThinkingMarkdown &&
 			!self.__conartiSkipReplyCopy &&
 			!self.defaultTextStyle?.bgColor,
 	);
@@ -502,7 +503,7 @@ export function installMarkdownCardsAndHeadings(): void {
 				if (
 					isTopLevel &&
 					!isStreaming &&
-					!self.__conartiSkipReplyCopy &&
+					isEligibleAssistantMarkdown(self) &&
 					!isShortUntaggedCode(lang, rawCode)
 				) {
 					const footer = buildCodeFooterRow(activeTheme, palette, cardW, lang, "rest");

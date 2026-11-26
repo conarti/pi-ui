@@ -422,7 +422,7 @@ export class PromptChipPreviewPopup implements Component {
 			const statusParts: string[] = [];
 			if (this.scrollOffset > 0) statusParts.push(`↑ ${this.scrollOffset}`);
 			if (remainingBelow > 0) {
-				statusParts.push(`… (+${remainingBelow} more ${remainingBelow === 1 ? "line" : "lines"})`);
+				statusParts.push(t(remainingBelow === 1 ? "chips.popup.moreLine" : "chips.popup.moreLines", { count: remainingBelow }));
 			}
 			renderRows = [
 				...windowRows,

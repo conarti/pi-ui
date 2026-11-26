@@ -11,6 +11,7 @@ import {
 	computeComposerMaxVisibleLines,
 	getActiveComposerEditor,
 } from "../src/features/chrome/composer.ts";
+import { parseAnsiColorRgb, rgbHueDegrees } from "../src/shared/ansi.ts";
 import { getActiveHostRuntime } from "../src/shared/host-runtime.ts";
 import { updatePiUiUserConfig } from "../src/shared/pi-ui-config.ts";
 import {
@@ -72,23 +73,23 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 			],
 		});
 
-		const scroll = getActiveHostRuntime()!.scroll!;
-		scroll.scrollTo(12, { disableFollow: true });
-		const scrollBaseline = scroll.scrollTop;
-		expect(scrollBaseline).toBeGreaterThan(0);
-
-		const editor = getActiveComposerEditor()!;
+		await harness.mouseWheel("up", 20, 10, 4);
 		const longDraft = Array.from(
 			{ length: 18 },
 			(_, i) => `draft-${String(i + 1).padStart(2, "0")}-${"x".repeat(70)}`,
-		).join("\n");
-		editor.setText(longDraft);
-		harness.flushFrame(true);
+		);
+		for (const [index, line] of longDraft.entries()) {
+			if (index > 0) await harness.pressKey("\x1b[13;2u");
+			await harness.paste(line);
+		}
 
 		const topRow40 = findComposerTopRow(harness);
 		const screen40 = harness.screen();
+		const transcriptRows = () => harness!.screen().text().match(/transcript-row-\d+/gu);
+		const scrollBaseline = transcriptRows();
+		expect(scrollBaseline?.length).toBeGreaterThan(0);
 		/* При termRows=40 видимая область зажата до 10 строк, ширина контента не сужается */
-		expect(editor.getRenderedBoxHeight()).toBe(12);
+		expect(screen40.rowText(topRow40 + 11)).toContain("╰");
 		expect(screen40.rowText(topRow40)).toContain("↑ 8");
 		expect(screen40.rowText(topRow40 + 11)).not.toContain("↓ ");
 		for (let r = topRow40; r <= topRow40 + 11; r += 1) {
@@ -104,7 +105,7 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 		const afterUpClick = harness.screen();
 		const topAfterUp = findComposerTopRow(harness);
 		expect(afterUpClick.rowText(topAfterUp + 11)).toContain("↓ ");
-		expect(scroll.scrollTop).toBe(scrollBaseline);
+		expect(transcriptRows()).toEqual(scrollBaseline);
 
 		/* Клик по индикатору ↓ M в нижней рамке прокручивает черновик обратно вниз */
 		const downRow = topAfterUp + 11;
@@ -112,14 +113,14 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 		expect(downCol).toBeGreaterThan(0);
 		await harness.mouseClick(downCol + 1, downRow);
 		expect(harness.screen().text()).toContain("draft-18-");
-		expect(scroll.scrollTop).toBe(scrollBaseline);
+		expect(transcriptRows()).toEqual(scrollBaseline);
 
 		/* Колесо мыши прокручивает черновик с overscroll = contain даже у границ */
 		await harness.mouseWheel("up", 20, topAfterUp + 3, 12);
 		expect(harness.screen().text()).toContain("draft-01-");
-		expect(scroll.scrollTop).toBe(scrollBaseline);
+		expect(transcriptRows()).toEqual(scrollBaseline);
 		await harness.mouseWheel("up", 20, topAfterUp + 3, 6);
-		expect(scroll.scrollTop).toBe(scrollBaseline);
+		expect(transcriptRows()).toEqual(scrollBaseline);
 
 		/* Навигация клавиатурой возвращает видимое окно к курсору */
 		await harness.pressKey("\x1b[B");
@@ -127,7 +128,7 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 
 		/* На компактном терминале (12 строк) высота черновика зажата до минимума 4 строк */
 		await harness.resize(96, 12);
-		expect(editor.getRenderedBoxHeight()).toBe(6);
+		expect(harness.screen().rowText(findComposerTopRow(harness) + 5)).toContain("╰");
 		expect(harness.screen().rowText(findComposerTopRow(harness))).toContain("↑ ");
 	});
 
@@ -325,6 +326,11 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 			expect(editor.getText()).toBe("");
 			expect(killSpy).not.toHaveBeenCalled();
 
+			await harness.typeText("/");
+			await harness.pressKey("\x1a");
+			expect(killSpy).not.toHaveBeenCalled();
+			expect(harness.screen().rowText(findComposerTopRow(harness) + 1)).toContain("Ask or describe");
+
 			/* 3. Пустой черновик: Esc×2 открывает /tree */
 			await harness.pressKey("\x1b");
 			await harness.pressKey("\x1b");
@@ -342,6 +348,9 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 			theme: "dark",
 			width: 110,
 			height: 28,
+			extensionFactories: [(pi) => {
+				pi.on("input", (event) => event.text === "Handled elsewhere" ? { action: "handled" } : undefined);
+			}],
 		});
 
 		const editor = getActiveComposerEditor()!;
@@ -471,20 +480,13 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 		await harness.flush();
 		expect(harness.session.getFollowUpMessages()).toEqual(["Alt queued epsilon"]);
 
-		/* Чистим очередь и завершаем активный стрим */
+		await harness.typeText("Handled elsewhere");
+		await harness.pressKey("\x1b[13;5u");
+		await waitForCondition(() => !harness!.session.isStreaming);
+		await harness.flush();
+		expect(harness.session.getSteeringMessages()).toEqual(["Direct steer delta"]);
+		expect(harness.session.getFollowUpMessages()).toEqual(["Alt queued epsilon"]);
 		harness.session.clearQueue();
-		const finalMsg: AssistantMessage = {
-			role: "assistant",
-			content: [{ type: "text", text: "Done." }],
-			api: "faux",
-			provider: "faux",
-			model: "faux-1",
-			usage: ZERO_USAGE,
-			stopReason: "stop",
-			timestamp: Date.now(),
-		};
-		streams[2]!.stream.push({ type: "done", reason: "stop", message: finalMsg });
-		streams[2]!.stream.end(finalMsg);
 		await turn1;
 		await harness.waitForIdle();
 		expect(callCount).toBe(3);
@@ -558,10 +560,12 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 		expect(harness.screen().rowText(topOffSug + 1)).toContain("Check edge cases [Tab]");
 
 		await harness.typeText("keep");
-		const heightBeforeEsc = editor.getRenderedBoxHeight();
+		const topBeforeEsc = findComposerTopRow(harness);
+		const bottomBeforeEsc = harness.screen().rowText(topBeforeEsc + 2);
 		await harness.pressKey("\x1b");
-		expect(editor.getRenderedBoxHeight()).toBe(heightBeforeEsc);
-		expect(harness.screen().rowText(findComposerTopRow(harness))).toContain("Esc again to clear");
+		expect(findComposerTopRow(harness)).toBe(topBeforeEsc);
+		expect(harness.screen().rowText(topBeforeEsc + 2)).toBe(bottomBeforeEsc);
+		expect(harness.screen().rowText(topBeforeEsc)).toContain("Esc again to clear");
 	});
 
 	it("auto-spaces Prompt Chips, collapses duplicate spaces on atomic delete, renders Kitty thumbnails on mouse hover only, and wraps/scrolls Quote & Paste popups with [Remove]/[Edit]/[Copy]", async () => {
@@ -738,9 +742,10 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 		const t1 = new Date(2026, 4, 12, 10, 0).getTime();
 		harness = await createInteractiveHarness({
 			agentDir,
-			theme: "dark",
+			theme: "light",
 			width: 112,
 			height: 30,
+			trueColor: false,
 			initialEntries: [
 				makeUserEntry("u0", null, "Transcript scroll anchor for ask_user park", t1),
 				makeAssistantEntry(
@@ -850,6 +855,13 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 
 		/* Клик по варианту PostgreSQL выбирает ответ и переходит на Features */
 		const pgHit = harness.screen().findText("2. PostgreSQL")!;
+		await harness.mouseMove(pgHit.col + 3, pgHit.row);
+		const hoverBg = harness.screen().cellAt(pgHit.row, pgHit.col + 3)?.bg;
+		expect(hoverBg?.kind).toBe("palette256");
+		if (hoverBg?.kind === "palette256") {
+			const { hue, saturation } = rgbHueDegrees(parseAnsiColorRgb(`\x1b[48;5;${hoverBg.index}m`)!);
+			expect(saturation < 0.04 || (hue > 198 && hue < 255)).toBe(true);
+		}
 		await harness.mouseClick(pgHit.col + 3, pgHit.row);
 		expect(harness.screen().text()).toContain("Select optional capabilities");
 

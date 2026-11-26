@@ -8,11 +8,14 @@ import { hideLinkTargetPopup, isLinkTargetPopupVisible } from "./link-target-pop
 import { clearMarkdownCopyTimers, installMarkdownCardsAndHeadings } from "./markdown-cards.ts";
 import {
 	clearRecordedThinkingTimings,
+	getMeasuredThinkingDurations,
 	installAssistantTranscriptBlocks,
 	noteThinkingTurnStart,
 	observeAssistantThinkingMessage,
 	resetGlobalThinkingExpandState,
+	restoreThinkingDurations,
 	stopThinkingWave,
+	THINKING_DURATION_ENTRY,
 } from "./thinking-block.ts";
 import {
 	clearPendingUserMessageTimestamps,
@@ -38,6 +41,7 @@ export function registerTranscriptFeature(pi: ExtensionAPI): void {
 			resetGlobalThinkingExpandState();
 		}
 		if (ctx.mode === "tui" && ctx.hasUI) {
+			restoreThinkingDurations(ctx.sessionManager.getEntries());
 			unsubscribePopupInput = ctx.ui.onTerminalInput((data) => {
 				if (
 					!isKeyRelease(data) &&
@@ -78,6 +82,12 @@ export function registerTranscriptFeature(pi: ExtensionAPI): void {
 			clearPendingUserMessageTimestamps();
 		}
 		observeAssistantThinkingMessage(event.message, false);
+	});
+
+	pi.on("turn_end", (event, ctx) => {
+		if (ctx.mode !== "tui" || event.message.role !== "assistant") return;
+		const durations = getMeasuredThinkingDurations(event.message);
+		if (durations) pi.appendEntry(THINKING_DURATION_ENTRY, durations);
 	});
 
 	pi.on("agent_end", async () => {

@@ -245,6 +245,7 @@ export default function (pi) {
 			toolCall: tc1,
 			partial: makeStreamAssistant([tc1], { timestamp: tStep1Start, stopReason: "toolUse" }),
 		});
+		await harness.flush();
 		vi.advanceTimersByTime(1_100);
 		const msg1 = makeStreamAssistant([tc1], {
 			timestamp: tStep1Start,
@@ -316,12 +317,11 @@ export default function (pi) {
 		expect(proseHit!.col).toBe(4);
 		expect(screenAtRest.rowText(proseHit!.row)).not.toContain(expectedTimestamp);
 
-		/* Наведение мыши раскрывает · ttft 0.5s · 50 tok/s без смещения timestamp и без изменения высоты */
 		const rowCountBeforeHover = screenAtRest.rowText(workedHit!.row + 1);
 		await harness.mouseMove(workedHit!.col + 3, workedHit!.row);
 		const screenHovered = harness.screen();
 		const hoveredRow = screenHovered.rowText(workedHit!.row);
-		expect(hoveredRow).toContain("Worked for 4s · ttft 0.5s · 50 tok/s");
+		expect(hoveredRow).toContain("Worked for 4s · ttft 0.4s · 50 tok/s");
 		expect(hoveredRow.slice(width - 2)).toBe("  ");
 		expect(hoveredRow.slice(width - 2 - expectedTimestamp.length, width - 2)).toBe(expectedTimestamp);
 		expect(screenHovered.rowText(workedHit!.row + 1)).toBe(rowCountBeforeHover);
@@ -339,6 +339,7 @@ export default function (pi) {
 		expect(modalText).toContain("Model calls:");
 		expect(modalText).toContain("Model + Effort");
 		expect(modalText).toContain("faux-1 (medium)");
+		expect(modalText).toMatch(/#1[^\n]*0\.4s/u);
 		await harness.pressKey("\x1b");
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 

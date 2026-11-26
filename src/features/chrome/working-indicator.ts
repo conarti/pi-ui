@@ -193,36 +193,36 @@ export function formatWorkingToolAction(
 	const relPath = formatRelativeTargetPath(args.path ?? args.file_path ?? args.target, cwd);
 	switch (toolName) {
 		case "read":
-			return relPath ? `Reading ${relPath}…` : "Reading file…";
+			return relPath ? t("working.reading", { target: relPath }) : t("working.readingFile");
 		case "edit":
-			return relPath ? `Editing ${relPath}…` : "Editing file…";
+			return relPath ? t("working.editing", { target: relPath }) : t("working.editingFile");
 		case "write":
-			return relPath ? `Writing ${relPath}…` : "Writing file…";
+			return relPath ? t("working.writing", { target: relPath }) : t("working.writingFile");
 		case "grep": {
 			const pat = typeof args.pattern === "string" ? cleanActionText(args.pattern, 24) : undefined;
-			if (pat) return `Searching ${pat}…`;
-			return relPath ? `Searching ${relPath}…` : "Searching files…";
+			const target = pat || relPath;
+			return target ? t("working.searching", { target }) : t("working.searchingFiles");
 		}
 		case "find": {
 			const pat = typeof args.pattern === "string" ? cleanActionText(args.pattern, 24) : undefined;
-			if (pat) return `Finding ${pat}…`;
-			return relPath ? `Finding ${relPath}…` : "Finding files…";
+			const target = pat || relPath;
+			return target ? t("working.finding", { target }) : t("working.findingFiles");
 		}
 		case "ls":
-			return relPath ? `Listing ${relPath}…` : "Listing directory…";
+			return relPath ? t("working.listing", { target: relPath }) : t("working.listingDirectory");
 		case "bash":
 		case "powershell": {
 			const cmd =
 				typeof args.command === "string"
 					? cleanActionText(args.command.split("\n")[0] ?? "", 34)
 					: undefined;
-			return cmd ? `Running ${cmd}…` : "Running command…";
+			return cmd ? t("working.running", { target: cmd }) : t("working.runningCommand");
 		}
 		case "codemode":
-			return "Running batch…";
+			return t("working.runningBatch");
 		default: {
 			const label = humanizeToolName(toolName, args);
-			return label ? ensureEllipsis(truncateToWidth(`Using ${label}`, 44, "…")) : "Running tool…";
+			return label ? ensureEllipsis(truncateToWidth(t("working.using", { target: label }), 44, "…")) : t("working.runningTool");
 		}
 	}
 }
@@ -445,7 +445,7 @@ export function renderWorkingStatusRow(
 	const snap = options.snapshot ?? getWorkingStatusController().snapshot(options.now);
 
 	const outerPad = computeOuterCanvasMargin(width);
-	const leftPad = width >= 48 ? 4 : width >= 20 ? 2 : 1;
+	const leftPad = Math.min(width - 1, outerPad + 2);
 	const rightPad = outerPad;
 	const leftMargin = " ".repeat(leftPad);
 	const rightMargin = " ".repeat(rightPad);

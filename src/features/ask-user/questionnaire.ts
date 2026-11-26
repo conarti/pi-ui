@@ -17,7 +17,7 @@ import {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
-import { bgRgb, fgRgb, getThemeSurfacePalette, type HitBox } from "../../shared/ansi.ts";
+import { blueBgRgb, fgRgb, getThemeSurfacePalette, type HitBox } from "../../shared/ansi.ts";
 import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
 import { t } from "../../shared/i18n.ts";
 import { matchesLayoutChord } from "../../shared/keyboard-layout.ts";
@@ -615,7 +615,7 @@ export class Questionnaire implements Component, Focusable {
 			wrapTextWithAnsi(text, Math.max(1, bodyWidth - indent)).forEach((part, i) => {
 				const raw = (i ? " ".repeat(indent) : prefix) + part;
 				const pad = isHov ? " ".repeat(Math.max(0, bodyWidth - visibleWidth(raw))) : "";
-				body.push(isHov ? bgRgb(palette.hoveredRowBg, `${raw}${pad}`) : raw);
+				body.push(isHov ? blueBgRgb(theme, palette.hoveredRowBg, `${raw}${pad}`) : raw);
 			});
 		};
 
@@ -1102,7 +1102,7 @@ export class Questionnaire implements Component, Focusable {
 			});
 			curX += cw + 1;
 			if (i === state.tab) return theme.bg("selectedBg", theme.fg("text", cellText));
-			if (this.hoveredId === id) return bgRgb(palette.hoveredRowBg, theme.fg("text", cellText));
+			if (this.hoveredId === id) return blueBgRgb(theme, palette.hoveredRowBg, theme.fg("text", cellText));
 			return theme.fg(
 				i < state.questions.length
 					? state.answered(i)

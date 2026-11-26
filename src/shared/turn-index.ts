@@ -9,6 +9,7 @@ import type { FullscreenShellContext } from "./fullscreen-layout.ts";
 import { t } from "./i18n.ts";
 import { loadPiUiUserConfig, type TimestampDisplayMode } from "./pi-ui-config.ts";
 import { extractSkillInvocations, serializeSkillBlockTag } from "./skill-tags.ts";
+import { formatTranscriptTimestamp } from "./transcript-timestamp.ts";
 
 export type StickyDisplayMode = "auto" | "always";
 
@@ -60,21 +61,6 @@ export function summarizeTurnTitle(prompt: string, ordinal: number): string {
 	return oneLine || t("turn.fallbackTitle", { ordinal });
 }
 
-const SHORT_MONTHS = [
-	"Jan",
-	"Feb",
-	"Mar",
-	"Apr",
-	"May",
-	"Jun",
-	"Jul",
-	"Aug",
-	"Sep",
-	"Oct",
-	"Nov",
-	"Dec",
-] as const;
-
 export interface FormatTurnTimeOptions {
 	readonly mode?: TimestampDisplayMode;
 	readonly now?: Date;
@@ -85,22 +71,7 @@ export function formatTurnTime(
 	options?: FormatTurnTimeOptions,
 ): string {
 	if (timestamp === undefined) return "";
-	const mode = options?.mode ?? loadPiUiUserConfig().timestamps;
-	if (mode === "off") return "";
-	const date = new Date(timestamp);
-	if (Number.isNaN(date.getTime())) return "";
-	const hh = String(date.getHours()).padStart(2, "0");
-	const mm = String(date.getMinutes()).padStart(2, "0");
-	if (mode === "time") {
-		return `${hh}:${mm}`;
-	}
-	const day = date.getDate();
-	const month = SHORT_MONTHS[date.getMonth()] ?? "Jan";
-	const refYear = (options?.now ?? new Date()).getFullYear();
-	if (date.getFullYear() !== refYear) {
-		return `${day} ${month} ${date.getFullYear()}, ${hh}:${mm}`;
-	}
-	return `${day} ${month}, ${hh}:${mm}`;
+	return formatTranscriptTimestamp(timestamp, options?.mode ?? loadPiUiUserConfig().timestamps, options?.now);
 }
 
 const EXISTING_IMAGE_TOKEN_RE = /\[(?:Image #(\d+):[^\]]+|🖼 Image #(\d+))\]/gu;

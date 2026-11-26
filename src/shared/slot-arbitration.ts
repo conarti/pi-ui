@@ -85,6 +85,8 @@ const GENERIC_SOURCE_TOKENS = new Set([
 ]);
 
 export const COMMAND_PALETTE_CHORD = "ctrl+k";
+const LOCALLY_DISPATCHED_SHORTCUTS = [COMMAND_PALETTE_CHORD, "ctrl+l", "alt+t", "alt+s"] as const;
+type LocallyDispatchedShortcut = (typeof LOCALLY_DISPATCHED_SHORTCUTS)[number];
 
 const SENTINEL_TOOL_RENDERER = Object.freeze({
 	renderCall: () => undefined,
@@ -296,18 +298,6 @@ export function deriveExtensionOwnerId(ext: unknown): string {
 	const identity = pkg ? normalized.slice(normalized.lastIndexOf("/node_modules/") + "/node_modules/".length) : normalized;
 	const suffix = createHash("sha256").update(identity).digest("hex").slice(0, 12);
 	return `${baseSlug}-${suffix}`;
-}
-
-function findCommandKeyIgnoreCase(
-	map: Map<string, unknown> | undefined,
-	normName: string,
-): string | undefined {
-	if (!map) return undefined;
-	if (map.has(normName)) return normName;
-	for (const key of map.keys()) {
-		if (key.trim().toLowerCase() === normName) return key;
-	}
-	return undefined;
 }
 
 function findShortcutKeyIgnoreCase(
@@ -797,17 +787,16 @@ class SessionArbitrationController {
 		const thirdParties = this.getThirdPartyExtensions();
 		if (thirdParties.length === 0) return out;
 
-		for (const piUiCmdName of piUiExt.commands.keys()) {
-			const normName = piUiCmdName.trim().toLowerCase();
+		for (const commandName of piUiExt.commands.keys()) {
 			const contenders = new Map<string, RunnerExtensionRecord>();
 			for (const ext of thirdParties) {
-				if (findCommandKeyIgnoreCase(ext.commands, normName)) {
+				if (ext.commands?.has(commandName)) {
 					contenders.set(this.getOwnerId(ext), ext);
 				}
 			}
 			if (contenders.size > 0) {
 				contenders.set(PI_UI_OWNER_ID, piUiExt);
-				out.set(normName, contenders);
+				out.set(commandName, contenders);
 			}
 		}
 		return out;
@@ -888,8 +877,10 @@ class SessionArbitrationController {
 	resolveActiveOwner(slotId: string, candidateOwnerIds?: Iterable<string>): string {
 		const saved = normalizeSlotOwnerId(loadPiUiUserConfig().slotOwners[slotId]);
 		if (saved) {
-			if (!candidateOwnerIds) return saved;
-			for (const id of candidateOwnerIds) {
+			const candidates = candidateOwnerIds ?? (
+				isSingletonSlot(slotId) ? this.singletonCandidates[slotId].keys() : []
+			);
+			for (const id of candidates) {
 				if (id === saved) return saved;
 			}
 		}
@@ -1066,14 +1057,9 @@ class SessionArbitrationController {
 				);
 				for (const [ownerId, ext] of contenders.entries()) {
 					if (ownerId === winnerOwner || !ext.commands) continue;
-					const actualKey = findCommandKeyIgnoreCase(ext.commands, normName);
-					if (actualKey !== undefined) {
-						removed.push({
-							map: ext.commands,
-							key: actualKey,
-							value: ext.commands.get(actualKey),
-						});
-						ext.commands.delete(actualKey);
+					if (ext.commands.has(normName)) {
+						removed.push({ map: ext.commands, key: normName, value: ext.commands.get(normName) });
+						ext.commands.delete(normName);
 					}
 				}
 			}
@@ -1086,13 +1072,13 @@ class SessionArbitrationController {
 		}
 	}
 
-	async dispatchPaletteShortcut(): Promise<void> {
+	async dispatchLocalShortcut(chord: LocallyDispatchedShortcut): Promise<void> {
 		const piUiExt = this.getPiUiExtension();
 		if (!piUiExt) return;
-		const contenders = this.collectContendedShortcutMap().get(COMMAND_PALETTE_CHORD);
-		const active = this.resolveActiveOwner(`shortcut:${COMMAND_PALETTE_CHORD}`, contenders?.keys());
+		const contenders = this.collectContendedShortcutMap().get(chord);
+		const active = this.resolveActiveOwner(`shortcut:${chord}`, contenders?.keys());
 		const winner = contenders?.get(active) ?? piUiExt;
-		const key = findShortcutKeyIgnoreCase(winner.shortcuts, COMMAND_PALETTE_CHORD);
+		const key = findShortcutKeyIgnoreCase(winner.shortcuts, chord);
 		const ctx = this.runner.createContext?.();
 		if (key && ctx) await winner.shortcuts?.get(key)?.handler(this.wrapContextForExtension(ctx, winner));
 	}
@@ -1104,10 +1090,12 @@ class SessionArbitrationController {
 		this.syncExtensionsAndWrap();
 		const contended = this.collectContendedShortcutMap();
 		const piUiExt = this.getPiUiExtension();
-		/* Хост отклоняет Ctrl+K (deleteToLineEnd); сохраняем регистрации для арбитража, но не отдаём их его диспетчеру. */
-		if (findShortcutKeyIgnoreCase(piUiExt?.shortcuts, COMMAND_PALETTE_CHORD)) {
-			const reserved = contended.get(COMMAND_PALETTE_CHORD) ?? new Map([[PI_UI_OWNER_ID, piUiExt!]]);
-			contended.set(COMMAND_PALETTE_CHORD, reserved);
+		/* Локальные обработчики учитывают фокус и состояние вставки; хост не должен вызывать их повторно. */
+		const localChords = new Set<string>(LOCALLY_DISPATCHED_SHORTCUTS);
+		for (const chord of localChords) {
+			if (!contended.has(chord) && piUiExt && findShortcutKeyIgnoreCase(piUiExt.shortcuts, chord)) {
+				contended.set(chord, new Map([[PI_UI_OWNER_ID, piUiExt]]));
+			}
 		}
 		const savedEntries: Array<{
 			map: Map<string, ExtensionShortcut>;
@@ -1137,7 +1125,7 @@ class SessionArbitrationController {
 					}
 				}
 
-				if (normChord !== COMMAND_PALETTE_CHORD && piUiExt?.shortcuts && piUiShortcut) {
+				if (!localChords.has(normChord) && piUiExt?.shortcuts && piUiShortcut) {
 					const dynamicShortcut: ExtensionShortcut = {
 						...piUiShortcut,
 						handler: async (ctx: ExtensionContext) => {
@@ -1466,8 +1454,8 @@ export function installSlotArbitration(_pi: ExtensionAPI): void {
 	installExtensionRunnerArbitrationHooks();
 }
 
-export async function dispatchPaletteShortcut(): Promise<void> {
-	await getGlobalState().activeController?.dispatchPaletteShortcut();
+export async function dispatchLocalShortcut(chord: LocallyDispatchedShortcut): Promise<void> {
+	await getGlobalState().activeController?.dispatchLocalShortcut(chord);
 }
 
 export function registerSlotArbitrationModalOpener(opener: SlotArbitrationModalOpener): void {
@@ -1499,7 +1487,7 @@ export function getActiveSlotOwner(slotId: string): string {
 		if (match) return match.activeOwnerId;
 		return ctrl.resolveActiveOwner(slotId);
 	}
-	return normalizeSlotOwnerId(loadPiUiUserConfig().slotOwners[slotId]) ?? PI_UI_OWNER_ID;
+	return PI_UI_OWNER_ID;
 }
 
 export function isSlotOwnedByPiUi(slotId: string): boolean {

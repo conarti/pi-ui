@@ -135,6 +135,21 @@ describe("Unified pi-ui.json config and legacy migration (pure seam)", () => {
 		expect(loadPiUiUserConfig().toolDensity).toBe("diff-focus");
 	});
 
+	it("writes through a dangling relative symlink chain", () => {
+		const agentDir = join(tempRoot, "agent");
+		mkdirSync(agentDir);
+		const intermediate = join(tempRoot, "dotfiles-link.json");
+		const target = join(tempRoot, "dotfiles", "settings.json");
+		symlinkSync("../dotfiles-link.json", getPiUiConfigPath());
+		symlinkSync("dotfiles/settings.json", intermediate);
+
+		updatePiUiUserConfig({ toolDensity: "grouped" });
+
+		expect(lstatSync(getPiUiConfigPath()).isSymbolicLink()).toBe(true);
+		expect(lstatSync(intermediate).isSymbolicLink()).toBe(true);
+		expect(JSON.parse(readFileSync(target, "utf8"))).toEqual({ toolDensity: "grouped" });
+	});
+
 	it("preserves symlinks, file permissions, and forward-compatible sibling keys across updates", () => {
 		const agentDir = join(tempRoot, "agent-symlink");
 		process.env.PI_CODING_AGENT_DIR = agentDir;

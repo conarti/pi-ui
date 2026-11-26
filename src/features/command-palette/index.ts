@@ -36,7 +36,7 @@ import {
 } from "../../shared/pi-ui-config.ts";
 import { notifyLiveToolDensityChange } from "../tool-calls/command.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
-import { COMMAND_PALETTE_CHORD, dispatchPaletteShortcut } from "../../shared/slot-arbitration.ts";
+import { COMMAND_PALETTE_CHORD, dispatchLocalShortcut } from "../../shared/slot-arbitration.ts";
 import { getSessionWorkflow, MODE_META } from "../../shared/session-workflow.ts";
 import { requestRender, runAppAction } from "../../shared/ui-action-bridge.ts";
 import {
@@ -671,6 +671,7 @@ export async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext
 
 export function registerCommandPaletteFeature(pi: ExtensionAPI): void {
 	let unsubscribeInput: (() => void) | undefined;
+	const dispatchPaletteShortcut = () => dispatchLocalShortcut(COMMAND_PALETTE_CHORD);
 
 	pi.registerShortcut(COMMAND_PALETTE_CHORD, {
 		description: t("palette.shortcut"),

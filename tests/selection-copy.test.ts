@@ -86,6 +86,24 @@ describe("Clean selection text extractor (pure seam over real package themes)", 
 		}
 	});
 
+	it("copies code with consecutive empty lines and preserves indentation in a partial selection", async () => {
+		const { dark } = await loadPackageThemes();
+		const bg = getThemeSurfacePalette(dark).codeBodyBg;
+		const select = (...rows: string[]) => makeFullLineSelection(
+			rows.map((line) => "    " + paintThemeSurfaceRow(dark, `  ${line}`, 52, bg)),
+		);
+		expect(extractCleanSelectionText(select("if ready:", "", "", "    launch()"), { theme: dark }))
+			.toBe("if ready:\n\n\n    launch()");
+		expect(extractCleanSelectionText(select("    launch()"), { theme: dark })).toBe("    launch()");
+	});
+
+	it("unwraps prose when a drag starts midway through the first line", () => {
+		const [row, next] = makeFullLineSelection(["    One two three xyz FIRST_TOKEN", "    more words"], 40);
+		expect(extractCleanSelectionText([
+			{ ...row!, startCol: 22, selectedAnsi: "FIRST_TOKEN" }, next!,
+		])).toBe("FIRST_TOKEN more words");
+	});
+
 	it("preserves explicit short line breaks while stripping frame borders and User Prompt chrome", async () => {
 		const { dark } = await loadPackageThemes();
 		const contentWidth = 80;

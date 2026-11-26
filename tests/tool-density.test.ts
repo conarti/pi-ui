@@ -1427,7 +1427,7 @@ describe("Tool Density: real InteractiveMode integration", () => {
 			cwd: projDir,
 			projectTrusted: true,
 			width: 82,
-			height: 60,
+			height: 78,
 			extensionFactories: [createCodemodeExtension(), competingProviderExt],
 			customTools: [testBash, testPs, testMcp],
 			responses: [
@@ -1435,7 +1435,7 @@ describe("Tool Density: real InteractiveMode integration", () => {
 					[
 						fauxToolCall(
 							"bash",
-							{ command: longSingleLineCmd, toolSummary: "Run long streaming command" },
+							{ command: longSingleLineCmd, toolSummary: "Run long streaming command", timeout: 5 },
 							{ id: "prov-bash-stream" },
 						),
 					],
@@ -1449,7 +1449,7 @@ describe("Tool Density: real InteractiveMode integration", () => {
 							{ command: "Write-Output --ps-flag=PS_TAIL_MARKER_VALUE" },
 							{ id: "prov-ps" },
 						),
-						fauxToolCall("read", { path: "src/readme.ts" }, { id: "prov-read" }),
+						fauxToolCall("read", { path: "src/readme.ts", limit: 4 }, { id: "prov-read" }),
 						fauxToolCall(
 							"edit",
 							{
@@ -1488,6 +1488,9 @@ describe("Tool Density: real InteractiveMode integration", () => {
 								pattern: longGrepPattern,
 								path: "src",
 								toolSummary: "Search long regex",
+								glob: "*.ts",
+								ignoreCase: true,
+								limit: 5,
 							},
 							{ id: "prov-grep" },
 						),
@@ -1525,6 +1528,7 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		expect(streamingExpandedText).toContain("$ echo --alpha=first-flag");
 		expect(streamingExpandedText).toContain("TAIL_MARKER_TOKEN");
 		expect(streamingExpandedText).toContain("stream-chunk-1");
+		expect(streamingExpandedText).toMatch(/"timeout": 5/u);
 		expect(streamingExpandedText).not.toContain("PROVIDER_MASKED_");
 
 		finishLiveBash!();
@@ -1543,6 +1547,7 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		expect(allExpanded).toContain("PS_TAIL_MARKER_VALUE");
 		/* Edit diff, Write diff и Read CodeView не скрыты провайдером */
 		expect(allExpanded).toContain("SEPARATE_READ_FILE_CONTENT_TOKEN");
+		expect(allExpanded).toMatch(/"limit": 4/u);
 		expect(allExpanded).toContain("-export const version = 1;");
 		expect(allExpanded).toContain("+export const version = 2;");
 		expect(allExpanded).toContain("+export const WRITE_UNIQUE_MARKER = true;");
@@ -1550,7 +1555,11 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		expect(allExpanded).toContain("CODEMODE_SCRIPT_VISIBLE");
 		/* Полный grep pattern и длинный аргумент кастомного MCP-инструмента перенесены без … */
 		expect(allExpanded).toContain("ZERO_ELLIPSIS_TRUNCATION_TAIL_TOKEN");
-		expect(allExpanded).toContain("FULL_TAIL_ARG_VALUE");
+		expect(allExpanded).toMatch(/glob[^\n]*\*\.ts/u);
+		expect(allExpanded).toMatch(/ignoreCase[^\n]*true/u);
+		expect(allExpanded).toMatch(/limit[^\n]*5/u);
+		expect(harness.screen().findText("✦ Search long regex")?.col).toBe(4);
+		expect(allExpanded.replace(/\n\s*│\s*/gu, "")).toContain("FULL_TAIL_ARG_VALUE");
 		expect(allExpanded).toContain(".yaml");
 		expect(allExpanded).not.toContain("FULL_TAIL_ARG_VALUE…");
 	});
@@ -1568,19 +1577,22 @@ describe("Tool Density: real InteractiveMode integration", () => {
 		});
 		harness = await createInteractiveHarness({
 			width: 72, height: 32, customTools: [imageBash],
+			settings: { terminal: { showImages: false } },
 			responses: [fauxAssistantMessage([
 				fauxToolCall("bash", { command: "echo first\necho SECOND_COMMAND_LINE" }, { id: "image-bash" }),
 			], { stopReason: "toolUse" }), fauxAssistantMessage("Done.")],
 		});
-		setCapabilityOverrides({ images: null });
+		setCapabilityOverrides({ images: "kitty" });
 		resetCapabilitiesCache();
 		harness.session.setActiveToolsByName(["bash"]);
 		await harness.submitInput("Show shell chart");
+		expect(harness.renderFrame().join("\n")).not.toContain("\x1b_G");
 		expect(harness.screen().text()).not.toContain("SECOND_COMMAND_LINE");
 		const row = harness.screen().findText("Ran echo first")!;
 		await harness.mouseClick(row.col + 1, row.row);
 		expect(harness.screen().text()).toContain("$ echo first");
 		expect(harness.screen().text()).toContain("echo SECOND_COMMAND_LINE");
+		expect(harness.renderFrame().join("\n")).not.toContain("\x1b_G");
 		expect(harness.screen().text()).toContain("[Image: [image/png] 1x1]");
 	});
 
@@ -1644,6 +1656,10 @@ describe("Tool Density: real InteractiveMode integration", () => {
 
 		const kittyRawFrame = harness.renderFrame().join("\n");
 		expect(kittyRawFrame).toContain("\x1b_G");
+
+		await harness.submitInput("/density codex");
+		expect(harness.screen().text()).toContain("Usage: /density");
+		expect(harness.screen().text()).toContain(`${TOOL_DIAMOND} Explored 2 files`);
 
 		/* В Compact и Grouped строки с изображениями также никогда не складываются в группу */
 		await harness.submitInput("/density compact");

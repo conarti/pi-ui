@@ -12,10 +12,13 @@ import {
 	type StickyOverlayRender,
 } from "../../shared/fullscreen-layout.ts";
 import {
+	createBracketedPasteTracker,
 	matchesLayoutChord,
-	registerOptionShortcutChord,
 } from "../../shared/keyboard-layout.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
+import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
+import { hasBlockingModalOverlay } from "../../shared/modal-card.ts";
+import { dispatchLocalShortcut } from "../../shared/slot-arbitration.ts";
 import { t } from "../../shared/i18n.ts";
 import {
 	formatTurnTime,
@@ -334,27 +337,24 @@ export function registerStickyPromptCommands(
 	});
 }
 
-export function bindStickyExpandKey(
-	ctx: ExtensionContext,
-	_shell: FullscreenShellContext,
-	bar: StickyPromptBar,
-): () => void {
-	const unregisterOptionChord = registerOptionShortcutChord("alt+s");
-	const unsubscribeInput = ctx.ui.onTerminalInput((data) => {
-		if (
-			!isKeyRelease(data) &&
-			!isKeyRepeat(data) &&
-			bar.config.enabled &&
-			bar.getActivePrompt() &&
-			matchesLayoutChord(data, "alt+s")
-		) {
-			bar.toggleExpanded();
-			return { consume: true };
+export function bindStickyExpandKey(ctx: ExtensionContext): () => void {
+	const paste = createBracketedPasteTracker();
+	return ctx.ui.onTerminalInput((data) => {
+		const segments = paste.split(data);
+		const tui = getActiveHostRuntime()?.tui;
+		if (tui && hasBlockingModalOverlay(tui)) return;
+		let forwarded = "";
+		let matched = false;
+		for (const segment of segments) {
+			const { text, inPaste } = segment;
+			if (!inPaste && !isKeyRelease(text) && !isKeyRepeat(text) && matchesLayoutChord(text, "alt+s")) {
+				matched = true;
+			} else {
+				forwarded += text;
+			}
 		}
-		return undefined;
+		if (!matched) return;
+		void dispatchLocalShortcut("alt+s");
+		return forwarded ? { data: forwarded } : { consume: true };
 	});
-	return () => {
-		unregisterOptionChord();
-		unsubscribeInput();
-	};
 }

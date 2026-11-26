@@ -11,6 +11,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { fgRgb, isLightTheme, type HitBox, type RgbTuple } from "../../shared/ansi.ts";
 import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
+import { getActiveHostRuntime } from "../../shared/host-runtime.ts";
 import { t } from "../../shared/i18n.ts";
 import { claimHover, hookMethod } from "../../shared/runtime-hooks.ts";
 import { getActiveComposerEditor, type PiUiComposerEditor } from "./composer.ts";
@@ -145,35 +146,30 @@ async function executeSendNow(
 	const state = getQueueState();
 	if (state.sendingNow) return;
 	state.sendingNow = true;
+	let restoration: Promise<void> | undefined;
+	const restoreQueues = () => restoration ??= reenqueueItems(mode, remaining)
+		.catch((error: unknown) => {
+			if (state.activeMode !== mode) return;
+			getActiveHostRuntime()?.ctx.ui.notify(t("composer.queue.restoreFailed", {
+				error: error instanceof Error ? error.message : String(error),
+			}), "error");
+		})
+		.finally(() => {
+			state.sendingNow = false;
+			mode.updatePendingMessagesDisplay();
+			mode.ui.requestRender();
+		});
 	try {
 		mode.updatePendingMessagesDisplay();
 		mode.ui.requestRender();
 		await mode.session.abort();
-		let requeued = false;
-		const requeueOnce = () => {
-			if (requeued) return;
-			requeued = true;
-			if (remaining.steering.length > 0 || remaining.followUp.length > 0) {
-				void reenqueueItems(mode, remaining).then(() => {
-					mode.updatePendingMessagesDisplay();
-					mode.ui.requestRender();
-				});
-			}
-		};
-		void mode.session
-			.prompt(item.text, {
-				images: item.images,
-				preflightResult: (outcome) => {
-					if (outcome === "started") {
-						requeueOnce();
-					}
-				},
-			})
-			.catch(() => {
-				/* Ошибки запуска нового хода обрабатываются стандартным потоком InteractiveMode */
-			});
-	} finally {
-		state.sendingNow = false;
+		/* Восстанавливаем очередь до завершения нового хода, даже если ввод обработало расширение. */
+		void mode.session.prompt(item.text, {
+			images: item.images,
+			preflightResult: () => { void restoreQueues(); },
+		}).then(restoreQueues, restoreQueues);
+	} catch {
+		await restoreQueues();
 	}
 }
 

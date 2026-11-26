@@ -1,7 +1,8 @@
 import { generateUnifiedPatch, type AgentToolResult, type Theme } from "@earendil-works/pi-coding-agent";
 import {
 	getCapabilities,
-	Image,
+	getImageDimensions,
+	imageFallback,
 	stripTerminalSequences,
 	truncateToWidth,
 	visibleWidth,
@@ -13,6 +14,7 @@ import {
 	sampleBreathingWaveRgb,
 } from "../../shared/animation-scheduler.ts";
 import { getActiveGlobalTheme, isLightTheme, type RgbTuple } from "../../shared/ansi.ts";
+import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { colorizeRgb } from "./color.ts";
 import {
 	classifyShellCommand as classifyShellExploration,
@@ -484,15 +486,9 @@ function renderNonGraphicImages(
 			typeof (item as { data?: unknown }).data === "string" &&
 			typeof (item as { mimeType?: unknown }).mimeType === "string",
 	);
-	return imgBlocks.flatMap((img) =>
-		new Image(
-			img.data,
-			img.mimeType,
-			{ fallbackColor: (s) => pal.dim(s) },
-			{ maxWidthCells: Math.min(60, Math.max(1, avail)) },
-		)
-			.render(Math.max(1, avail))
-			.map((line) => `${rail}${line}`),
+	return imgBlocks.flatMap(({ data, mimeType }) =>
+		wrapTextWithAnsi(imageFallback(mimeType, getImageDimensions(data, mimeType) ?? undefined), avail)
+			.map((line) => `${rail}${pal.dim(line)}`),
 	);
 }
 
@@ -547,7 +543,9 @@ class DensityLiveLines implements Component {
 
 	render(width: number): string[] {
 		if (width <= 0) return [];
-		const safeWidth = Math.max(1, width);
+		const outer = computeOuterCanvasMargin(width);
+		const leftPad = outer + 1;
+		const safeWidth = Math.max(1, width - leftPad - outer);
 		const pal = densityPalette(this.fallbackTheme);
 		const key = `${pal.key}|${this.computeKey(safeWidth, pal)}`;
 		if (!this.cache || this.cache.key !== key || this.cache.width !== safeWidth) {
@@ -560,12 +558,24 @@ class DensityLiveLines implements Component {
 				),
 			};
 		}
-		return this.cache.lines;
+		return this.cache.lines.map((line) => `${" ".repeat(leftPad)}${line}`);
 	}
 
 	invalidate(): void {
 		this.cache = undefined;
 	}
+}
+
+function expandedCallArguments(name: string, args: ToolArgs, status: RowStatus): ToolArgs {
+	const omitted = new Set(["toolSummary", "toolAction"]);
+	/* Команды, скрипты и успешные правки имеют собственное представление ниже заголовка. */
+	if (name === "bash" || name === "powershell") omitted.add("command");
+	if (name === "codemode") omitted.add("code");
+	if (status !== "error") {
+		if (name === "write") omitted.add("content");
+		if (name === "edit") for (const key of ["edits", "oldText", "newText"]) omitted.add(key);
+	}
+	return Object.fromEntries(Object.entries(args).filter(([key]) => !omitted.has(key)));
 }
 
 export function renderDensityCall(options: {
@@ -649,28 +659,9 @@ export function renderDensityCall(options: {
 				lines.push(`   ${bar} ${pal.dim(truncateToWidth("Running…", avail, "…"))}`);
 			}
 
-			/* При раскрытии grep/find, скрытых под stepSummary, показываем полный паттерн и путь без обрезки. */
-			if (expanded && (name === "grep" || name === "find") && typeof args.pattern === "string" && getStepSummary?.()) {
-				const p = pathOf(args);
-				const detail = p ? `pattern: ${args.pattern}  path: ${p}` : `pattern: ${args.pattern}`;
-				for (const wrapped of wrapTextWithAnsi(detail, Math.max(1, avail))) {
-					lines.push(`${rail}${pal.dim(wrapped)}`);
-				}
-			}
-
-			if (
-				expanded &&
-				!isCommandLikeTool(name) &&
-				name !== "read" &&
-				name !== "edit" &&
-				name !== "write" &&
-				name !== "grep" &&
-				name !== "find" &&
-				name !== "ls"
-			) {
-				if (Object.keys(args).length > 0) {
-					lines.push(...renderArguments(args, pal.theme, rail).render(width));
-				}
+			if (expanded) {
+				const details = expandedCallArguments(name, args, status);
+				if (Object.keys(details).length > 0) lines.push(...renderArguments(details, pal.theme, rail).render(width));
 			}
 			return lines;
 		},

@@ -254,7 +254,7 @@ describe("animation-scheduler (30 fps monotonic clock)", () => {
 		expect(vi.getTimerCount()).toBe(0);
 	});
 
-	it("formats observed thinking durations into concise labels and falls back to plain Thought when unmeasured", () => {
+	it("formats observed thinking durations into concise labels and marks unmeasured durations as unknown", () => {
 		expect(formatThinkingDuration(undefined)).toBeUndefined();
 		expect(formatThinkingDuration(-1)).toBeUndefined();
 		expect(formatThinkingDuration(Number.NaN)).toBeUndefined();
@@ -267,7 +267,7 @@ describe("animation-scheduler (30 fps monotonic clock)", () => {
 		expect(formatThinkingDuration(75_000)).toBe("1m 15s");
 		expect(formatThinkingDuration(3_665_000)).toBe("1h 1m 5s");
 
-		expect(formatThoughtLabel(undefined)).toBe("Thought");
+		expect(formatThoughtLabel(undefined)).toBe("Thought for ?s");
 		expect(formatThoughtLabel(4200)).toBe("Thought for 4s");
 		expect(formatThoughtLabel(75_000)).toBe("Thought for 1m 15s");
 	});

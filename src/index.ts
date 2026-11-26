@@ -40,7 +40,6 @@ import { acquireHostRuntime, disposeActiveHostRuntime } from "./shared/host-runt
 import { t } from "./shared/i18n.ts";
 import {
 	installKeyboardLayoutSupport,
-	registerOptionShortcutChord,
 } from "./shared/keyboard-layout.ts";
 import { loadPiUiUserConfig, updatePiUiUserConfig } from "./shared/pi-ui-config.ts";
 import {
@@ -96,7 +95,6 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 	/* Синхронизируем app.thinking.cycle -> alt+t до чтения keybindings.json в InteractiveMode */
 	syncThinkingCycleKeybinding();
 	installKeyboardLayoutSupport(pi);
-	registerOptionShortcutChord("alt+t");
 
 	/* 0. Получаем общий Host Runtime один раз при session_start до подписки фич */
 	pi.on("session_start", async (_event, ctx) => {
@@ -139,6 +137,14 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 		handler: async (ctx) => cycleSessionMode(pi, ctx),
 	});
 
+	pi.registerShortcut("ctrl+l", {
+		description: t("composer.popover.modelTitle"),
+		handler: async (ctx) => openComposerPopover(pi, ctx, "model"),
+	});
+	pi.registerShortcut("alt+t", {
+		description: t("composer.popover.thinkingTitle"),
+		handler: async (ctx) => openComposerPopover(pi, ctx, "thinking"),
+	});
 	pi.registerShortcut("alt+m", {
 		description: t("sessionMode.shortcut.cycle"),
 		handler: async (ctx) => openComposerPopover(pi, ctx, "mode"),
@@ -158,6 +164,12 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 	let disposeShell: (() => void) | undefined;
 	let unsubscribeStickyKey: (() => void) | undefined;
 
+	pi.registerShortcut("alt+s", {
+		description: t("sticky.shortcut.expand"),
+		handler: async () => {
+			if (activeStickyBar?.config.enabled && activeStickyBar.getActivePrompt()) activeStickyBar.toggleExpanded();
+		},
+	});
 	registerStickyPromptCommands(pi, () => activeStickyBar);
 	registerOutlineCommands(pi, () => requestRender());
 
@@ -197,9 +209,8 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 		updatePlanWidget(pi, ctx);
 
 		const hostRuntime = await acquireHostRuntime(ctx);
+		if (ctx.mode === "tui" && ctx.hasUI) unsubscribeStickyKey = bindStickyExpandKey(ctx);
 		disposeShell = hostRuntime?.mountViewportSlots((shell) => {
-			unsubscribeStickyKey?.();
-			unsubscribeStickyKey = undefined;
 
 			const turnIndex = new TranscriptTurnIndex({
 				shell,
@@ -208,15 +219,9 @@ export default function conartiPiUi(pi: ExtensionAPI): void {
 
 			const stickyBar = new StickyPromptBar(shell, turnIndex, getStickyConfig());
 			activeStickyBar = stickyBar;
-			const unbindKey = bindStickyExpandKey(ctx, shell, stickyBar);
-			unsubscribeStickyKey = unbindKey;
 
 			const origStickyDispose = stickyBar.dispose.bind(stickyBar);
 			stickyBar.dispose = () => {
-				unbindKey();
-				if (unsubscribeStickyKey === unbindKey) {
-					unsubscribeStickyKey = undefined;
-				}
 				if (activeStickyBar === stickyBar) {
 					activeStickyBar = undefined;
 				}
