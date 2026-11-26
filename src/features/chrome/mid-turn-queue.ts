@@ -11,7 +11,7 @@ import {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
-import { fgRgb, isLightTheme, type HitBox, type RgbTuple } from "../../shared/ansi.ts";
+import { CLOSE_BUTTON_LABEL, fgRgb, isLightTheme, renderCloseButton, type HitBox, type RgbTuple } from "../../shared/ansi.ts";
 import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { getActiveHostRuntime, getFocusedHostComponent } from "../../shared/host-runtime.ts";
 import { t } from "../../shared/i18n.ts";
@@ -313,7 +313,6 @@ class PendingQueueStripComponent implements Component {
 		const accentRgb: RgbTuple = light ? [29, 78, 216] : [125, 207, 255];
 		const badgeSteerRgb: RgbTuple = light ? [2, 132, 199] : [100, 178, 240];
 		const badgeQueueRgb: RgbTuple = light ? [71, 85, 105] : [148, 163, 184];
-		const dangerRgb: RgbTuple = light ? [185, 28, 28] : [248, 113, 113];
 
 		const rows: string[] = [""];
 
@@ -327,7 +326,7 @@ class PendingQueueStripComponent implements Component {
 
 			const sendRaw = `[${t("composer.queue.sendNow")}]`;
 			const editRaw = `[${t("composer.queue.edit")}]`;
-			const delRaw = `[${t("composer.queue.remove")}]`;
+			const delRaw = CLOSE_BUTTON_LABEL;
 
 			const sendStyled =
 				this.hoveredId === sendId
@@ -337,10 +336,7 @@ class PendingQueueStripComponent implements Component {
 				this.hoveredId === editId
 					? fgRgb(accentRgb, editRaw)
 					: theme.fg("muted", editRaw);
-			const delStyled =
-				this.hoveredId === delId
-					? fgRgb(dangerRgb, delRaw)
-					: theme.fg("dim", delRaw);
+			const delStyled = renderCloseButton(theme, this.hoveredId === delId);
 
 			const actionsStr = `${sendStyled} ${editStyled} ${delStyled}`;
 			const actionsW = visibleWidth(actionsStr);

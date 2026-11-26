@@ -532,8 +532,32 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 			setCapabilities({ ...capabilities, images: "kitty" });
 			const pill = harness.screen().findText("Image #1")!;
 			await harness.mouseMove(pill.col + 2, pill.row);
-			expect(harness.screen().text()).toContain("File: clipboard.png");
+			const previewScreen = harness.screen();
+			expect(previewScreen.text()).toContain("File: clipboard.png");
 			expect(harness.terminal.writes.join("")).toContain(`;${TINY_PNG_BASE64}\x1b\\`);
+
+			/* Строка 1 попапа с Kitty-миниатюрой окрашена тем же popupSurfaceBg без тёмной полосы */
+			const fileHit = previewScreen.findText("File: clipboard.png")!;
+			let popupTop = fileHit.row;
+			while (popupTop > 0 && !previewScreen.rowText(popupTop).includes("╭─")) {
+				popupTop -= 1;
+			}
+			let popupLeft = -1;
+			let popupRight = -1;
+			for (let c = 0; c < previewScreen.width; c += 1) {
+				const ch = previewScreen.cellAt(popupTop, c)?.char;
+				if (ch === "╭" && popupLeft === -1) popupLeft = c;
+				if (ch === "╮") popupRight = c;
+			}
+			expect(popupLeft).toBeGreaterThanOrEqual(0);
+			expect(popupRight).toBeGreaterThan(popupLeft + 10);
+			const expectedBg = previewScreen.cellAt(popupTop, popupLeft + 1)?.bg;
+			expect(expectedBg?.kind).toBe("rgb");
+			for (let r = popupTop + 1; r <= fileHit.row; r += 1) {
+				for (let c = popupLeft; c <= popupRight; c += 1) {
+					expect(previewScreen.cellAt(r, c)?.bg).toEqual(expectedBg);
+				}
+			}
 		} finally {
 			setCapabilities(capabilities);
 		}

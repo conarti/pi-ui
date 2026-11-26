@@ -11,16 +11,19 @@ import {
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 import {
+	CLOSE_BUTTON_LABEL,
 	getActiveGlobalTheme,
 	getThemeSurfacePalette,
 	mixRgb,
 	paintThemeSurfaceRow,
+	renderCloseButton,
 	themeBgRgb,
 	themeFgRgb,
 } from "./ansi.ts";
 import { createClickedHoverPopup } from "./clicked-hover-popup.ts";
 import { getActiveHostRuntime } from "./host-runtime.ts";
 import { t } from "./i18n.ts";
+import { claimHover } from "./runtime-hooks.ts";
 
 export interface ParsedSkillInvocation {
 	readonly id: string;
@@ -191,6 +194,8 @@ class SkillPreviewPopup implements Component {
 	onDismiss?: () => void;
 	private maxScroll = 0;
 	private closeHit: { xStart: number; xEnd: number } | undefined;
+	private closeHovered = false;
+	private readonly hoverOwner = {};
 
 	constructor(private readonly getTheme: () => Theme) {}
 
@@ -256,7 +261,7 @@ class SkillPreviewPopup implements Component {
 		const maxBodyRows = Math.max(5, Math.min(14, termRows - 8));
 		const { rows } = this.buildWrappedRows(Math.max(12, maxWidth - 4), maxBodyRows);
 		const contentW = Math.max(
-			visibleWidth(` ✦ /${this.skill?.name ?? "skill"} [×] `),
+			visibleWidth(` ✦ /${this.skill?.name ?? "skill"} ${CLOSE_BUTTON_LABEL} `),
 			...rows.map((r) => visibleWidth(r.text)),
 		);
 		const width = Math.max(24, Math.min(maxWidth, contentW + 4));
@@ -272,15 +277,25 @@ class SkillPreviewPopup implements Component {
 			this.scrollOffset = next;
 			return { handled: true, render: changed };
 		}
+		const hitClose =
+			event.y === 0 &&
+			this.closeHit !== undefined &&
+			event.x >= this.closeHit.xStart &&
+			event.x < this.closeHit.xEnd;
+		if (event.type === "move") {
+			if (hitClose) {
+				claimHover(this.hoverOwner, () => {
+					this.closeHovered = false;
+				});
+			}
+			const changed = hitClose !== this.closeHovered;
+			this.closeHovered = hitClose;
+			return { handled: true, render: changed };
+		}
 		if (event.type === "press" && event.button === "left") {
 			return { handled: true, render: false };
 		}
 		if (event.type === "click" && event.button === "left") {
-			const hitClose =
-				event.y === 0 &&
-				this.closeHit !== undefined &&
-				event.x >= this.closeHit.xStart &&
-				event.x <= this.closeHit.xEnd;
 			if (hitClose) {
 				this.onDismiss?.();
 				return { handled: true, render: true };
@@ -304,18 +319,21 @@ class SkillPreviewPopup implements Component {
 		this.maxScroll = maxScroll;
 
 		const b = (s: string) => themeFgRgb(theme, palette.borderSubtle, s);
-		const closeLabel = " [×] ";
-		const closeWidth = visibleWidth(closeLabel);
+		const closeStyled = ` ${renderCloseButton(theme, this.closeHovered)} `;
+		const closeWidth = visibleWidth(closeStyled);
 		const titleBudget = Math.max(4, innerSpan - 1 - closeWidth);
 		const titleText = truncateToWidth(` ✦ /${this.skill.name} `, titleBudget, "…");
 		const dashCount = Math.max(0, innerSpan - 1 - visibleWidth(titleText) - closeWidth);
-		const closeCol = 2 + visibleWidth(titleText) + dashCount;
-		this.closeHit = { xStart: Math.max(0, closeCol - 1), xEnd: Math.min(safeWidth - 1, closeCol + closeWidth) };
+		const closeCol = 2 + visibleWidth(titleText) + dashCount + 1;
+		this.closeHit = {
+			xStart: Math.max(0, closeCol),
+			xEnd: Math.min(safeWidth - 1, closeCol + visibleWidth(CLOSE_BUTTON_LABEL)),
+		};
 
 		const out: string[] = [
 			paintThemeSurfaceRow(
 				theme,
-				`${b("╭─")}${themeFgRgb(theme, palette.accentBright, titleText)}${b("─".repeat(dashCount))}${themeFgRgb(theme, palette.codeMetaFg, closeLabel)}${b("╮")}`,
+				`${b("╭─")}${themeFgRgb(theme, palette.accentBright, titleText)}${b("─".repeat(dashCount))}${closeStyled}${b("╮")}`,
 				safeWidth,
 				palette.popupHeaderBg,
 			),

@@ -326,6 +326,26 @@ export function paintThemeSurfaceRow(
 	return `${bgEsc}${patched}\x1b[49m`;
 }
 
+/**
+ * Окрашивает фон готовой строки точной ширины без вызова `truncateToWidth`,
+ * чтобы графические последовательности Kitty (`\x1b_G...\x1b\\`) и iTerm2 (`\x1b]1337;File=...\x07`)
+ * оставались побайтово неизменными.
+ */
+export function paintRawThemeSurfaceRow(
+	theme: unknown,
+	rawContent: string,
+	rgb: RgbTuple,
+	blueSafe = false,
+): string {
+	const bgEsc = blueSafe
+		? blueAnsiPrefix(48, clampHueOutsideForbiddenBands(rgb), theme)
+		: openAnsiRgb(48, ...rgb, theme);
+	const patched = rawContent
+		.replace(/\x1b\[0m/g, `\x1b[0m${bgEsc}`)
+		.replace(/\x1b\[49m/g, bgEsc);
+	return `${bgEsc}${patched}\x1b[49m`;
+}
+
 export function paintSurfaceRow(
 	content: string,
 	targetWidth: number,
@@ -582,6 +602,15 @@ export function renderPill(
 	}
 	const bg = palette.pillNeutralBg;
 	return themeBgRgb(opts.theme, bg, opts.theme.fg("muted", ` ${text} `));
+}
+
+export const CLOSE_BUTTON_LABEL = "[×]";
+
+export function renderCloseButton(theme: Theme, hovered = false): string {
+	const palette = getThemeSurfacePalette(theme);
+	return hovered
+		? themeFgRgb(theme, palette.danger, CLOSE_BUTTON_LABEL)
+		: themeFgRgb(theme, palette.codeMetaFg, CLOSE_BUTTON_LABEL);
 }
 
 export function renderCardFrame(

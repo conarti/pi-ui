@@ -227,7 +227,10 @@ describe("Issue #44 — Composer parity, popovers, Shortcuts Bar, queue, chips &
 
 		await harness.submitInput("/model");
 		expect(harness.screen().text()).toContain("Search models");
-		await harness.pressKey("\x1b");
+		const popCloseHit = harness.screen().findText("[×]")!;
+		expect(popCloseHit).toBeDefined();
+		await harness.mouseClick(popCloseHit.col + 1, popCloseHit.row);
+		expect(harness.screen().text()).not.toContain("Search models");
 
 		/* Shift+Tab переключает режим напрямую без открытия поповера */
 		await harness.pressKey("\x1b[Z");

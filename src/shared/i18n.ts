@@ -113,7 +113,7 @@ export const EN_MESSAGES = {
 	"plan.waitForIdle": "Wait for the current assistant response to finish",
 	"plan.needComment": "Add at least one line comment first (click a line or press Enter)",
 	"plan.widget.progress": "📋 Plan {done}/{total}",
-	"plan.widget.hide": "✕ Hide",
+	"plan.widget.hide": "× Hide",
 	"plan.widget.currentStep": " · Now: {step}. {text}",
 	"plan.widget.allDone": " · All steps completed ✓",
 	"plan.widget.openWithComments": "📋 Open plan · 💬 {count} comments",
@@ -130,7 +130,7 @@ export const EN_MESSAGES = {
 	"planApproval.pill.reviseWithCount": "↻ Revise ({count}) (Ctrl+R)",
 	"planApproval.pill.revise": "↻ Revise (Ctrl+R)",
 	"planApproval.pill.clearComments": "🗑 Clear comments",
-	"planApproval.pill.close": "✕ Close (Esc)",
+	"planApproval.pill.close": "× Close (Esc)",
 	"planApproval.title": "◈ Plan Approval",
 
 	/* Auto Mode Permission Confirmation */
@@ -139,7 +139,7 @@ export const EN_MESSAGES = {
 	"permission.modalTitle": "🛡 Auto Permission",
 	"permission.pill.allow": "✓ Allow (Enter)",
 	"permission.pill.allowTurn": "✓ Allow for turn (a)",
-	"permission.pill.deny": "✕ Deny (Esc)",
+	"permission.pill.deny": "× Deny (Esc)",
 
 	/* Command Palette */
 	"palette.title": "⌘ Command Palette",

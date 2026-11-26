@@ -520,9 +520,10 @@ export default function (pi) {
 		await harness.mouseClick(copyAllPill.col + 2, copyAllPill.row);
 		expect(await getActiveHostRuntime()!.clipboard.readText?.()).toContain("Working directory:");
 
-		/* Закрытие кликом по крестику в заголовке */
-		const closeHit = harness.screen().findText("✕")!;
-		await harness.mouseClick(closeHit.col, closeHit.row);
+		/* Закрытие кликом по стандартизированному крестику [×] в заголовке */
+		const closeHit = harness.screen().findText("[×]")!;
+		expect(closeHit).toBeDefined();
+		await harness.mouseClick(closeHit.col + 1, closeHit.row);
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 
 		/* 4. /stats и /metrics открывают сразу вкладку Session usage */

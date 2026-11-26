@@ -313,10 +313,10 @@ describe("Session Workflow on real InteractiveMode", () => {
 		const openBannerPos = draftScreen.findText("Open plan");
 		expect(openBannerPos).toBeDefined();
 		const bannerRow = draftScreen.rowText(openBannerPos!.row);
-		const dismissCol = bannerRow.lastIndexOf("✕");
+		const dismissCol = bannerRow.lastIndexOf("[×]");
 		expect(dismissCol).toBeGreaterThan(openBannerPos!.col);
 
-		await harness.mouseClick(dismissCol, openBannerPos!.row);
+		await harness.mouseClick(dismissCol + 1, openBannerPos!.row);
 		expect(getLatestPersistedState(harness)).toMatchObject({
 			planRaw: "",
 			planComments: {},

@@ -17,6 +17,7 @@ import {
 	fgRgb,
 	getThemeSurfacePalette,
 	paintThemeSurfaceRow,
+	renderCloseButton,
 	renderPill,
 	type HitBox,
 	type PillVariant,
@@ -395,17 +396,25 @@ export function createModalCard(): ModalCardController {
 			const dimBorder = (s: string) => theme.fg("borderMuted", s);
 
 			const closable = spec.closable !== false && typeof spec.onClose === "function";
-			const closeGlyph = hoveredId === "top-close"
-				? fgRgb(palette.danger, "✕")
-				: theme.fg("muted", "✕");
+			const closeGlyph = renderCloseButton(theme, hoveredId === "top-close");
+			const closeW = visibleWidth(closeGlyph);
 
-			// Build top border while guaranteeing the top-right close glyph stays visible and right-aligned
-			const metaPart = spec.headerMeta ? `${spec.headerMeta}  ` : "";
+			/* Сборка верхней рамки с гарантией видимости кнопки [×] справа */
+			let metaPart = spec.headerMeta ? `${spec.headerMeta}  ` : "";
+			if (closable && metaPart) {
+				const maxMetaW = Math.max(0, safeWidth - 9 - closeW);
+				if (maxMetaW < 4) {
+					metaPart = "";
+				} else if (visibleWidth(metaPart) > maxMetaW) {
+					const trimmedMeta = truncateToWidth(spec.headerMeta!, Math.max(1, maxMetaW - 2), "…");
+					metaPart = trimmedMeta ? `${trimmedMeta}  ` : "";
+				}
+			}
 			const rightContent = closable ? `${metaPart}${closeGlyph}` : (spec.headerMeta ?? "");
 			const rightPart = rightContent ? ` ${rightContent} ` : "";
 			const rightWidth = visibleWidth(rightPart);
 
-			// Reserve "╭─" (2) + rightPart + "╮" (1) + at least 1 border dash
+			/* Резервируем "╭─" (2) + rightPart + "╮" (1) + минимум 1 тире рамки */
 			const maxLeftWidth = Math.max(2, safeWidth - 3 - rightWidth - (rightWidth > 0 ? 1 : 0));
 			const leftTitle = truncateToWidth(` ${spec.title} `, maxLeftWidth, "…");
 			const leftWidth = visibleWidth(leftTitle);
@@ -416,11 +425,10 @@ export function createModalCard(): ModalCardController {
 
 			if (closable && spec.onClose) {
 				const closeCol = visibleWidth(topPrefix) + 1 + visibleWidth(metaPart);
-				const closeW = visibleWidth(closeGlyph);
 				closeHit = {
 					id: "top-close",
-					xStart: Math.max(0, closeCol - 1),
-					xEnd: Math.min(safeWidth - 1, closeCol + closeW + 1),
+					xStart: Math.max(0, closeCol),
+					xEnd: Math.min(safeWidth - 1, closeCol + closeW),
 					y: 0,
 					onClick: spec.onClose,
 				};

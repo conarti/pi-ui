@@ -15,7 +15,7 @@ import {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
-import { blueBgRgb, themeFgRgb, getThemeSurfacePalette, paintThemeSurfaceRow } from "../../shared/ansi.ts";
+import { blueBgRgb, CLOSE_BUTTON_LABEL, getThemeSurfacePalette, paintThemeSurfaceRow, renderCloseButton, themeFgRgb } from "../../shared/ansi.ts";
 import { computeOuterCanvasMargin } from "../../shared/fullscreen-layout.ts";
 import { getActiveHostRuntime, unwrapHostTui } from "../../shared/host-runtime.ts";
 import { t } from "../../shared/i18n.ts";
@@ -185,6 +185,8 @@ export function openComposerPopover(
 	let selectedIdx = 0;
 	let scrollOffset = 0;
 	let hoveredIdx: number | null = null;
+	let closeHovered = false;
+	let closeHit: { xStart: number; xEnd: number } | undefined;
 	let rowToItemIdx = new Map<number, number>();
 	const hoverOwner = {};
 	let closed = false;
@@ -198,6 +200,7 @@ export function openComposerPopover(
 
 	const syncSelectionForKind = (): void => {
 		hoveredIdx = null;
+		closeHovered = false;
 		scrollOffset = 0;
 		if (kind === "model") {
 			const models = getModels();
@@ -351,9 +354,15 @@ export function openComposerPopover(
 						? t("composer.popover.thinkingTitle")
 						: t("composer.popover.modeTitle");
 			const tabBadge = theme.fg("dim", "Tab ⇄");
+			const closeBtn = renderCloseButton(theme, closeHovered);
 			const leftTitle = ` ${fgRgb(palette.accentBright, theme.bold(titleText))} `;
-			const rightTitle = ` ${tabBadge} `;
+			const rightTitle = ` ${tabBadge}  ${closeBtn} `;
 			const fill = Math.max(1, safeWidth - 3 - visibleWidth(leftTitle) - visibleWidth(rightTitle));
+			const closeCol = 2 + visibleWidth(leftTitle) + fill + 1 + visibleWidth(tabBadge) + 2;
+			closeHit = {
+				xStart: closeCol,
+				xEnd: closeCol + visibleWidth(CLOSE_BUTTON_LABEL),
+			};
 			const topRow = `${b("╭─")}${leftTitle}${b("─".repeat(fill))}${rightTitle}${b("╮")}`;
 
 			const body: string[] = [];
@@ -575,23 +584,32 @@ export function openComposerPopover(
 				}
 				return { handled: true, render: false };
 			}
+			const hitClose =
+				event.y === 0 &&
+				closeHit !== undefined &&
+				event.x >= closeHit.xStart &&
+				event.x < closeHit.xEnd;
 			if (event.type === "move") {
-				const nextHover = rowToItemIdx.get(event.y) ?? null;
-				if (nextHover !== null) {
+				const nextHover = hitClose ? null : (rowToItemIdx.get(event.y) ?? null);
+				if (nextHover !== null || hitClose) {
 					claimHover(hoverOwner, () => {
 						hoveredIdx = null;
+						closeHovered = false;
 					});
 				}
-				if (nextHover !== hoveredIdx) {
-					hoveredIdx = nextHover;
-					return { handled: true, render: true };
-				}
-				return { handled: true, render: false };
+				const changed = nextHover !== hoveredIdx || hitClose !== closeHovered;
+				hoveredIdx = nextHover;
+				closeHovered = hitClose;
+				return { handled: true, render: changed };
 			}
 			if (event.type === "press" && event.button === "left") {
 				return { handled: true, render: false };
 			}
 			if (event.type === "click" && event.button === "left") {
+				if (hitClose) {
+					close();
+					return { handled: true, render: true };
+				}
 				const hitIdx = rowToItemIdx.get(event.y);
 				if (hitIdx !== undefined) {
 					applySelection(hitIdx);

@@ -2,7 +2,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
-import { fgRgb, renderPill, type HitBox } from "../../shared/ansi.ts";
+import { fgRgb, renderCloseButton, renderPill, type HitBox } from "../../shared/ansi.ts";
 import { t } from "../../shared/i18n.ts";
 import { claimHover } from "../../shared/runtime-hooks.ts";
 import {
@@ -164,7 +164,7 @@ export function updatePlanWidget(pi: ExtensionAPI, ctx: ExtensionContext): void 
 						rgb: [140, 194, 101],
 						theme,
 					});
-					const btnDismiss = renderPill("✕", { hovered: hovered === "dismiss", theme });
+					const btnDismiss = renderCloseButton(theme, hovered === "dismiss");
 
 					let x = 1;
 					const wRev = visibleWidth(btnReview);

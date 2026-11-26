@@ -102,9 +102,10 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 				expect(lum).toBeGreaterThan(170);
 			}
 
+			expect(baseScreen.rowText(bounds.top)).toContain("[×]");
 			let closeCol = -1;
-			for (let c = bounds.left; c <= bounds.right; c += 1) {
-				if (baseScreen.cellAt(bounds.top, c)?.char === "✕") {
+			for (let c = bounds.right; c >= bounds.left; c -= 1) {
+				if (baseScreen.cellAt(bounds.top, c)?.char === "×") {
 					closeCol = c;
 					break;
 				}
@@ -130,9 +131,10 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		await harness.resize(48, 32);
 		const narrowScreen = harness.screen();
 		const narrowBounds = findModalBounds(narrowScreen);
+		expect(narrowScreen.rowText(narrowBounds.top)).toContain("[×]");
 		let narrowCloseCol = -1;
-		for (let c = narrowBounds.left; c <= narrowBounds.right; c += 1) {
-			if (narrowScreen.cellAt(narrowBounds.top, c)?.char === "✕") {
+		for (let c = narrowBounds.right; c >= narrowBounds.left; c -= 1) {
+			if (narrowScreen.cellAt(narrowBounds.top, c)?.char === "×") {
 				narrowCloseCol = c;
 				break;
 			}
@@ -169,9 +171,10 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		}
 
 		const bounds = findModalBounds(screen0);
+		expect(screen0.rowText(bounds.top)).toContain("[×]");
 		let closeCol = -1;
-		for (let c = bounds.left; c <= bounds.right; c += 1) {
-			if (screen0.cellAt(bounds.top, c)?.char === "✕") {
+		for (let c = bounds.right; c >= bounds.left; c -= 1) {
+			if (screen0.cellAt(bounds.top, c)?.char === "×") {
 				closeCol = c;
 				break;
 			}
@@ -225,9 +228,10 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 			await harness.mouseMove(1, 1);
 			const s = harness.screen();
 			const b = findModalBounds(s);
+			expect(s.rowText(b.top)).toContain("[×]");
 			let xCol = -1;
-			for (let c = b.left; c <= b.right; c += 1) {
-				if (s.cellAt(b.top, c)?.char === "✕") {
+			for (let c = b.right; c >= b.left; c -= 1) {
+				if (s.cellAt(b.top, c)?.char === "×") {
 					xCol = c;
 					break;
 				}
@@ -240,9 +244,10 @@ describe("Modal Card dialogs and adaptive theme surfaces (real InteractiveMode)"
 		await harness.resize(50, 32);
 		const narrow = harness.screen();
 		const nb = findModalBounds(narrow);
+		expect(narrow.rowText(nb.top)).toContain("[×]");
 		let nxCol = -1;
-		for (let c = nb.left; c <= nb.right; c += 1) {
-			if (narrow.cellAt(nb.top, c)?.char === "✕") {
+		for (let c = nb.right; c >= nb.left; c -= 1) {
+			if (narrow.cellAt(nb.top, c)?.char === "×") {
 				nxCol = c;
 				break;
 			}

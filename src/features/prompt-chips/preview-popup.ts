@@ -16,6 +16,7 @@ import {
 	fgRgb,
 	getThemeSurfacePalette,
 	isLightTheme,
+	paintRawThemeSurfaceRow,
 	paintThemeSurfaceRow,
 	type HitBox,
 	type RgbTuple,
@@ -448,11 +449,11 @@ export class PromptChipPreviewPopup implements Component {
 
 		const out: string[] = [topRow];
 
-		/* Миниатюра Kitty/iTerm2 вставляется без truncateToWidth, чтобы не повредить графические escape-последовательности */
+		/* Миниатюра Kitty/iTerm2 вставляется без truncateToWidth, но с тем же фоном popupBg на всех строках */
 		for (const thumbLine of thumbLines) {
 			if (thumbLine.includes("\x1b_G") || thumbLine.includes("\x1b]1337;File=")) {
 				const pad = " ".repeat(textWidth);
-				out.push(`${b("│")} ${thumbLine}${pad} ${b("│")}`);
+				out.push(paintRawThemeSurfaceRow(theme, `${b("│")} ${thumbLine}${pad} ${b("│")}`, popupBg));
 			} else {
 				const pad = " ".repeat(textWidth);
 				out.push(paintThemeSurfaceRow(theme, `${b("│")} ${pad} ${b("│")}`, safeWidth, popupBg));
