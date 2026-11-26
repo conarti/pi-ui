@@ -288,6 +288,9 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await harness.pressKey("\x16");
 		await flushClipboardAction(harness);
 
+		expect(harness.screen().text()).not.toContain("architecture-shot.png");
+		const chip = harness.screen().findText("[🖼 Image #1]")!;
+		await harness.mouseMove(chip.col + 2, chip.row);
 		const afterImageText = harness.screen().text();
 		expect(hasBlockingModalOverlay(harness.tui)).toBe(false);
 		expect(afterImageText).toContain("architecture-shot.png");
@@ -295,6 +298,7 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		expect(afterImageText).toContain("75B");
 		expect(afterImageText).toContain("Path: ");
 
+		await harness.mouseMove(85, chip.row);
 		await harness.typeText(" notes");
 		expect(harness.screen().text()).not.toContain("architecture-shot.png");
 
@@ -661,6 +665,8 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		expect(editor.getText()).toBe(" [🖼 Image #1]");
 
 		await harness.pressKey("\x05");
+		const bmpChip = harness.screen().findText("[🖼 Image #1]")!;
+		await harness.mouseMove(bmpChip.col + 2, bmpChip.row);
 		const bmpPreviewText = harness.screen().text();
 		expect(bmpPreviewText).toContain("diagram.bmp");
 		expect(bmpPreviewText).toContain("4×3");
@@ -844,6 +850,10 @@ describe("Prompt Chips end-to-end (real InteractiveMode)", () => {
 		await harness.pressKey("\x16");
 		await flushClipboardAction(harness);
 		await harness.pressKey("\x1b[D");
+		const boundaryRow = findComposerTopRow(harness) + 2;
+		const boundaryCol = harness.screen().rowText(boundaryRow).indexOf("[🖼 Image #1]");
+		expect(boundaryCol).toBeGreaterThanOrEqual(0);
+		await harness.mouseMove(boundaryCol + 2, boundaryRow);
 		const boundaryScreen = harness.screen();
 		const wrapHit = boundaryScreen.findText("wrap-check.png");
 		expect(wrapHit).toBeDefined();

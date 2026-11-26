@@ -367,7 +367,7 @@ export function registerPromptChipsFeature(pi: ExtensionAPI): void {
 		}
 
 		const caretMatch = findCaretComposerChip(editor, registry, tui);
-		if (caretMatch) {
+		if (caretMatch && caretMatch.chip.kind !== "image") {
 			const topRow = resolveComposerTopRow(tui, editor, lastPointer);
 			overlayController.show(tui, caretMatch.chip, "composer-caret", {
 				col: caretMatch.col,
