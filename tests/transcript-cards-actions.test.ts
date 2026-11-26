@@ -252,7 +252,12 @@ describe("Skill Chip absorption, SKILL.md Hover Popup, Outline Rail preview, and
 		expect(stickyChipCol).toBeGreaterThan(2);
 		await harness.mouseClick(stickyChipCol + 1, 4);
 		expect(harness.screen().text()).toContain("skill-rule-01");
-		await harness.pressKey("\x1b");
+		const skillCloseHit = harness.screen().findText("[×]")!;
+		expect(skillCloseHit).toBeDefined();
+		const closeFgBefore = harness.screen().cellAt(skillCloseHit.row, skillCloseHit.col + 1)?.fg;
+		await harness.mouseMove(skillCloseHit.col + 1, skillCloseHit.row);
+		expect(harness.screen().cellAt(skillCloseHit.row, skillCloseHit.col + 1)?.fg).not.toEqual(closeFgBefore);
+		await harness.mouseClick(skillCloseHit.col + 1, skillCloseHit.row);
 		expect(harness.screen().text()).not.toContain("skill-rule-01");
 
 		/* В Outline Rail предпросмотр показывает /<skill> · <text> */
@@ -744,5 +749,16 @@ describe("Link [text](url) and file path:line [Open] [Copy] Hover Popups", () =>
 		const previewBodyAfter = harness.screen().findText("│ First prompt in history")!;
 		expect(previewBodyAfter).toBeDefined();
 		expect(harness.screen().rowText(previewBodyAfter.row - 1)).not.toContain("26 Nov, 16:27");
+
+		/* Включение обратно через Command Palette (Ctrl+K -> Outline Timestamps) */
+		await harness.mouseMove(10, 10);
+		await harness.pressKey("\x0b");
+		await harness.typeText("Outline Timestamps");
+		await harness.pressKey("\r");
+		const geoReenabled = (getActiveHostRuntime()!.viewportSlots!.rightRail as OutlineRailComponent).geometry!;
+		await harness.mouseMove(99, 3 + geoReenabled.ticksY);
+		const previewBodyReenabled = harness.screen().findText("│ First prompt in history")!;
+		expect(previewBodyReenabled).toBeDefined();
+		expect(harness.screen().rowText(previewBodyReenabled.row - 1)).toContain("26 Nov, 16:27");
 	});
 });
