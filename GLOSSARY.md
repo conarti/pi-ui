@@ -37,36 +37,52 @@ The active `Turn`'s user prompt card pinned at the top edge of the transcript vi
 _Avoid_: Pinned header, prompt banner, sticky toolbar
 
 **Outline Rail**:
-The narrow navigation strip immediately to the left of the rightmost transcript scrollbar displaying `Turn` ticks, scroll-jump arrows, and a `Hover Popup` preview.
+The narrow right-margin navigation strip displaying `Turn` ticks, scroll-jump arrows, and a `Hover Popup` preview in place of a blocky transcript scrollbar.
 _Avoid_: Timeline gutter, minimap, custom scrollbar
 
 **Prompt Chip**:
 An atomic inline pill representing an attached image, pasted text block, or quoted passage inside the composer draft and the submitted user prompt card.
 _Avoid_: Attachment path, paste marker, quote widget
 
+**Skill Chip**:
+An inline clickable pill representing an invoked skill inside a submitted user prompt card or `Sticky Prompt`, opening its skill document in a `Hover Popup`.
+_Avoid_: Skill invocation banner, raw skill XML
+
 **Prompt Suggestion**:
 A dimmed predicted follow-up reply shown inside an empty composer draft after an assistant response completes, ready to accept into the draft or dismiss.
 _Avoid_: Next prompt, ghost text, inline autocomplete
 
 **Tool Density**:
-The transcript verbosity preset (`Detailed`, `Diff Focus`, or `Compact`) governing whether completed file diffs and command output previews stay visible inline or fold into summary rows alongside grouped read/search explorations.
+The transcript verbosity preset (`Balanced` by default, `Compact`, `Grouped`, `Diff Focus`, or `Detailed`) governing how read/search explorations, file diffs, and command outputs fold or stay visible inline.
 _Avoid_: Tool theme, compact mode, vendor style
+
+**Response Metrics**:
+The quiet end-of-turn summary row beneath an assistant reply showing total turn duration, revealing first-token latency and streaming throughput on hover, and opening session usage statistics on click.
+_Avoid_: Stamp footer, step timer, token footer
 
 ### Overlays
 
 **Modal Card**:
-A framed, focus-capturing dialog centered over the viewport (Command Palette, `Settings Modal`, Context Inspector, permission prompt) that blocks other modal dialogs until closed.
+A framed, focus-capturing dialog centered over the viewport (Command Palette, `Settings Modal`, `Context Inspector`, permission prompt) that blocks other modal dialogs until closed.
 _Avoid_: Popup, toast, inline widget
 
 **Settings Modal**:
 The categorized, type-to-filter `Modal Card` for inspecting, live-previewing, toggling, and resetting host and interface preferences in one place.
 _Avoid_: Config file editor, raw selector
 
+**Context Inspector**:
+The three-tab `Modal Card` (`Context usage`, `Session usage`, and `Session info`) presenting active context window breakdown, per-turn token/latency/cost telemetry, and session metadata.
+_Avoid_: Stats popup, raw token dump
+
 **Hover Popup**:
 A transient, non-capturing overlay anchored near a hovered element or text selection (such as the `Outline Rail` preview, `Prompt Chip` preview, or selection quote action) that never steals input focus or blocks a `Modal Card`.
 _Avoid_: Modal, dialog
 
 ### Chrome & Appearance
+
+**Shortcuts Bar**:
+The optional single-line context-sensitive hint strip beneath the composer or an active blocking card displaying non-obvious keyboard shortcuts and clickable actions for the current focus state.
+_Avoid_: Footer bar, keybind legend, static help row
 
 **Status Bar**:
 The bottom session strip showing workspace path, git branch, active turn timer, context window usage, model, thinking level, and filtered extension badges.
@@ -75,3 +91,9 @@ _Avoid_: Powerline widget, statusline plugin
 **Appearance Mode**:
 Whether the interface follows the operating system's light and dark appearance automatically using a configured theme pair (`Auto`) or stays pinned to a single theme.
 _Avoid_: Terminal palette sync, dark-mode hack
+
+### Extensions
+
+**Slot Arbitration**:
+The user-governed choice of which extension owns a contended host UI capability (such as header, footer, composer, working indicator, command, shortcut, or renderer) when `@conarti/pi-ui` and a third-party extension register for the same slot.
+_Avoid_: Plugin blocklist, extension conflict hack, last-writer-wins
